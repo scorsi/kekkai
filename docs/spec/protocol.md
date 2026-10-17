@@ -461,7 +461,11 @@ Per peer, a party holds at most three slots:
 | --- | --- |
 | `current` | the session used for sending |
 | `previous` | the session `current` replaced, kept to absorb reordering until it expires |
-| `next` | a responder-side session that has not yet received its first packet, or the initiator-side in-flight handshake state |
+| `next` | a responder-side session that has not yet received its first packet |
+
+The initiator-side in-flight handshake state (§7.9) is held beside the slots, not in one of
+them, so that a concurrent initiation (§7.8) keeps both the peer's message 1 and the party's
+own handshake: at most three sessions plus one in-flight handshake per peer (§17, ADR 0008).
 
 A session is **live** while `now − created < REJECT_AFTER_TIME` and its receive counter
 state has not reached `REJECT_AFTER_MESSAGES`. Data is accepted on any live session in any
@@ -1020,9 +1024,11 @@ by an independent reference implementation of this document written for that pur
 first checked against `noise_ikpsk2.json` (messages, handshake hash and transport
 messages all match) and against the RFC 7748 public keys; its output is a pure function of
 the inputs listed in the files and was generated twice with identical results. From v0.1b
-on, `kekkai-core`'s test suite is the generator of record: a spec change regenerates the
-files from the Rust implementation and the diff is reviewed with the change (ADR 0003).
-The published Noise vector is never regenerated.
+on, `kekkai-core`'s test suite is the generator of record: every test recomputes the outputs
+of its file from the inputs listed there and fails unless the file reproduces byte for byte;
+after a spec change, `KEKKAI_WRITE_VECTORS=1 cargo test -p kekkai-core` rewrites the files
+from the Rust implementation and the diff is reviewed with the change (ADR 0003). The
+published Noise vector is never regenerated.
 
 Rejection vectors name a `reason`; implementations are free in how they report it, but the
 packet MUST produce no output (§16).

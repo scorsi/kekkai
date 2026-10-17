@@ -1,5 +1,5 @@
 {
-  "description": "Outer header parsing and inner message encodings (protocol.md, Wire format and Inner protocol). Inner plaintexts are what the transport AEAD encrypts: inner_type (1) | body.",
+  "description": "Outer header parsing and inner message encodings (protocol.md, Wire format and Inner protocol). Accepted data headers carry a placeholder ciphertext so the datagram reaches the minimum length of its type (Parsing and dropping, step 4). Inner plaintexts are what the transport AEAD encrypts: inner_type (1) | body.",
   "wire_version": 1,
   "outer_types": {
     "handshake_init": 1,
@@ -40,7 +40,7 @@
   "outer_headers": [
     {
       "name": "data header",
-      "bytes": "04010000112233440000000000000007",
+      "bytes": "040100001122334400000000000000070000000000000000000000000000000000",
       "result": "ok",
       "fields": {
         "type": 4,
@@ -51,7 +51,7 @@
     },
     {
       "name": "reserved bytes are ignored on receipt",
-      "bytes": "0401ffff112233440000000000000007",
+      "bytes": "0401ffff1122334400000000000000070000000000000000000000000000000000",
       "result": "ok",
       "fields": {
         "type": 4,

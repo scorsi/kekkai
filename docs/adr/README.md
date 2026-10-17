@@ -33,5 +33,6 @@ Statuses: **Accepted** (decided on 2026-10-13 unless noted), **Proposed**, **Ope
 | 0025 | License and public documentation policy                 | Accepted |
 | 0026 | Deploying over the overlay                              | Accepted |
 | 0027 | Future work and the constraints it imposes on v0        | Accepted |
+| 0028 | Non-cryptographic dependencies of kekkai-core           | Proposed |
 
 Deployment-specific values (overlay prefixes, peers, public keys, which host carries which role, accepted host-level risks) are not recorded here: see 0025.

@@ -35,6 +35,8 @@
             ../Cargo.toml
             ../Cargo.lock
             ../proto
+            # kekkai-core's tests load the vectors relative to CARGO_MANIFEST_DIR (spec §19).
+            ../docs/spec/vectors
           ];
         };
       };

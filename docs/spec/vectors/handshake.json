@@ -98,9 +98,9 @@
       "reason": "unknown_version"
     },
     {
-      "name": "message 1 truncated by one byte",
+      "name": "message 1 truncated by one byte (150 bytes is a valid length, so mac1 fails first)",
       "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10c03064ebe1a400135f23be81d62a6fe000000000000000000000000000000",
-      "reason": "bad_length"
+      "reason": "bad_mac1"
     },
     {
       "name": "message 1 to the wrong receiver (mac1 keyed on the initiator's key)",
