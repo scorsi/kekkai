@@ -1,0 +1,168 @@
+{
+  "description": "Outer header parsing and inner message encodings (protocol.md, Wire format and Inner protocol). Inner plaintexts are what the transport AEAD encrypts: inner_type (1) | body.",
+  "wire_version": 1,
+  "outer_types": {
+    "handshake_init": 1,
+    "handshake_resp": 2,
+    "cookie_reply": 3,
+    "data": 4
+  },
+  "inner_types": {
+    "ip_packet": 1,
+    "keepalive": 2,
+    "lighthouse_register": 3,
+    "lighthouse_query": 4,
+    "lighthouse_query_reply": 5,
+    "lighthouse_punch": 6,
+    "relay_forward": 7,
+    "relay_forwarded": 8
+  },
+  "lighthouse_tlv_types": {
+    "pubkey": 1,
+    "endpoints": 2,
+    "last_seen": 3
+  },
+  "handshake_tlv_types": {
+    "timestamp": 1
+  },
+  "endpoints": [
+    {
+      "address": "192.0.2.10",
+      "port": 4802,
+      "bytes": "00000000000000000000ffffc000020a12c2"
+    },
+    {
+      "address": "2001:db8::10",
+      "port": 4802,
+      "bytes": "20010db800000000000000000000001012c2"
+    }
+  ],
+  "outer_headers": [
+    {
+      "name": "data header",
+      "bytes": "04010000112233440000000000000007",
+      "result": "ok",
+      "fields": {
+        "type": 4,
+        "version": 1,
+        "receiver_index": 287454020,
+        "counter": 7
+      }
+    },
+    {
+      "name": "reserved bytes are ignored on receipt",
+      "bytes": "0401ffff112233440000000000000007",
+      "result": "ok",
+      "fields": {
+        "type": 4,
+        "version": 1,
+        "receiver_index": 287454020,
+        "counter": 7
+      }
+    },
+    {
+      "name": "version 0",
+      "bytes": "04000000112233440000000000000007",
+      "result": "drop",
+      "reason": "unknown_version"
+    },
+    {
+      "name": "version 2",
+      "bytes": "04020000112233440000000000000007",
+      "result": "drop",
+      "reason": "unknown_version"
+    },
+    {
+      "name": "type 0",
+      "bytes": "00010000112233440000000000000007",
+      "result": "drop",
+      "reason": "unknown_type"
+    },
+    {
+      "name": "type 5",
+      "bytes": "05010000112233440000000000000007",
+      "result": "drop",
+      "reason": "unknown_type"
+    },
+    {
+      "name": "cookie_reply is reserved: dropped in v0",
+      "bytes": "03010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "result": "drop",
+      "reason": "unknown_type"
+    },
+    {
+      "name": "shorter than a header",
+      "bytes": "040100",
+      "result": "drop",
+      "reason": "bad_length"
+    },
+    {
+      "name": "empty datagram",
+      "bytes": "",
+      "result": "drop",
+      "reason": "bad_length"
+    }
+  ],
+  "inner_messages": [
+    {
+      "name": "keepalive",
+      "inner_type": 2,
+      "body": "",
+      "plaintext": "02"
+    },
+    {
+      "name": "ip_packet",
+      "inner_type": 1,
+      "body": "6000000000083afffd000000000000000000000000000001fd000000000000000000000000000002800085b800000000",
+      "plaintext": "016000000000083afffd000000000000000000000000000001fd000000000000000000000000000002800085b800000000"
+    },
+    {
+      "name": "lighthouse_register",
+      "inner_type": 3,
+      "body": "02002400000000000000000000ffffc000020a12c220010db800000000000000000000001012c2",
+      "plaintext": "0302002400000000000000000000ffffc000020a12c220010db800000000000000000000001012c2"
+    },
+    {
+      "name": "lighthouse_register with no local endpoint",
+      "inner_type": 3,
+      "body": "",
+      "plaintext": "03"
+    },
+    {
+      "name": "lighthouse_query",
+      "inner_type": 4,
+      "body": "0100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e31",
+      "plaintext": "040100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e31"
+    },
+    {
+      "name": "lighthouse_query_reply, known peer (observed endpoint first, then its local endpoints, last seen 12 s ago)",
+      "inner_type": 5,
+      "body": "0100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e3102003600000000000000000000ffffc63364079cbb00000000000000000000ffffc000020a12c220010db800000000000000000000001012c20300040000000c",
+      "plaintext": "050100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e3102003600000000000000000000ffffc63364079cbb00000000000000000000ffffc000020a12c220010db800000000000000000000001012c20300040000000c"
+    },
+    {
+      "name": "lighthouse_query_reply, unknown or expired peer",
+      "inner_type": 5,
+      "body": "0100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e31",
+      "plaintext": "050100206aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e31"
+    },
+    {
+      "name": "lighthouse_punch",
+      "inner_type": 6,
+      "body": "010020e4bb3f5734f888d4198be8bead06570c245a318886c60b5f3dd977b975d3d84f02002400000000000000000000ffffc63364079cbb00000000000000000000ffffc000020a12c2",
+      "plaintext": "06010020e4bb3f5734f888d4198be8bead06570c245a318886c60b5f3dd977b975d3d84f02002400000000000000000000ffffc63364079cbb00000000000000000000ffffc000020a12c2"
+    },
+    {
+      "name": "relay_forward",
+      "inner_type": 7,
+      "body": "6aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e3104010000112233440000000000000007000102030405060708090a0b0c0d0e0f10",
+      "plaintext": "076aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e3104010000112233440000000000000007000102030405060708090a0b0c0d0e0f10"
+    },
+    {
+      "name": "relay_forwarded",
+      "inner_type": 8,
+      "body": "e4bb3f5734f888d4198be8bead06570c245a318886c60b5f3dd977b975d3d84f04010000112233440000000000000007000102030405060708090a0b0c0d0e0f10",
+      "plaintext": "08e4bb3f5734f888d4198be8bead06570c245a318886c60b5f3dd977b975d3d84f04010000112233440000000000000007000102030405060708090a0b0c0d0e0f10"
+    }
+  ]
+}

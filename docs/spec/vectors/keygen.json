@@ -1,0 +1,45 @@
+{
+  "description": "kekkai keygen / pubkey vectors (protocol.md, Identity keys). keygen writes 32 random bytes in clamped form; pubkey accepts any 32 bytes and returns X25519(private, 9), which clamps internally, so `private_key` and `private_key_clamped` give the same public key (the RFC 7748 keys are stored unclamped). Text form: standard base64 with padding, one line.",
+  "keys": [
+    {
+      "name": "rfc7748 alice",
+      "private_key": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "private_key_clamped": "70076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c6a",
+      "public_key": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "private_key_base64": "dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo=",
+      "public_key_base64": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+    },
+    {
+      "name": "rfc7748 bob",
+      "private_key": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+      "private_key_clamped": "58ab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e06b",
+      "public_key": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "private_key_base64": "XasIfmJKikt54X+Lg4AO5m87sSkmGLb9HC+LJ/+I4Os=",
+      "public_key_base64": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08="
+    },
+    {
+      "name": "kekkai 1",
+      "private_key": "18d5361c99fdaa767aac5e1b7c4ba8bbec2e9e5f3ebbd4674ce6bef5dfd2d55b",
+      "private_key_clamped": "18d5361c99fdaa767aac5e1b7c4ba8bbec2e9e5f3ebbd4674ce6bef5dfd2d55b",
+      "public_key": "b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a",
+      "private_key_base64": "GNU2HJn9qnZ6rF4bfEuou+wunl8+u9RnTOa+9d/S1Vs=",
+      "public_key_base64": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo="
+    },
+    {
+      "name": "kekkai 2",
+      "private_key": "e008d0fc987dd023f2913451fcdfa5165408507582d6a7969dbf96c2cf3fdd41",
+      "private_key_clamped": "e008d0fc987dd023f2913451fcdfa5165408507582d6a7969dbf96c2cf3fdd41",
+      "public_key": "1d97a47e3d79a208c97184a44f576e6e3041ed3c24fb73fafe7f9f1c5975e07a",
+      "private_key_base64": "4AjQ/Jh90CPykTRR/N+lFlQIUHWC1qeWnb+Wws8/3UE=",
+      "public_key_base64": "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho="
+    }
+  ],
+  "clamping": {
+    "name": "unclamped input",
+    "note": "32 bytes as drawn before clamping; keygen writes the clamped form, pubkey accepts either and derives the same public key",
+    "random_bytes": "ba7e3b0a488ad6be23c301b794cb597bb3be98dc10762ed3178f964b7b142b14",
+    "private_key": "b87e3b0a488ad6be23c301b794cb597bb3be98dc10762ed3178f964b7b142b54",
+    "public_key": "0a1e4fb4a709eef035a3cfdebdcf30ef124229fd0245f2622e3f99c184e44a01",
+    "public_key_of_unclamped_input": "0a1e4fb4a709eef035a3cfdebdcf30ef124229fd0245f2622e3f99c184e44a01"
+  }
+}

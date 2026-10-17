@@ -1,0 +1,91 @@
+{
+  "description": "Receive-side replay window (protocol.md, Replay protection), one receiving session, counters checked in this order from a fresh window.",
+  "counter_window_size": 8128,
+  "reject_after_messages": "18446744073709543487",
+  "sequence": [
+    {
+      "counter": "0",
+      "accept": true
+    },
+    {
+      "counter": "1",
+      "accept": true
+    },
+    {
+      "counter": "1",
+      "accept": false
+    },
+    {
+      "counter": "3",
+      "accept": true
+    },
+    {
+      "counter": "2",
+      "accept": true
+    },
+    {
+      "counter": "2",
+      "accept": false
+    },
+    {
+      "counter": "0",
+      "accept": false
+    },
+    {
+      "counter": "10000",
+      "accept": true
+    },
+    {
+      "counter": "1872",
+      "accept": false
+    },
+    {
+      "counter": "1873",
+      "accept": true
+    },
+    {
+      "counter": "1873",
+      "accept": false
+    },
+    {
+      "counter": "9999",
+      "accept": true
+    },
+    {
+      "counter": "9999",
+      "accept": false
+    },
+    {
+      "counter": "1048576",
+      "accept": true
+    },
+    {
+      "counter": "1048575",
+      "accept": true
+    },
+    {
+      "counter": "1040449",
+      "accept": true
+    },
+    {
+      "counter": "1040448",
+      "accept": false
+    },
+    {
+      "counter": "18446744073709543487",
+      "accept": false
+    },
+    {
+      "counter": "18446744073709543486",
+      "accept": true
+    },
+    {
+      "counter": "18446744073709543486",
+      "accept": false
+    },
+    {
+      "counter": "18446744073709543485",
+      "accept": true
+    }
+  ]
+}

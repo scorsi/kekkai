@@ -1,0 +1,131 @@
+{
+  "description": "Complete kekkai handshake and first data packets (protocol.md, Handshake and Data). Deterministic: static and ephemeral keys, indices and the timestamp are inputs. Transport nonce: 4 zero bytes then the counter little endian; associated data empty.",
+  "noise_protocol": "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s",
+  "wire_version": 1,
+  "prologue": "6b656b6b616901",
+  "psk": "0000000000000000000000000000000000000000000000000000000000000000",
+  "initiator": {
+    "static_private": "d045e8e281b29a28deb57e68ec077ab88dbc73b6b9c4a9258a9b4688afe5ad63",
+    "static_public": "e4bb3f5734f888d4198be8bead06570c245a318886c60b5f3dd977b975d3d84f",
+    "ephemeral_private": "10f1e9a7567866f3b6615064e40d2b93ccdbb12a6075f6d637699223f1c29868",
+    "ephemeral_public": "77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3c",
+    "sender_index": 3827897774
+  },
+  "responder": {
+    "static_private": "f0b12df9ae9011b19ab59171cdc5311489860c5095fd7861cd4c64d5d5f51541",
+    "static_public": "6aad0180fc808c4b87e72d10401469320f41977bbfefacece5fc2f53b98a5e31",
+    "ephemeral_private": "28ad1845f7f3ae3d8034e74823556da55609b75c9c34976875bb230e058fb66b",
+    "ephemeral_public": "feb3564ed3ac4f84353adca33b16053d4156f8916ac135dc5e51a5c3dfcda35d",
+    "sender_index": 1496236940
+  },
+  "timestamp": {
+    "unix_seconds": 1767225600,
+    "nanoseconds": 20000000,
+    "tai64n": "400000006955b90a01000000"
+  },
+  "message_1": {
+    "payload_tlvs": "01000c400000006955b90a01000000",
+    "noise_message": "77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a1",
+    "mac1_key": "7b96c9cdd49b4ae553cc35389c5cf8939e2ebb7cc21d240ca8a757b618968f05",
+    "mac1": "0c03064ebe1a400135f23be81d62a6fe",
+    "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10c03064ebe1a400135f23be81d62a6fe00000000000000000000000000000000"
+  },
+  "message_2": {
+    "payload_tlvs": "",
+    "noise_message": "feb3564ed3ac4f84353adca33b16053d4156f8916ac135dc5e51a5c3dfcda35ddb5fe8fab2774bf418bdd8f310b328e3",
+    "mac1_key": "13cdfec74139ab328c168fdfa2833b8a32029163a594449e3be8abd482f032ab",
+    "mac1": "b2befdf3b57925f8c3ce8846f2d1374c",
+    "datagram": "02010000592ec38ce42915aefeb3564ed3ac4f84353adca33b16053d4156f8916ac135dc5e51a5c3dfcda35ddb5fe8fab2774bf418bdd8f310b328e3b2befdf3b57925f8c3ce8846f2d1374c00000000000000000000000000000000"
+  },
+  "handshake_hash": "bed43d27c1ef2f43dc49a063f7d3dc415941a602e0dd0235b000c3969f37c97d",
+  "transport_keys": {
+    "initiator_to_responder": "ea4800091820e20171d43f56af1baeac1c601e43be306f01144bf5da1c23cf5a",
+    "responder_to_initiator": "18d3c8ed9b36bb88f418afabda9c7a333cb2b666ca976235ff641499a0803040"
+  },
+  "data_packets": [
+    {
+      "name": "initiator keepalive right after completion",
+      "direction": "initiator_to_responder",
+      "counter": 0,
+      "inner_type": 2,
+      "body": "",
+      "receiver_index": 1496236940,
+      "datagram": "04010000592ec38c000000000000000032821231134fbac7f70cfd6459f15e01e8"
+    },
+    {
+      "name": "initiator ip_packet",
+      "direction": "initiator_to_responder",
+      "counter": 1,
+      "inner_type": 1,
+      "body": "4500001c00010000400166de0a0000010a0000020800f7ff00000000",
+      "receiver_index": 1496236940,
+      "datagram": "04010000592ec38c000000000000000164b917cab74b9bf8b7ebabdd0d465b8488f721efdec5bba5ba8667fc127f29ba26bf7916438ba4298aca378adf"
+    },
+    {
+      "name": "responder keepalive (passive)",
+      "direction": "responder_to_initiator",
+      "counter": 0,
+      "inner_type": 2,
+      "body": "",
+      "receiver_index": 3827897774,
+      "datagram": "04010000e42915ae00000000000000000101ad2deca0fccebbaff92f4045f548d2"
+    },
+    {
+      "name": "largest counter accepted",
+      "direction": "initiator_to_responder",
+      "counter": 18446744073709543486,
+      "inner_type": 2,
+      "body": "",
+      "receiver_index": 1496236940,
+      "datagram": "04010000592ec38cffffffffffffe03e4d10b9020ddf0865dd85e8e1cf17a41720"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "message 1 replayed (same timestamp)",
+      "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10c03064ebe1a400135f23be81d62a6fe00000000000000000000000000000000",
+      "after": "message_1 accepted",
+      "reason": "timestamp_not_newer"
+    },
+    {
+      "name": "message 1 with a bad mac1",
+      "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10000000000000000000000000000000000000000000000000000000000000000",
+      "reason": "bad_mac1"
+    },
+    {
+      "name": "message 1 with version 2 (mac1 recomputed, prologue mismatch)",
+      "datagram": "01020000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a130cf50e622cb0f449ea178b9324e0dcb00000000000000000000000000000000",
+      "reason": "unknown_version"
+    },
+    {
+      "name": "message 1 truncated by one byte",
+      "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10c03064ebe1a400135f23be81d62a6fe000000000000000000000000000000",
+      "reason": "bad_length"
+    },
+    {
+      "name": "message 1 to the wrong receiver (mac1 keyed on the initiator's key)",
+      "datagram": "01010000e42915ae77049367be5824864b553b445a38fe8649a4a926c3323e9f10f3277266c6bd3ca6c2bef8ddeea2a64003f5d68b7fa7ec699fabe98274a63619c3c8084389477aa904d6139aabd162a1ef8dc6b74dc76ae0b6cd070208e546ac0e4d34cccfbe889e95acb25989f158628292c61041a10efdd4924e00d081ccbcabf3e07810d000000000000000000000000000000000",
+      "reason": "bad_mac1"
+    },
+    {
+      "name": "data packet with a flipped ciphertext byte",
+      "datagram": "04010000592ec38c000000000000000032821231124fbac7f70cfd6459f15e01e8",
+      "reason": "bad_tag"
+    },
+    {
+      "name": "data packet with a flipped counter byte",
+      "datagram": "04010000592ec38c000000000000000132821231134fbac7f70cfd6459f15e01e8",
+      "reason": "bad_tag"
+    },
+    {
+      "name": "data packet shorter than 33 bytes",
+      "datagram": "04010000592ec38c000000000000000032821231134fbac7f70cfd6459f15e01",
+      "reason": "bad_length"
+    },
+    {
+      "name": "data counter at REJECT_AFTER_MESSAGES",
+      "datagram": "04010000592ec38cffffffffffffe03f84487a4870906f4317b0e3014e81c719d8",
+      "reason": "counter_rejected"
+    }
+  ]
+}

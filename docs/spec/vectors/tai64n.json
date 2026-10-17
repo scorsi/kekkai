@@ -1,0 +1,74 @@
+{
+  "description": "TAI64N handshake timestamps (protocol.md, Timestamp). seconds: 0x400000000000000a + unix seconds, 8 bytes big endian; nanoseconds aligned down to a multiple of 2^24, 4 bytes big endian. A responder accepts a timestamp only if it is bytewise greater than the last accepted one from the same static key.",
+  "nanosecond_alignment": 16777216,
+  "cases": [
+    {
+      "name": "unix epoch",
+      "unix_seconds": 0,
+      "nanoseconds": 0,
+      "tai64n": "400000000000000a00000000"
+    },
+    {
+      "name": "one second, nanoseconds below the alignment are dropped",
+      "unix_seconds": 1,
+      "nanoseconds": 16777215,
+      "tai64n": "400000000000000b00000000"
+    },
+    {
+      "name": "exact alignment boundary",
+      "unix_seconds": 1,
+      "nanoseconds": 16777216,
+      "tai64n": "400000000000000b01000000"
+    },
+    {
+      "name": "2026-01-01T00:00:00Z plus 999999999 ns",
+      "unix_seconds": 1767225600,
+      "nanoseconds": 999999999,
+      "tai64n": "400000006955b90a3b000000"
+    },
+    {
+      "name": "2026-01-01T00:00:00Z plus 20 ms",
+      "unix_seconds": 1767225600,
+      "nanoseconds": 20000000,
+      "tai64n": "400000006955b90a01000000"
+    },
+    {
+      "name": "largest 32-bit unix time",
+      "unix_seconds": 4294967295,
+      "nanoseconds": 123456789,
+      "tai64n": "400000010000000907000000"
+    }
+  ],
+  "comparisons": [
+    {
+      "last_accepted": "400000000000006e00000000",
+      "received": "400000000000006e00000000",
+      "accept": false
+    },
+    {
+      "last_accepted": "400000000000006e00000000",
+      "received": "400000000000006e01000000",
+      "accept": true
+    },
+    {
+      "last_accepted": "400000000000006e01000000",
+      "received": "400000000000006e00000000",
+      "accept": false
+    },
+    {
+      "last_accepted": "400000000000006e3b000000",
+      "received": "400000000000006f00000000",
+      "accept": true
+    },
+    {
+      "last_accepted": "400000000000006f00000000",
+      "received": "400000000000006e3b000000",
+      "accept": false
+    },
+    {
+      "last_accepted": "000000000000000000000000",
+      "received": "400000000000000a00000000",
+      "accept": true
+    }
+  ]
+}

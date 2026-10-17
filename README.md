@@ -13,7 +13,8 @@ Status: **v0.0**, skeleton only, no protocol code yet.
 - `crates/` — Rust libraries: `kekkai-core`, `kekkai-io`, `kekkai-control`.
 - `apps/` — `node`, `lighthouse`, `relay` (Rust binaries) and `cli` (Go module).
 - `nix/` — packages, NixOS and nix-darwin modules, tests, checks.
-- `docs/` — ADRs and the milestone plan.
+- `docs/` — ADRs, the milestone plan, the protocol specification (`docs/spec/`, with test
+  vectors) and the threat model.
 
 ## Building
 

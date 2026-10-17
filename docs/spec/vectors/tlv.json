@@ -1,0 +1,125 @@
+{
+  "description": "TLV lists (protocol.md, TLV encoding): type (1) | length (2, big endian) | value; canonical form: types strictly increasing (full byte, critical bit included), no duplicate. `known_tlvs` is the set the decoder under test understands; the unknown-critical outcome depends on it.",
+  "critical_bit": 128,
+  "encode": [
+    {
+      "name": "empty list",
+      "tlvs": [],
+      "bytes": ""
+    },
+    {
+      "name": "timestamp only (message 1 payload in v0)",
+      "tlvs": [
+        {
+          "type": 1,
+          "value": "400000006955b90a01000000"
+        }
+      ],
+      "bytes": "01000c400000006955b90a01000000"
+    },
+    {
+      "name": "empty value",
+      "tlvs": [
+        {
+          "type": 5,
+          "value": ""
+        }
+      ],
+      "bytes": "050000"
+    },
+    {
+      "name": "two types in increasing order, one critical",
+      "tlvs": [
+        {
+          "type": 1,
+          "value": "aa"
+        },
+        {
+          "type": 129,
+          "value": "bbcc"
+        }
+      ],
+      "bytes": "010001aa810002bbcc"
+    },
+    {
+      "name": "value longer than 255 bytes (two-byte length)",
+      "tlvs": [
+        {
+          "type": 7,
+          "value": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+        }
+      ],
+      "bytes": "07012cabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+    }
+  ],
+  "decode": [
+    {
+      "name": "empty list is canonical",
+      "bytes": "",
+      "result": "ok",
+      "known_tlvs": []
+    },
+    {
+      "name": "timestamp",
+      "bytes": "01000c400000006955b90a01000000",
+      "result": "ok",
+      "known_tlvs": [
+        1
+      ]
+    },
+    {
+      "name": "unknown non-critical TLV is skipped",
+      "bytes": "01000c400000006955b90a01000000090001ff",
+      "result": "ok",
+      "known_tlvs": [
+        1
+      ]
+    },
+    {
+      "name": "unknown critical TLV rejects the message",
+      "bytes": "01000c400000006955b90a01000000890001ff",
+      "result": "error",
+      "error": "unknown_critical"
+    },
+    {
+      "name": "critical bit counts in the ordering: 0x81 after 0x02",
+      "bytes": "0200010081000100",
+      "result": "error",
+      "error": "unknown_critical"
+    },
+    {
+      "name": "decreasing order is not canonical",
+      "bytes": "0200010001000100",
+      "result": "error",
+      "error": "not_canonical"
+    },
+    {
+      "name": "duplicate type is not canonical",
+      "bytes": "0100010001000100",
+      "result": "error",
+      "error": "not_canonical"
+    },
+    {
+      "name": "length beyond the end",
+      "bytes": "01000501",
+      "result": "error",
+      "error": "truncated"
+    },
+    {
+      "name": "truncated header",
+      "bytes": "0100",
+      "result": "error",
+      "error": "truncated"
+    },
+    {
+      "name": "type 0 is unassigned but encodes like any other",
+      "bytes": "000000",
+      "result": "ok",
+      "known_tlvs": [],
+      "note": "skipped as unknown non-critical"
+    }
+  ],
+  "message_1_v0_known_tlvs": [
+    1
+  ]
+}
