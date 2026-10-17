@@ -1,0 +1,9 @@
+[package]
+name = "kekkai-lighthouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kekkai-lighthouse"
+path = "src/main.rs"

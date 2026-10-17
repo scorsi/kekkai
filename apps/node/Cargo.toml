@@ -1,0 +1,9 @@
+[package]
+name = "kekkai-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kekkai-node"
+path = "src/main.rs"

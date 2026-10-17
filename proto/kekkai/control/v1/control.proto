@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package kekkai.control.v1;
+
+option go_package = "github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1";
+
+// Control API served by the node over a Unix socket (0015).
+service ControlService {
+  // Stub in v0.0; the status content is specified by 0015 and lands with kekkai-node.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {}

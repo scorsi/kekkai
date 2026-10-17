@@ -1,0 +1,9 @@
+[package]
+name = "kekkai-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kekkai-relay"
+path = "src/main.rs"

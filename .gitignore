@@ -1,1 +1,14 @@
+# Nix
+result
+result-*
+
+# Rust
+/target
+
+# Go (binaries produced by `go build .` in apps/cli/)
+/apps/cli/cli
+/apps/cli/kekkai
+
+# OS
+.DS_Store
 .claude/napkin.md
