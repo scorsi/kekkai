@@ -34,6 +34,18 @@ pub fn node_config(data: &[u8]) {
     }
 }
 
+/// §15 on arbitrary IP packets: recording and filtering never panic and the table stays
+/// within its bound.
+pub fn firewall(data: &[u8]) {
+    use kekkai_core::firewall::{Firewall, Rule};
+    let mut fw = Firewall::new(2);
+    let now = std::time::Duration::from_secs(1);
+    fw.outbound(now, data);
+    fw.inbound(now, &[], data);
+    fw.inbound(now, &[Rule::Any], data);
+    assert!(fw.status().entries <= 2);
+}
+
 /// `nix flake check` replays the committed corpus deterministically (ADR 0020).
 #[cfg(test)]
 mod replay {
@@ -65,6 +77,11 @@ mod replay {
     #[test]
     fn node_config() {
         replay("node_config", super::node_config);
+    }
+
+    #[test]
+    fn firewall() {
+        replay("firewall", super::firewall);
     }
 
     #[test]

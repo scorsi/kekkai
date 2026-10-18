@@ -17,9 +17,12 @@ use tracing::{info, warn};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
-/// Name of the overlay interface; fixed, not configurable (ADR 0010: annai's resolver module
-/// is pointed at it by the deployment).
+/// Name of the overlay interface on Linux; fixed, not configurable (ADR 0010: annai's
+/// resolver module is pointed at it by the deployment). On macOS the kernel names it `utunN`.
+#[cfg(target_os = "linux")]
 pub const INTERFACE: &str = "kekkai0";
+#[cfg(not(target_os = "linux"))]
+pub const INTERFACE: &str = "utun";
 
 /// ADR 0015.
 #[cfg(target_os = "linux")]
@@ -124,28 +127,30 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         peer_configs.push(PeerConfig {
             public_key,
             addresses,
+            allow_inbound: peer.rules()?,
         });
     }
-    let node = Node::new(key, peer_configs);
+    let mut node = Node::new(key, peer_configs);
+    node.set_udp_flows_max(config.firewall.udp_flows_max);
     let control = control::Control::new(&config, *node.public_key(), clock::monotonic());
     let mtu = config.node.mtu;
-    let tunnel =
+    let (tunnel, interface) =
         open_tunnel(mtu, &config.addresses(), &routes).map_err(|e| format!("{INTERFACE}: {e}"))?;
     let socket = udp::bind(config.node.listen_port)
         .map_err(|e| format!("udp port {}: {e}", config.node.listen_port))?;
-    let listener = systemd::control_listener(Path::new(CONTROL_SOCKET))
+    let listener = systemd::control_listener(Path::new(CONTROL_SOCKET), "kekkai")
         .map_err(|e| format!("{CONTROL_SOCKET}: {e}"))?;
     let state = Arc::new(Mutex::new(State { node, peers }));
     // ADR 0018: READY=1 once the interface exists and the socket is bound.
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
     info!(
-        interface = INTERFACE,
+        interface,
         port = config.node.listen_port,
         peers = config.peers.len(),
         "ready"
     );
     tokio::select! {
-        r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{INTERFACE}: {e}")),
+        r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{interface}: {e}")),
         r = control.serve(state, listener) => r.map_err(|e| format!("control socket: {e}")),
         () = terminate() => Ok(()),
     }
@@ -166,29 +171,18 @@ fn open_tunnel(
     mtu: u16,
     addresses: &[IpAddr],
     routes: &[IpAddr],
-) -> io::Result<kekkai_io::tun::Tun> {
-    kekkai_io::tun::Tun::create(INTERFACE, mtu, addresses, routes)
+) -> io::Result<(kekkai_io::tun::Tun, String)> {
+    let tun = kekkai_io::tun::Tun::create(INTERFACE, mtu, addresses, routes)?;
+    Ok((tun, INTERFACE.into()))
 }
 
-/// macOS `utun` is v0.3.
-#[cfg(not(target_os = "linux"))]
-fn open_tunnel(_: u16, _: &[IpAddr], _: &[IpAddr]) -> io::Result<NoTunnel> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "no TUN support on this platform before v0.3",
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-enum NoTunnel {}
-
-#[cfg(not(target_os = "linux"))]
-impl kekkai_io::Tunnel for NoTunnel {
-    async fn recv(&self, _: &mut [u8]) -> io::Result<usize> {
-        match *self {}
-    }
-
-    async fn send(&self, _: &[u8]) -> io::Result<()> {
-        match *self {}
-    }
+#[cfg(target_os = "macos")]
+fn open_tunnel(
+    mtu: u16,
+    addresses: &[IpAddr],
+    routes: &[IpAddr],
+) -> io::Result<(kekkai_io::utun::Utun, String)> {
+    let utun = kekkai_io::utun::Utun::create(mtu, addresses, routes)?;
+    let name = utun.name().to_owned();
+    Ok((utun, name))
 }

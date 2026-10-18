@@ -56,6 +56,7 @@ async fn two_loops_carry_a_packet_each_way() {
             vec![PeerConfig {
                 public_key: peer_key,
                 addresses: vec![addrs[other]],
+                allow_inbound: vec![kekkai_core::firewall::Rule::Any],
             }],
         );
         let endpoint: SocketAddr = format!("127.0.0.1:{}", ports[other]).parse().unwrap();

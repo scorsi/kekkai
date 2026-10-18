@@ -9,6 +9,7 @@ use std::collections::{BinaryHeap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
+use kekkai_core::firewall::Rule;
 use kekkai_core::keys::{PublicKey, StaticKey};
 use kekkai_core::node::{Node, Output, PeerConfig};
 use kekkai_core::tai64n::Tai64n;
@@ -155,6 +156,7 @@ impl Sim {
                     .map(|j| PeerConfig {
                         public_key: publics[j],
                         addresses: vec![address(j)],
+                        allow_inbound: vec![Rule::Any],
                     })
                     .collect();
                 Host {
@@ -193,6 +195,7 @@ impl Sim {
         PeerConfig {
             public_key: self.hosts[j].key,
             addresses: vec![address(j)],
+            allow_inbound: vec![Rule::Any],
         }
     }
 
@@ -687,4 +690,132 @@ fn long_suspend_then_resume() {
     );
     sim.stream(0, 1, secs(1), secs(310));
     assert_eq!(sim.received(1, 0, secs(300)).len(), 10);
+}
+
+/// An IPv4 packet of `protocol` whose transport header is `header` and whose bytes 28..32
+/// carry the sequence number (as [`ip_packet`] does, so [`origin_of`] reads it back).
+fn transport_packet(src: usize, dst: usize, protocol: u8, header: &[u8], seq: u32) -> Vec<u8> {
+    let (IpAddr::V4(s), IpAddr::V4(d)) = (address(src), address(dst)) else {
+        unreachable!("IPv4 overlay in this harness")
+    };
+    let mut t = header.to_vec();
+    t.resize(t.len().max(12), 0);
+    t[8..12].copy_from_slice(&seq.to_be_bytes());
+    let mut p = vec![0x45, 0, 0, 0, 0, 0, 0, 0, 64, protocol, 0, 0];
+    p.extend_from_slice(&s.octets());
+    p.extend_from_slice(&d.octets());
+    p.extend_from_slice(&t);
+    let len = p.len() as u16;
+    p[2..4].copy_from_slice(&len.to_be_bytes());
+    p
+}
+
+/// A 20-byte TCP header towards `dport` with `flags` (0x02 SYN, 0x10 ACK).
+fn tcp(sport: u16, dport: u16, flags: u8) -> Vec<u8> {
+    let mut t = vec![0; 20];
+    t[0..2].copy_from_slice(&sport.to_be_bytes());
+    t[2..4].copy_from_slice(&dport.to_be_bytes());
+    t[12] = 0x50;
+    t[13] = flags;
+    t
+}
+
+fn udp(sport: u16, dport: u16) -> Vec<u8> {
+    let mut t = vec![0; 8];
+    t[0..2].copy_from_slice(&sport.to_be_bytes());
+    t[2..4].copy_from_slice(&dport.to_be_bytes());
+    t[4..6].copy_from_slice(&12u16.to_be_bytes());
+    t
+}
+
+const SYN: u8 = 0x02;
+const ACK: u8 = 0x10;
+
+/// §15 in the simulation: host 1 lets host 0 reach `tcp/22` and nothing else, and host 2
+/// nothing at all (default deny).
+#[test]
+fn firewall_rules_flows_and_eviction() {
+    let mut sim = Sim::new(8, 3, PERFECT);
+    let rules = |sim: &Sim, j: usize, allow: &[&str]| PeerConfig {
+        allow_inbound: allow.iter().map(|r| r.parse().unwrap()).collect(),
+        ..sim.peer_config(j)
+    };
+    let peers = vec![rules(&sim, 0, &["tcp/22"]), rules(&sim, 2, &[])];
+    sim.hosts[1].node.set_peers(peers);
+    let send = |sim: &mut Sim, from: usize, to: usize, protocol: u8, header: Vec<u8>| {
+        let seq = sim.hosts[from].next_seq;
+        sim.hosts[from].next_seq += 1;
+        let packet = transport_packet(from, to, protocol, &header, seq);
+        sim.send_raw(from, &packet).unwrap();
+        let end = sim.now + secs(1);
+        sim.run_until(end);
+        sim.received(to, from, Duration::ZERO).contains(&seq)
+    };
+    let drops = |sim: &Sim, host: usize, peer: usize| {
+        let status = sim.hosts[host].node.status(&sim.hosts[peer].key).unwrap();
+        status.counters.firewall_drops
+    };
+
+    // TCP: the allowed opener passes, another port and another peer are dropped.
+    assert!(
+        send(&mut sim, 0, 1, 6, tcp(40000, 22, SYN)),
+        "tcp/22 from host 0"
+    );
+    assert!(
+        !send(&mut sim, 0, 1, 6, tcp(40000, 23, SYN)),
+        "tcp/23 from host 0"
+    );
+    assert!(
+        !send(&mut sim, 2, 1, 6, tcp(40000, 22, SYN)),
+        "tcp/22 from host 2"
+    );
+    assert_eq!((drops(&sim, 1, 0), drops(&sim, 1, 2)), (1, 1));
+    assert_eq!(sim.drops(1, DropReason::Firewall).len(), 2);
+    // Non-openers pass without a rule (§15 rule 4), SYN+ACK included.
+    assert!(send(&mut sim, 2, 1, 6, tcp(22, 40000, SYN | ACK)));
+    assert!(send(&mut sim, 2, 1, 6, tcp(22, 40000, ACK)));
+    // ICMP always passes, even from a peer with no rule.
+    assert!(send(&mut sim, 2, 1, 1, vec![8, 0, 0, 0, 0, 0, 0, 0]));
+    // Outbound traffic is never filtered: host 1 reaches anything on host 2 (any rule).
+    assert!(send(&mut sim, 1, 2, 6, tcp(40000, 9999, SYN)));
+
+    // UDP: a reply to a flow host 1 opened passes until UDP_FLOW_TIMEOUT, then is dropped.
+    let opened = sim.now;
+    assert!(send(&mut sim, 1, 2, 17, udp(5000, 53)));
+    assert!(
+        send(&mut sim, 2, 1, 17, udp(53, 5000)),
+        "reply to an open flow"
+    );
+    assert!(
+        !send(&mut sim, 2, 1, 17, udp(53, 5001)),
+        "not the flow's port"
+    );
+    assert!(
+        !send(&mut sim, 2, 1, 17, udp(54, 5000)),
+        "not the flow's peer port"
+    );
+    // Inbound matches do not refresh the entry.
+    sim.stream(2, 1, secs(10), opened + secs(59));
+    assert!(
+        send(&mut sim, 2, 1, 17, udp(53, 5000)),
+        "still open just before 60 s"
+    );
+    sim.run_until(opened + secs(61));
+    assert!(
+        !send(&mut sim, 2, 1, 17, udp(53, 5000)),
+        "expired after 60 s"
+    );
+    let status = sim.hosts[1].node.firewall_status();
+    assert_eq!((status.max, status.evictions), (4096, 0));
+
+    // A full table evicts the entry with the oldest expiry and counts it.
+    sim.hosts[1].node.set_udp_flows_max(2);
+    for port in [6000, 6001, 6002] {
+        assert!(send(&mut sim, 1, 2, 17, udp(port, 53)));
+    }
+    let status = sim.hosts[1].node.firewall_status();
+    assert_eq!((status.entries, status.max, status.evictions), (2, 2, 1));
+    assert!(!send(&mut sim, 2, 1, 17, udp(53, 6000)), "evicted flow");
+    assert!(send(&mut sim, 2, 1, 17, udp(53, 6001)));
+    assert!(send(&mut sim, 2, 1, 17, udp(53, 6002)));
 }

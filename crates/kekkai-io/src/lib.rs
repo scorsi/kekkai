@@ -1,6 +1,6 @@
 //! kekkai-io: the IO layer around `kekkai-core` (ADR 0004, 0023): configuration and key
-//! loading, the UDP socket, the TUN device (`tun` feature, node only) and the loop that drives
-//! the core's `Node`.
+//! loading, the UDP socket, the TUN device (`tun` feature, node only: Linux TUN, macOS
+//! `utun`) and the loop that drives the core's `Node`.
 
 pub mod clock;
 pub mod config;
@@ -9,6 +9,8 @@ pub mod systemd;
 #[cfg(all(feature = "tun", target_os = "linux"))]
 pub mod tun;
 pub mod udp;
+#[cfg(all(feature = "tun", target_os = "macos"))]
+pub mod utun;
 
 use std::collections::HashMap;
 use std::io;

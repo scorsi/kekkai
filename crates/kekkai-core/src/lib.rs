@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+pub mod firewall;
 pub mod handshake;
 pub mod inner;
 pub mod keys;

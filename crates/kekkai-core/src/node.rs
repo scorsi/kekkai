@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use crate::MTU;
+use crate::firewall::{Firewall, FirewallStatus, Rule};
 use crate::handshake::{self, Identity};
 use crate::inner::Inner;
 use crate::keys::{PublicKey, StaticKey};
@@ -19,11 +20,13 @@ use crate::tai64n::Tai64n;
 use crate::tlv::Tlv;
 use crate::wire::{self, DropReason, Outer};
 
-/// One `[[peers]]` entry: the static key and the overlay addresses (`/32` and `/128` only).
+/// One `[[peers]]` entry: the static key, the overlay addresses (`/32` and `/128` only) and
+/// what the peer may reach on this node (§15; empty: ICMP and replies only).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerConfig {
     pub public_key: PublicKey,
     pub addresses: Vec<IpAddr>,
+    pub allow_inbound: Vec<Rule>,
 }
 
 /// What one call produced: datagrams to send, each for the peer that owns the session, and
@@ -59,6 +62,8 @@ pub struct Node {
     indices: IndexTable,
     peers: HashMap<PublicKey, Peer>,
     routes: HashMap<IpAddr, PublicKey>,
+    rules: HashMap<PublicKey, Vec<Rule>>,
+    firewall: Firewall,
 }
 
 /// v0 identity (§4): the key is in the peer list.
@@ -80,6 +85,8 @@ impl Node {
             indices: IndexTable::new(),
             peers: HashMap::new(),
             routes: HashMap::new(),
+            rules: HashMap::new(),
+            firewall: Firewall::default(),
         };
         node.set_peers(peers);
         node
@@ -89,14 +96,26 @@ impl Node {
         &self.public_key
     }
 
+    /// Sets the bound of the firewall table (`firewall.udp_flows_max`, §15); empties it.
+    pub fn set_udp_flows_max(&mut self, max: usize) {
+        self.firewall = Firewall::new(max);
+    }
+
+    pub fn firewall_status(&self) -> FirewallStatus {
+        self.firewall.status()
+    }
+
     /// Replaces the peer list (ADR 0004, 0016): a removed peer loses its sessions (§8.5),
-    /// a kept one keeps them, the routing table is rebuilt.
+    /// a kept one keeps them, the routing table and the firewall rules are rebuilt.
     pub fn set_peers(&mut self, peers: Vec<PeerConfig>) {
         self.routes.clear();
+        self.rules.clear();
         for config in &peers {
             for address in &config.addresses {
                 self.routes.insert(*address, config.public_key);
             }
+            self.rules
+                .insert(config.public_key, config.allow_inbound.clone());
         }
         for (key, peer) in &mut self.peers {
             if !peers.iter().any(|c| c.public_key == *key) {
@@ -138,6 +157,7 @@ impl Node {
             return Err(DropReason::NotUnicast);
         }
         let key = *self.routes.get(&destination).ok_or(DropReason::NoRoute)?;
+        self.firewall.outbound(now, packet);
         let peer = self.peers.get_mut(&key).expect("routes point at peers");
         let mut ctx = Ctx {
             now,
@@ -238,6 +258,10 @@ impl Node {
                         }
                         if self.routes.get(&source) != Some(&key) {
                             return Err(DropReason::SourceNotPeer);
+                        }
+                        if !self.firewall.inbound(now, &self.rules[&key], packet) {
+                            peer.counters.firewall_drops += 1;
+                            return Err(DropReason::Firewall);
                         }
                         output.packets.push(packet.to_vec());
                     }

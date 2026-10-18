@@ -1,5 +1,6 @@
-# Deployment-agnostic modules (0022). The NixOS node module is nix/modules/node.nix (v0.2);
-# the others are options only until their daemon lands.
+# Deployment-agnostic modules (0022). The node modules are nix/modules/node.nix (NixOS, v0.2)
+# and nix/modules/darwin-node.nix (nix-darwin, v0.3); the others are options only until their
+# daemon lands.
 { lib, ... }:
 let
   mk =
@@ -27,6 +28,6 @@ in
       node = ./modules/node.nix;
     }
     // lib.genAttrs [ "lighthouse" "relay" ] (n: mk "kekkai-${n}");
-    darwinModules.node = mk "kekkai-node";
+    darwinModules.node = ./modules/darwin-node.nix;
   };
 }

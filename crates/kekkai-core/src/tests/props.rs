@@ -429,7 +429,7 @@ proptest! {
     fn timer_invariants(ops in ops()) {
         let (ka, kb) = (StaticKey::generate(), StaticKey::generate());
         let (pa, pb) = (ka.public(), kb.public());
-        let config = |k: PublicKey, host: u8| PeerConfig { public_key: k, addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))] };
+        let config = |k: PublicKey, host: u8| PeerConfig { public_key: k, addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))], allow_inbound: vec![crate::firewall::Rule::Any] };
         let mut nodes = [Node::new(ka, vec![config(pb, 2)]), Node::new(kb, vec![config(pa, 1)])];
         let keys = [pa, pb];
         let mut queues: [VecDeque<Vec<u8>>; 2] = Default::default();

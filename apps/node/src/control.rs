@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use kekkai_control::v1::control_service_server::{ControlService, ControlServiceServer};
-use kekkai_control::v1::{GetStatusRequest, GetStatusResponse, NodeStatus, Path, PeerStatus};
+use kekkai_control::v1::{
+    FirewallStatus, GetStatusRequest, GetStatusResponse, NodeStatus, Path, PeerStatus,
+};
 use kekkai_core::keys::{PublicKey, public_key_to_text};
 use kekkai_io::config::NodeConfig;
 use kekkai_io::{State, clock, udp};
@@ -15,8 +17,8 @@ pub struct Control {
     state: Option<Arc<Mutex<State>>>,
     started: Duration,
     node: NodeStatus,
-    /// Peers in configuration order, with their addresses as written.
-    peers: Vec<(PublicKey, Vec<String>)>,
+    /// Peers in configuration order, with their addresses and rules as written.
+    peers: Vec<(PublicKey, Vec<String>, Vec<String>)>,
 }
 
 impl Control {
@@ -35,7 +37,10 @@ impl Control {
             peers: config
                 .peers
                 .iter()
-                .map(|p| (p.key().expect("validated"), p.addresses.clone()))
+                .map(|p| {
+                    let key = p.key().expect("validated");
+                    (key, p.addresses.clone(), p.allow_inbound.clone())
+                })
                 .collect(),
         }
     }
@@ -62,7 +67,7 @@ impl Control {
         let peers = self
             .peers
             .iter()
-            .map(|(key, addresses)| {
+            .map(|(key, addresses, allow_inbound)| {
                 let status = state
                     .node
                     .status(key)
@@ -89,13 +94,21 @@ impl Control {
                     rx_packets: status.counters.rx_packets,
                     tx_packets: status.counters.tx_packets,
                     replay_rejections: status.counters.replay_rejections,
+                    allow_inbound: allow_inbound.clone(),
+                    firewall_drops: status.counters.firewall_drops,
                     ..PeerStatus::default()
                 }
             })
             .collect();
+        let firewall = state.node.firewall_status();
         GetStatusResponse {
             node: Some(node),
             peers,
+            firewall: Some(FirewallStatus {
+                udp_flows: firewall.entries as u64,
+                udp_flows_max: firewall.max as u64,
+                evictions: firewall.evictions,
+            }),
         }
     }
 }

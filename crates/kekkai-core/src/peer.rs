@@ -103,6 +103,8 @@ pub struct Counters {
     pub tx_bytes: u64,
     /// Data packets refused by the replay window (§8.4).
     pub replay_rejections: u64,
+    /// `ip_packet`s from this peer refused by the inbound firewall (§15).
+    pub firewall_drops: u64,
 }
 
 /// One configured peer. Holds at most three sessions (§8.1) plus one in-flight initiator

@@ -32,6 +32,8 @@ pub enum DropReason {
     NotUnicast,
     /// §17: a tunnel packet larger than `MTU`.
     PacketTooLarge,
+    /// §15: refused by the receiving node's inbound firewall.
+    Firewall,
 }
 
 impl DropReason {
@@ -59,6 +61,7 @@ impl DropReason {
             DropReason::NoRoute => "no_route",
             DropReason::NotUnicast => "not_unicast",
             DropReason::PacketTooLarge => "packet_too_large",
+            DropReason::Firewall => "firewall",
         }
     }
 }

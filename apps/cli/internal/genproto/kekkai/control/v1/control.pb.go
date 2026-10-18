@@ -169,12 +169,12 @@ func (*GetStatusRequest) Descriptor() ([]byte, []int) {
 	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
-// Lighthouse and relay sections (v0.4, v0.5) and the firewall section (v0.3) are added with
-// their milestones.
+// Lighthouse and relay sections (v0.4, v0.5) are added with their milestones.
 type GetStatusResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Node          *NodeStatus            `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
 	Peers         []*PeerStatus          `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
+	Firewall      *FirewallStatus        `protobuf:"bytes,3,opt,name=firewall,proto3" json:"firewall,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -223,6 +223,75 @@ func (x *GetStatusResponse) GetPeers() []*PeerStatus {
 	return nil
 }
 
+func (x *GetStatusResponse) GetFirewall() *FirewallStatus {
+	if x != nil {
+		return x.Firewall
+	}
+	return nil
+}
+
+// The inbound firewall's table of UDP flows and fragments (0011, spec section 15).
+type FirewallStatus struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	UdpFlows    uint64                 `protobuf:"varint,1,opt,name=udp_flows,json=udpFlows,proto3" json:"udp_flows,omitempty"`
+	UdpFlowsMax uint64                 `protobuf:"varint,2,opt,name=udp_flows_max,json=udpFlowsMax,proto3" json:"udp_flows_max,omitempty"`
+	// Entries evicted because the table was full.
+	Evictions     uint64 `protobuf:"varint,3,opt,name=evictions,proto3" json:"evictions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FirewallStatus) Reset() {
+	*x = FirewallStatus{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FirewallStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FirewallStatus) ProtoMessage() {}
+
+func (x *FirewallStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FirewallStatus.ProtoReflect.Descriptor instead.
+func (*FirewallStatus) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *FirewallStatus) GetUdpFlows() uint64 {
+	if x != nil {
+		return x.UdpFlows
+	}
+	return 0
+}
+
+func (x *FirewallStatus) GetUdpFlowsMax() uint64 {
+	if x != nil {
+		return x.UdpFlowsMax
+	}
+	return 0
+}
+
+func (x *FirewallStatus) GetEvictions() uint64 {
+	if x != nil {
+		return x.Evictions
+	}
+	return 0
+}
+
 type NodeStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Standard base64 (spec section 4).
@@ -239,7 +308,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -251,7 +320,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -264,7 +333,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *NodeStatus) GetPublicKey() string {
@@ -327,13 +396,17 @@ type PeerStatus struct {
 	ReplayRejections uint64                 `protobuf:"varint,11,opt,name=replay_rejections,json=replayRejections,proto3" json:"replay_rejections,omitempty"`
 	// Unspecified when no direct path failed yet.
 	LastDirectPathFailure DirectPathFailure `protobuf:"varint,12,opt,name=last_direct_path_failure,json=lastDirectPathFailure,proto3,enum=kekkai.control.v1.DirectPathFailure" json:"last_direct_path_failure,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// The peer's `allow_inbound` rules as configured (0011).
+	AllowInbound []string `protobuf:"bytes,13,rep,name=allow_inbound,json=allowInbound,proto3" json:"allow_inbound,omitempty"`
+	// Packets from this peer refused by the inbound firewall (spec section 15).
+	FirewallDrops uint64 `protobuf:"varint,14,opt,name=firewall_drops,json=firewallDrops,proto3" json:"firewall_drops,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PeerStatus) Reset() {
 	*x = PeerStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -345,7 +418,7 @@ func (x *PeerStatus) String() string {
 func (*PeerStatus) ProtoMessage() {}
 
 func (x *PeerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -358,7 +431,7 @@ func (x *PeerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
 func (*PeerStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PeerStatus) GetPublicKey() string {
@@ -445,15 +518,34 @@ func (x *PeerStatus) GetLastDirectPathFailure() DirectPathFailure {
 	return DirectPathFailure_DIRECT_PATH_FAILURE_UNSPECIFIED
 }
 
+func (x *PeerStatus) GetAllowInbound() []string {
+	if x != nil {
+		return x.AllowInbound
+	}
+	return nil
+}
+
+func (x *PeerStatus) GetFirewallDrops() uint64 {
+	if x != nil {
+		return x.FirewallDrops
+	}
+	return 0
+}
+
 var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1fkekkai/control/v1/control.proto\x12\x11kekkai.control.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x12\n" +
-	"\x10GetStatusRequest\"{\n" +
+	"\x10GetStatusRequest\"\xba\x01\n" +
 	"\x11GetStatusResponse\x121\n" +
 	"\x04node\x18\x01 \x01(\v2\x1d.kekkai.control.v1.NodeStatusR\x04node\x123\n" +
-	"\x05peers\x18\x02 \x03(\v2\x1d.kekkai.control.v1.PeerStatusR\x05peers\"\xda\x01\n" +
+	"\x05peers\x18\x02 \x03(\v2\x1d.kekkai.control.v1.PeerStatusR\x05peers\x12=\n" +
+	"\bfirewall\x18\x03 \x01(\v2!.kekkai.control.v1.FirewallStatusR\bfirewall\"o\n" +
+	"\x0eFirewallStatus\x12\x1b\n" +
+	"\tudp_flows\x18\x01 \x01(\x04R\budpFlows\x12\"\n" +
+	"\rudp_flows_max\x18\x02 \x01(\x04R\vudpFlowsMax\x12\x1c\n" +
+	"\tevictions\x18\x03 \x01(\x04R\tevictions\"\xda\x01\n" +
 	"\n" +
 	"NodeStatus\x12\x1d\n" +
 	"\n" +
@@ -463,7 +555,7 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\fwire_version\x18\x04 \x01(\rR\vwireVersion\x121\n" +
 	"\x06uptime\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x06uptime\x12\x1f\n" +
 	"\vlisten_port\x18\x06 \x01(\rR\n" +
-	"listenPort\"\xff\x03\n" +
+	"listenPort\"\xcb\x04\n" +
 	"\n" +
 	"PeerStatus\x12\x1d\n" +
 	"\n" +
@@ -481,7 +573,9 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"tx_packets\x18\n" +
 	" \x01(\x04R\ttxPackets\x12+\n" +
 	"\x11replay_rejections\x18\v \x01(\x04R\x10replayRejections\x12]\n" +
-	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure*N\n" +
+	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure\x12#\n" +
+	"\rallow_inbound\x18\r \x03(\tR\fallowInbound\x12%\n" +
+	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops*N\n" +
 	"\x04Path\x12\x14\n" +
 	"\x10PATH_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tPATH_NONE\x10\x01\x12\x0f\n" +
@@ -509,31 +603,33 @@ func file_kekkai_control_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_kekkai_control_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_kekkai_control_v1_control_proto_goTypes = []any{
 	(Path)(0),                     // 0: kekkai.control.v1.Path
 	(DirectPathFailure)(0),        // 1: kekkai.control.v1.DirectPathFailure
 	(*GetStatusRequest)(nil),      // 2: kekkai.control.v1.GetStatusRequest
 	(*GetStatusResponse)(nil),     // 3: kekkai.control.v1.GetStatusResponse
-	(*NodeStatus)(nil),            // 4: kekkai.control.v1.NodeStatus
-	(*PeerStatus)(nil),            // 5: kekkai.control.v1.PeerStatus
-	(*durationpb.Duration)(nil),   // 6: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(*FirewallStatus)(nil),        // 4: kekkai.control.v1.FirewallStatus
+	(*NodeStatus)(nil),            // 5: kekkai.control.v1.NodeStatus
+	(*PeerStatus)(nil),            // 6: kekkai.control.v1.PeerStatus
+	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
 }
 var file_kekkai_control_v1_control_proto_depIdxs = []int32{
-	4, // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
-	5, // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
-	6, // 2: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
-	0, // 3: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
-	7, // 4: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
-	1, // 5: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
-	2, // 6: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
-	3, // 7: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
-	7, // [7:8] is the sub-list for method output_type
-	6, // [6:7] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	5, // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
+	6, // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
+	4, // 2: kekkai.control.v1.GetStatusResponse.firewall:type_name -> kekkai.control.v1.FirewallStatus
+	7, // 3: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
+	0, // 4: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
+	8, // 5: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	1, // 6: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
+	2, // 7: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
+	3, // 8: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
+	8, // [8:9] is the sub-list for method output_type
+	7, // [7:8] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_kekkai_control_v1_control_proto_init() }
@@ -547,7 +643,7 @@ func file_kekkai_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kekkai_control_v1_control_proto_rawDesc), len(file_kekkai_control_v1_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

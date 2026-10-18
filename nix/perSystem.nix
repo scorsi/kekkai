@@ -54,7 +54,7 @@
         ];
         text = ''
           if [ "$#" -ne 2 ]; then
-            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message> <seconds>" >&2
+            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message|node_config|firewall> <seconds>" >&2
             exit 2
           fi
           exec cargo fuzz run --sanitizer none "$1" -- -max_total_time="$2"
@@ -77,6 +77,49 @@
           };
         in
         lib.concatMapStrings (p: p.name) ev.config.environment.systemPackages;
+      # Shared node settings for the module evaluations (keys: public test vectors).
+      nodeSettings = {
+        enable = true;
+        privateKeyFile = "/run/secrets/kekkai-key";
+        addresses = [
+          "10.0.0.1/32"
+          "fd00::1/128"
+        ];
+        peers.b = {
+          publicKey = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=";
+          addresses = [ "10.0.0.2/32" ];
+          endpoints = [ "b.example.org:4802" ];
+          allowInbound = [
+            "tcp/22"
+            "udp/53"
+          ];
+        };
+        firewall.udpFlowsMax = 1024;
+        operators = [ "alice" ];
+      };
+      # The darwin node module against stubs of the nix-darwin options it sets (0018: it is
+      # tested by evaluation only); `modules-eval` runs `config check` on its node file.
+      darwinEval =
+        let
+          stub = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
+        in
+        (lib.evalModules {
+          modules = [
+            inputs.self.darwinModules.node
+            {
+              config._module.args.pkgs = pkgs;
+              options = {
+                environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+                environment.etc = stub;
+                users.knownGroups = lib.mkOption { type = lib.types.listOf lib.types.str; };
+                users.groups = stub;
+                launchd.daemons = stub;
+                system.activationScripts = stub;
+              };
+              config.services.kekkai-node = nodeSettings;
+            }
+          ];
+        }).config;
       # The NixOS node module, evaluated in a full NixOS system (for aarch64-linux when this
       # system is Darwin): the drvPath forces every option and unit without building anything.
       nodeEval = inputs.nixpkgs.lib.nixosSystem {
@@ -92,20 +135,7 @@
             };
             system.stateVersion = "26.05";
             users.users.alice.isNormalUser = true;
-            services.kekkai-node = {
-              enable = true;
-              privateKeyFile = "/run/secrets/kekkai-key";
-              addresses = [
-                "10.0.0.1/32"
-                "fd00::1/128"
-              ];
-              peers.b = {
-                publicKey = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=";
-                addresses = [ "10.0.0.2/32" ];
-                endpoints = [ "b.example.org:4802" ];
-              };
-              operators = [ "alice" ];
-            };
+            services.kekkai-node = nodeSettings;
           }
         ];
       };
@@ -202,12 +232,30 @@
         # The CLI build runs `go vet` and `go test`, including the shared keygen vectors (0015).
         go-test = pkgs.kekkai;
 
-        modules-eval = pkgs.runCommand "modules-eval" { } ''
-          echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
-               ${evalModule "kekkai-lighthouse" inputs.self.nixosModules.lighthouse} \
-               ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
-               ${evalModule "kekkai-node" inputs.self.darwinModules.node} > $out
-        '';
+        modules-eval =
+          let
+            daemon = darwinEval.launchd.daemons.kekkai-node.serviceConfig;
+            group = darwinEval.users.groups.kekkai;
+          in
+          assert
+            daemon.ProgramArguments == [
+              (lib.getExe pkgs.kekkai-node)
+              "--config"
+              "/etc/kekkai/node.toml"
+            ];
+          assert daemon.KeepAlive && daemon.RunAtLoad;
+          assert group.members == [ "alice" ] && darwinEval.users.knownGroups == [ "kekkai" ];
+          pkgs.runCommand "modules-eval" { } ''
+            ${lib.getExe pkgs.kekkai-node} config check --config ${
+              darwinEval.environment.etc."kekkai/node.toml".source
+            }
+            grep -q 'allow_inbound = \["tcp/22", "udp/53"\]' ${darwinEval.services.kekkai-node.configFile}
+            grep -q 'udp_flows_max = 1024' ${darwinEval.services.kekkai-node.configFile}
+            echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
+                 ${evalModule "kekkai-lighthouse" inputs.self.nixosModules.lighthouse} \
+                 ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
+                 ${lib.concatMapStrings (p: p.name) darwinEval.environment.systemPackages} > $out
+          '';
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         nixos-node-version = import ./tests/node-version.nix {
@@ -215,6 +263,10 @@
           module = inputs.self.nixosModules.node;
         };
         two-nodes = import ./tests/two-nodes.nix {
+          inherit pkgs;
+          module = inputs.self.nixosModules.node;
+        };
+        firewall = import ./tests/firewall.nix {
           inherit pkgs;
           module = inputs.self.nixosModules.node;
         };

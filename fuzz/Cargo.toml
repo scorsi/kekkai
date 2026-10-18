@@ -41,3 +41,10 @@ path = "fuzz_targets/node_config.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "firewall"
+path = "fuzz_targets/firewall.rs"
+test = false
+doc = false
+bench = false

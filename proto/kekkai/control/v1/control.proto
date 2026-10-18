@@ -15,11 +15,19 @@ service ControlService {
 
 message GetStatusRequest {}
 
-// Lighthouse and relay sections (v0.4, v0.5) and the firewall section (v0.3) are added with
-// their milestones.
+// Lighthouse and relay sections (v0.4, v0.5) are added with their milestones.
 message GetStatusResponse {
   NodeStatus node = 1;
   repeated PeerStatus peers = 2;
+  FirewallStatus firewall = 3;
+}
+
+// The inbound firewall's table of UDP flows and fragments (0011, spec section 15).
+message FirewallStatus {
+  uint64 udp_flows = 1;
+  uint64 udp_flows_max = 2;
+  // Entries evicted because the table was full.
+  uint64 evictions = 3;
 }
 
 message NodeStatus {
@@ -68,4 +76,8 @@ message PeerStatus {
   uint64 replay_rejections = 11;
   // Unspecified when no direct path failed yet.
   DirectPathFailure last_direct_path_failure = 12;
+  // The peer's `allow_inbound` rules as configured (0011).
+  repeated string allow_inbound = 13;
+  // Packets from this peer refused by the inbound firewall (spec section 15).
+  uint64 firewall_drops = 14;
 }
