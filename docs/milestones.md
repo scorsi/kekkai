@@ -1,6 +1,6 @@
 # kekkai — milestone plan
 
-Technical milestones, no calendar. Each milestone has an **objective**, **deliverables**, **acceptance criteria** proven by `nix flake check` (unit, property, simulation, corpus replay, `nixosTest` on the `kvm` runner) whenever possible, **dependencies**, and what is **excluded**. A milestone is closed when its criteria pass in CI; `nix flake check` never stays red between milestones. ADR references in parentheses.
+Technical milestones, no calendar. Each milestone has an **objective**, **deliverables**, **acceptance criteria** proven by `nix flake check` (unit, property, simulation, corpus replay, `nixosTest` on the `linux` runner) whenever possible, **dependencies**, and what is **excluded**. A milestone is closed when its criteria pass in CI; `nix flake check` never stays red between milestones. ADR references in parentheses.
 
 Order of v0: local network first, then discovery, then relaying, then the real network.
 
@@ -14,7 +14,7 @@ v0.0 skeleton → v0.1 spec + core → v0.2 first tunnel (Linux) → v0.3 macOS 
 
 | Dependency                                              | Blocks                                   |
 | ------------------------------------------------------- | ---------------------------------------- |
-| A `kvm` Forgejo runner (nested virtualization in the CI VM, or the NixOS laptop) | `nixosTest`s in CI from v0.0; until then they run by hand |
+| The `linux` Forgejo runner with KVM (nested virtualization in the CI VM, or the NixOS laptop) | `nixosTest`s in CI from v0.0; until then they run by hand |
 | Public VPS with native IPv6 (provider not chosen)       | Real deployment of v0.4 and v0.5, not their `nixosTest`s |
 | NixOS laptop                                            | Part of v0.6 (roaming scenarios)         |
 
@@ -30,13 +30,13 @@ Nothing external blocks v0.1.
 
 **Acceptance criteria**
 
-- `nix flake check` green on `aarch64-linux` (`kvm` runner) and, for the non-VM checks, on `aarch64-darwin`.
+- `nix flake check` green on `aarch64-linux` (`linux` runner) and, for the non-VM checks, on `aarch64-darwin`.
 - `nix build .#kekkai-node .#kekkai-lighthouse .#kekkai-relay .#kekkai` succeed; each binary prints the `VERSION` value with `--version`.
 - `buf lint` and `buf generate` run; the generated Go and Rust code compiles.
-- The trivial `nixosTest` passes on the `kvm` runner.
+- The trivial `nixosTest` passes on the `linux` runner.
 - Forgejo repository with GitHub mirror in place.
 
-**Dependencies**: the `kvm` runner for the `nixosTest` criterion (otherwise run by hand and recorded).
+**Dependencies**: the `linux` runner for the `nixosTest` criterion (otherwise run by hand and recorded).
 
 **Excluded**: any protocol code.
 
@@ -83,7 +83,7 @@ Nothing external blocks v0.1.
 - `nixosTest two-nodes`: both services reach `READY=1`; `ping` in both directions over IPv4 and IPv6 overlay addresses; `kekkai status --json` on each node shows the peer with `path = direct`, a recent handshake and non-zero counters; `kekkai-node config check` accepts the module's output and refuses a file containing an inline secret; the control socket is `0660 root:kekkai` and a user outside the group is refused.
 - `nixosTest two-nodes` also checks silence: a packet from an unlisted key gets no reply (observed with `tcpdump` on the sender).
 - The Go keygen vectors pass, identical to the Rust ones.
-- `nix flake check` green on the `kvm` runner.
+- `nix flake check` green on the `linux` runner.
 
 **Dependencies**: v0.1.
 

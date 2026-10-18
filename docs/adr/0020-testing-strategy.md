@@ -19,7 +19,7 @@ A cryptographic state machine, NAT behaviour and two infrastructure roles must b
 4. **`nixosTest`**: Linux only, KVM required, `lib.optionalAttrs` on Linux systems. NAT is simulated with router nodes running nftables: `masquerade` for a cone NAT, `masquerade fully-random` for a symmetric one. Tests assert on `kekkai status --json`, never on `ping` alone.
 5. **Real network**: the manual checklist of the real-network milestone. A breakage seen on the real network becomes a simulation or `nixosTest` case before it is fixed.
 
-Where `nixosTest`s run: on a Linux Forgejo runner labelled **`kvm`**. The primary runner is a NixOS VM on the author's Mac with nested virtualization enabled by the hypervisor (vfkit `--nested`, macOS 15+ on M3 or later), **limited to one job at a time** because the VM also hosts the forge. A NixOS laptop with native KVM becomes a secondary `kvm` runner later. A TCG-only Linux builder is rejected as too slow. If nested virtualization disappoints, the `nixosTest`s are run by hand until the laptop exists.
+Where `nixosTest`s run: on the Linux Forgejo runner labelled **`linux`**, the same runner as the author's other repositories. It is a NixOS VM on the author's Mac with nested virtualization enabled by the hypervisor (vfkit `--nested`, macOS 15+ on M3 or later), so it provides KVM; it is **limited to one job at a time** because the VM also hosts the forge. No separate `kvm` label exists (amended by the owner, 2026-10-18). A NixOS laptop with native KVM may become a second `linux` runner later. A TCG-only Linux builder is rejected as too slow. If nested virtualization disappoints, the `nixosTest`s are run by hand until the laptop exists.
 
 v0 validation order: `nixosTest` with simulated NAT first, the real network second.
 

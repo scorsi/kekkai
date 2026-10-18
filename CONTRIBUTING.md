@@ -11,7 +11,7 @@ toolchain is supported.
 ## Checks
 
 ```sh
-nix flake check   # lint, tests, module evaluation, nixosTest (Linux with kvm only)
+nix flake check   # lint, tests, module evaluation, nixosTest (Linux with KVM only)
 nix fmt           # treefmt: rustfmt, gofmt, nixfmt
 ```
 
