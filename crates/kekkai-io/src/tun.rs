@@ -141,6 +141,8 @@ impl Tun {
             return Err(io::Error::last_os_error());
         }
         let inet6 = || socket(libc::AF_INET6);
+        // SIOCADDRT copies IFNAMSIZ − 1 bytes from rt_dev: give it a full-size buffer.
+        let mut devname = ifreq(name)?.ifr_name;
         for address in addresses {
             match address {
                 IpAddr::V4(ip) => {
@@ -169,7 +171,7 @@ impl Tun {
                     rt.rt_dst = sockaddr_v4(*ip);
                     rt.rt_genmask = sockaddr_v4(Ipv4Addr::BROADCAST);
                     rt.rt_flags = libc::RTF_UP | libc::RTF_HOST;
-                    rt.rt_dev = cname.as_ptr() as *mut libc::c_char;
+                    rt.rt_dev = devname.as_mut_ptr();
                     ioctl(inet.as_raw_fd(), libc::SIOCADDRT, &mut rt)?;
                 }
                 IpAddr::V6(ip) => {

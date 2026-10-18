@@ -5,8 +5,13 @@ pkgs.testers.nixosTest {
 
   nodes.machine = {
     imports = [ module ];
-    services.kekkai-node.enable = true;
     nixpkgs.pkgs = pkgs;
+    services.kekkai-node = {
+      enable = true;
+      # The service is not exercised here (see two-nodes); the key file may stay absent.
+      privateKeyFile = "/run/kekkai-test-key";
+      addresses = [ "10.77.0.1/32" ];
+    };
   };
 
   testScript = ''

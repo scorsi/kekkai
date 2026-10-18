@@ -1,4 +1,5 @@
-# Deployment-agnostic modules (0022). v0.0: options only, the service lands with each daemon.
+# Deployment-agnostic modules (0022). The NixOS node module is nix/modules/node.nix (v0.2);
+# the others are options only until their daemon lands.
 { lib, ... }:
 let
   mk =
@@ -22,7 +23,10 @@ let
 in
 {
   flake = {
-    nixosModules = lib.genAttrs [ "node" "lighthouse" "relay" ] (n: mk "kekkai-${n}");
+    nixosModules = {
+      node = ./modules/node.nix;
+    }
+    // lib.genAttrs [ "lighthouse" "relay" ] (n: mk "kekkai-${n}");
     darwinModules.node = mk "kekkai-node";
   };
 }

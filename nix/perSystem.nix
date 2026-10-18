@@ -77,6 +77,38 @@
           };
         in
         lib.concatMapStrings (p: p.name) ev.config.environment.systemPackages;
+      # The NixOS node module, evaluated in a full NixOS system (for aarch64-linux when this
+      # system is Darwin): the drvPath forces every option and unit without building anything.
+      nodeEval = inputs.nixpkgs.lib.nixosSystem {
+        modules = [
+          inputs.self.nixosModules.node
+          {
+            nixpkgs.hostPlatform = if pkgs.stdenv.hostPlatform.isLinux then system else "aarch64-linux";
+            nixpkgs.overlays = [ inputs.self.overlays.default ];
+            boot.loader.grub.enable = false;
+            fileSystems."/" = {
+              device = "none";
+              fsType = "tmpfs";
+            };
+            system.stateVersion = "26.05";
+            users.users.alice.isNormalUser = true;
+            services.kekkai-node = {
+              enable = true;
+              privateKeyFile = "/run/secrets/kekkai-key";
+              addresses = [
+                "10.0.0.1/32"
+                "fd00::1/128"
+              ];
+              peers.b = {
+                publicKey = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=";
+                addresses = [ "10.0.0.2/32" ];
+                endpoints = [ "b.example.org:4802" ];
+              };
+              operators = [ "alice" ];
+            };
+          }
+        ];
+      };
     in
     {
       _module.args.pkgs = import inputs.nixpkgs {
@@ -171,7 +203,7 @@
         go-test = pkgs.kekkai;
 
         modules-eval = pkgs.runCommand "modules-eval" { } ''
-          echo ${evalModule "kekkai-node" inputs.self.nixosModules.node} \
+          echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
                ${evalModule "kekkai-lighthouse" inputs.self.nixosModules.lighthouse} \
                ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
                ${evalModule "kekkai-node" inputs.self.darwinModules.node} > $out
@@ -179,6 +211,10 @@
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         nixos-node-version = import ./tests/node-version.nix {
+          inherit pkgs;
+          module = inputs.self.nixosModules.node;
+        };
+        two-nodes = import ./tests/two-nodes.nix {
           inherit pkgs;
           module = inputs.self.nixosModules.node;
         };
