@@ -1,0 +1,62 @@
+//! Fuzz targets on the parsers (ADR 0020): each function is one target, run by libFuzzer
+//! from `fuzz_targets/` and replayed over `corpus/<target>/` by `cargo test`.
+
+use kekkai_core::inner::Inner;
+use kekkai_core::{tlv, wire};
+
+/// §5.6 steps 1 to 4 on arbitrary bytes.
+pub fn outer_header(data: &[u8]) {
+    let _ = wire::parse(data);
+}
+
+/// §6 on arbitrary bytes: with every type known, a list that parses re-encodes to itself.
+pub fn tlv_list(data: &[u8]) {
+    let all: Vec<u8> = (0..=255).collect();
+    if let Ok(tlvs) = tlv::decode(data, &all) {
+        let mut again = Vec::with_capacity(data.len());
+        tlv::encode(&tlvs, &mut again);
+        assert_eq!(again, data, "canonical lists round-trip");
+    }
+    let _ = tlv::decode(data, &[1, 2, 3]);
+}
+
+/// §10 on arbitrary bytes: a message that decodes survives an encode/decode round trip.
+pub fn inner_message(data: &[u8]) {
+    if let Ok(inner) = Inner::decode(data) {
+        assert_eq!(Inner::decode(&inner.encode()), Ok(inner));
+    }
+}
+
+/// `nix flake check` replays the committed corpus deterministically (ADR 0020).
+#[cfg(test)]
+mod replay {
+    fn replay(target: &str, run: fn(&[u8])) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("corpus")
+            .join(target);
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        assert!(!entries.is_empty(), "empty corpus for {target}");
+        for path in entries {
+            run(&std::fs::read(&path).unwrap());
+        }
+    }
+
+    #[test]
+    fn outer_header() {
+        replay("outer_header", super::outer_header);
+    }
+
+    #[test]
+    fn tlv_list() {
+        replay("tlv_list", super::tlv_list);
+    }
+
+    #[test]
+    fn inner_message() {
+        replay("inner_message", super::inner_message);
+    }
+}

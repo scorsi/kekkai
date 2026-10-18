@@ -14,6 +14,7 @@ pub mod handshake;
 pub mod inner;
 pub mod keys;
 pub mod mac1;
+pub mod node;
 pub mod peer;
 pub mod session;
 pub mod tai64n;

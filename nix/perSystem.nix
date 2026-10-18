@@ -32,13 +32,33 @@
             (craneLib.fileset.commonCargoSources ../apps/node)
             (craneLib.fileset.commonCargoSources ../apps/lighthouse)
             (craneLib.fileset.commonCargoSources ../apps/relay)
+            (craneLib.fileset.commonCargoSources ../fuzz)
             ../Cargo.toml
             ../Cargo.lock
             ../proto
             # kekkai-core's tests load the vectors relative to CARGO_MANIFEST_DIR (spec §19).
             ../docs/spec/vectors
+            # The fuzz crate's tests replay the committed corpus (ADR 0020).
+            ../fuzz/corpus
           ];
         };
+      };
+      # `nix run .#fuzz -- <target> <seconds>` (ADR 0020): fuzzing by hand, from the repo root,
+      # with the devShell's stable toolchain, hence no sanitizer; findings land in fuzz/corpus.
+      fuzz = pkgs.writeShellApplication {
+        name = "kekkai-fuzz";
+        runtimeInputs = with pkgs; [
+          cargo
+          rustc
+          cargo-fuzz
+        ];
+        text = ''
+          if [ "$#" -ne 2 ]; then
+            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message> <seconds>" >&2
+            exit 2
+          fi
+          exec cargo fuzz run --sanitizer none "$1" -- -max_total_time="$2"
+        '';
       };
       cargoArtifacts = craneLib.buildDepsOnly rustArgs;
       # Stub of the option NixOS and nix-darwin both provide, to evaluate the modules anywhere.
@@ -71,6 +91,12 @@
           kekkai-relay
           kekkai
           ;
+      };
+
+      apps.fuzz = {
+        type = "app";
+        program = lib.getExe fuzz;
+        meta.description = "cargo fuzz run <target> <seconds> on the parsers (ADR 0020)";
       };
 
       devShells.default = pkgs.mkShellNoCC {

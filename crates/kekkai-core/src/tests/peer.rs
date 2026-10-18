@@ -3,13 +3,14 @@
 
 use std::time::Duration;
 
-use crate::handshake;
+use crate::handshake::{self, Initiator};
 use crate::inner::Inner;
 use crate::keys::{PublicKey, StaticKey};
 use crate::mac1::Mac1Key;
 use crate::peer::{Ctx, IndexTable, Peer};
 use crate::session::Role;
 use crate::tai64n::Tai64n;
+use crate::tlv::{self, Tlv, TlvError};
 use crate::wire::{self, DropReason, Outer};
 use crate::{
     KEEPALIVE_TIMEOUT, MAX_STAGED_PACKETS, MAX_TIMER_HANDSHAKES, NEW_HANDSHAKE_TIMEOUT,
@@ -373,5 +374,65 @@ fn staged_packets_flow_when_the_session_opens() {
         counters,
         [0, 1],
         "counters are consecutive and never reused"
+    );
+}
+
+/// §7.6 step 2 end to end: the message 1 TLV list goes through the handshake registry.
+#[test]
+fn unknown_tlvs_in_message_1() {
+    fn message_1(a: &Party, remote: &PublicKey, tlvs: &[Tlv<'_>]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        tlv::encode(tlvs, &mut payload);
+        Initiator::with_payload(&a.key, remote, 7, &payload, None).1
+    }
+    let (a, mut b) = parties();
+    let remote = b.key.public();
+    let timestamp = |now: Duration| wall(now).0;
+    let (t1, t2, t3) = (timestamp(secs(1)), timestamp(secs(2)), timestamp(secs(3)));
+    fn stamp(value: &[u8; 12]) -> Tlv<'_> {
+        Tlv {
+            ty: handshake::TLV_TIMESTAMP,
+            value,
+        }
+    }
+    // Unknown non-critical TLVs (the v1 certificate slot among them) are ignored.
+    let unknown = [
+        stamp(&t1),
+        Tlv {
+            ty: 2,
+            value: b"certificate",
+        },
+        Tlv {
+            ty: 0x7f,
+            value: &[],
+        },
+    ];
+    let (_, msg2) = b.receive_ok(secs(1), &message_1(&a, &remote, &unknown));
+    assert_eq!(msg2[0][0], wire::TYPE_HANDSHAKE_RESP);
+    // An unknown critical TLV, a non-canonical list and a missing timestamp are silent.
+    let critical = [
+        stamp(&t2),
+        Tlv {
+            ty: 0x85,
+            value: &[1],
+        },
+    ];
+    assert_eq!(
+        b.receive(secs(2), &message_1(&a, &remote, &critical))
+            .unwrap_err(),
+        DropReason::Tlv(TlvError::UnknownCritical)
+    );
+    let mut raw = Vec::new();
+    tlv::encode(&[stamp(&t3)], &mut raw);
+    let duplicated = [raw.clone(), raw].concat();
+    let (_, datagram) = Initiator::with_payload(&a.key, &remote, 8, &duplicated, None);
+    assert_eq!(
+        b.receive(secs(3), &datagram).unwrap_err(),
+        DropReason::Tlv(TlvError::NotCanonical)
+    );
+    let (_, datagram) = Initiator::with_payload(&a.key, &remote, 9, &[], None);
+    assert_eq!(
+        b.receive(secs(3), &datagram).unwrap_err(),
+        DropReason::TimestampMissing
     );
 }

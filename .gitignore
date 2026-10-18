@@ -12,3 +12,6 @@ result-*
 # OS
 .DS_Store
 .claude/napkin.md
+
+# cargo-fuzz crash artifacts (findings go into the corpus once fixed)
+/fuzz/artifacts

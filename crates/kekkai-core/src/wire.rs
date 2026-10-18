@@ -22,6 +22,16 @@ pub enum DropReason {
     BadTag,
     InnerUnknownType,
     InnerMalformed,
+    /// §10.2: an inner type this role does not accept from this sender.
+    NotAccepted,
+    /// §11: the source address of an `ip_packet` is not the sending peer's.
+    SourceNotPeer,
+    /// §11: no peer owns the destination (or the tunnel packet has no parseable header).
+    NoRoute,
+    /// §11: multicast or broadcast destination.
+    NotUnicast,
+    /// §17: a tunnel packet larger than `MTU`.
+    PacketTooLarge,
 }
 
 impl DropReason {
@@ -44,6 +54,11 @@ impl DropReason {
             DropReason::BadTag => "bad_tag",
             DropReason::InnerUnknownType => "inner_unknown_type",
             DropReason::InnerMalformed => "inner_malformed",
+            DropReason::NotAccepted => "not_accepted",
+            DropReason::SourceNotPeer => "source_not_peer",
+            DropReason::NoRoute => "no_route",
+            DropReason::NotUnicast => "not_unicast",
+            DropReason::PacketTooLarge => "packet_too_large",
         }
     }
 }

@@ -93,9 +93,6 @@ impl Initiator {
         timestamp: Tai64n,
         ephemeral: Option<&[u8; 32]>,
     ) -> (Self, Vec<u8>) {
-        let mut state = builder(local, Some(remote), ephemeral)
-            .build_initiator()
-            .expect("IKpsk2 initiator");
         let mut payload = Vec::with_capacity(15);
         tlv::encode(
             &[Tlv {
@@ -104,9 +101,23 @@ impl Initiator {
             }],
             &mut payload,
         );
+        Self::with_payload(local, remote, sender_index, &payload, ephemeral)
+    }
+
+    /// Message 1 with an arbitrary encoded TLV list, for the tests of §7.6 step 2.
+    pub(crate) fn with_payload(
+        local: &StaticKey,
+        remote: &PublicKey,
+        sender_index: u32,
+        payload: &[u8],
+        ephemeral: Option<&[u8; 32]>,
+    ) -> (Self, Vec<u8>) {
+        let mut state = builder(local, Some(remote), ephemeral)
+            .build_initiator()
+            .expect("IKpsk2 initiator");
         let mut noise = vec![0u8; MAX_DATAGRAM];
         let len = state
-            .write_message(&payload, &mut noise)
+            .write_message(payload, &mut noise)
             .expect("message 1 fits a datagram");
         noise.truncate(len);
         let datagram =

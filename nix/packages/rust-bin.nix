@@ -19,6 +19,8 @@ let
         (craneLib.fileset.commonCargoSources ../../apps/node)
         (craneLib.fileset.commonCargoSources ../../apps/lighthouse)
         (craneLib.fileset.commonCargoSources ../../apps/relay)
+        # A workspace member must be present for cargo to load the manifest.
+        (craneLib.fileset.commonCargoSources ../../fuzz)
         ../../Cargo.toml
         ../../Cargo.lock
         ../../proto

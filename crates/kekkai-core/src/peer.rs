@@ -144,24 +144,14 @@ impl Peer {
         self.expire(ctx);
         let inner = Inner::IpPacket(packet).encode();
         let mut out = Vec::with_capacity(2);
-        match self.current.as_mut().filter(|s| s.can_send(ctx.now)) {
-            Some(session) => {
-                let rekey = session.role == Role::Initiator
-                    && (session.age(ctx.now) >= REKEY_AFTER_TIME
-                        || session.sending_counter() >= REKEY_AFTER_MESSAGES);
-                out.extend(session.seal(ctx.now, &inner));
-                self.after_send(ctx.now, false);
-                if rekey {
-                    out.extend(self.initiate(ctx));
-                }
+        if self.current.as_ref().is_some_and(|s| s.can_send(ctx.now)) {
+            out.extend(self.seal_on_current(ctx, &inner, false));
+        } else {
+            if self.staged.len() == MAX_STAGED_PACKETS {
+                self.staged.pop_front();
             }
-            None => {
-                if self.staged.len() == MAX_STAGED_PACKETS {
-                    self.staged.pop_front();
-                }
-                self.staged.push_back(inner);
-                out.extend(self.initiate(ctx));
-            }
+            self.staged.push_back(inner);
+            out.extend(self.initiate(ctx));
         }
         out
     }
@@ -322,7 +312,19 @@ impl Peer {
             .map(|s| s.last_sent.unwrap_or(s.created) + PERSISTENT_KEEPALIVE)
     }
 
-    fn sessions(&self) -> impl Iterator<Item = &Session> {
+    /// §8.5 on reload: a peer removed from the list loses its sessions, handshake and
+    /// staged packets; the indices are released and the keys zeroized by the drops.
+    pub fn forget(&mut self, indices: &mut IndexTable) {
+        for slot in [&mut self.current, &mut self.previous, &mut self.next] {
+            Self::retire(slot, indices);
+        }
+        if let Some(flight) = self.in_flight.take() {
+            indices.release(flight.initiator.sender_index);
+        }
+        self.staged.clear();
+    }
+
+    pub(crate) fn sessions(&self) -> impl Iterator<Item = &Session> {
         [&self.current, &self.previous, &self.next]
             .into_iter()
             .flatten()
@@ -404,23 +406,30 @@ impl Peer {
         }
     }
 
-    fn send_keepalive(&mut self, ctx: &mut Ctx<'_>) -> Option<Vec<u8>> {
+    fn send_keepalive(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {
         self.seal_on_current(ctx, &Inner::Keepalive.encode(), true)
     }
 
+    /// Seals `inner` on `current` if it can send, then applies the initiator rekey rule
+    /// (§8.6) to that send, keepalives included: message 1 follows the packet.
     fn seal_on_current(
         &mut self,
         ctx: &mut Ctx<'_>,
         inner: &[u8],
         keepalive: bool,
-    ) -> Option<Vec<u8>> {
-        let packet = self
-            .current
-            .as_mut()
-            .filter(|s| s.can_send(ctx.now))?
-            .seal(ctx.now, inner)?;
+    ) -> Vec<Vec<u8>> {
+        let Some(session) = self.current.as_mut().filter(|s| s.can_send(ctx.now)) else {
+            return Vec::new();
+        };
+        let rekey = session.role == Role::Initiator
+            && (session.age(ctx.now) >= REKEY_AFTER_TIME
+                || session.sending_counter() >= REKEY_AFTER_MESSAGES);
+        let mut out: Vec<Vec<u8>> = session.seal(ctx.now, inner).into_iter().collect();
         self.after_send(ctx.now, keepalive);
-        Some(packet)
+        if rekey {
+            out.extend(self.initiate(ctx));
+        }
+        out
     }
 
     /// Sending anything cancels the passive keepalive; sending data arms "new handshake" (§9).
