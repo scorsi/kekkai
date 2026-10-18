@@ -1,6 +1,6 @@
 # ADR 0028 — Non-cryptographic dependencies of kekkai-core
 
-Status: Proposed — 2026-10-17
+Status: Accepted — 2026-10-17
 
 ## Context
 
@@ -39,3 +39,5 @@ dependency is an ADR, not a `cargo add` (ADR 0002, 0003).
   `zeroize`, `base64`; tests add `serde`, `serde_json`. Anything else is a new ADR.
 - The transport AEAD and nonce formation are glue in the sense of ADR 0021 and are covered by
   `handshake.json` (`data_packets`, `rejected`).
+- The test tools named in ADR 0020 (`proptest`, cargo-fuzz / `libfuzzer-sys` in the `fuzz`
+  crate) are covered by ADR 0020 and need no new ADR.

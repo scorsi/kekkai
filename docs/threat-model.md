@@ -30,7 +30,7 @@ accepted risks apply to which host live in the private deployment repository.
 | --- | --- | --- |
 | Confidentiality and integrity of tunnelled IP traffic | the wire | §7, §8 |
 | Peer authentication (only listed keys talk) | handshake | §4, §7.6 |
-| Identity privacy against observers (who initiated, which keys) | handshake | §7.1 |
+| Initiator key privacy against observers | handshake | §7.1 |
 | Static private keys | host memory and secrets files | host (ADR 0017, 0018), out of the protocol |
 | Unlinkability of a node's presence to strangers (silence) | every port | §16 |
 | Availability of the mesh | lighthouse, relay, timers | partly (see §6 below) |
@@ -96,9 +96,10 @@ Guarantees:
   bound to a one-shot in-flight handshake by `receiver_index` and the ephemeral; data
   packets carry a never-reused 64-bit counter checked by a sliding window (§8.4).
 - **Identity hiding**: a passive observer sees random-looking ephemerals, ciphertexts and
-  32-bit indices. It cannot read either static key, so it learns which **addresses** talk
-  and which address sent a message 1 (the outer `type` byte is in clear, as in WireGuard),
-  but not which **identities** are involved nor which identity initiated. An active
+  32-bit indices. The initiator's static key is hidden from a passive observer; the
+  initiator's address is not (the outer `type` byte is in clear, as in WireGuard), and
+  anyone who knows the responder's public key can confirm the responder's identity through
+  `mac1` (as in WireGuard). An active
   attacker who sends a message 1 to a node learns nothing: without the node's static key it
   cannot even form `mac1`; with it, the handshake fails at `verify` and nothing is sent.
 - **Silence**: a kekkai port never answers a datagram that does not complete the full chain

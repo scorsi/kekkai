@@ -286,9 +286,10 @@ Vectors: [`vectors/tlv.json`](vectors/tlv.json).
   ```
 
   The initiator MUST know the responder's static public key beforehand (it is in its
-  configuration). The initiator's static key travels encrypted in message 1; a passive
-  observer learns neither identity, and an active probe learns nothing from a responder
-  that never answers it.
+  configuration). The initiator's static key travels encrypted in message 1: the
+  initiator's static key is hidden from a passive observer; the initiator's address is not,
+  and anyone who knows the responder's public key can confirm the responder's identity
+  through `mac1` (as in WireGuard). An active probe learns nothing from a responder that never answers it.
 - **Prologue**: `PROLOGUE = "kekkai" || version`, where `version` is the one byte sent in
   the outer header (`6b656b6b616901` for wire version 1). Both sides mix it as the Noise
   prologue. A header rewritten to another version fails here even if the receiver spoke
