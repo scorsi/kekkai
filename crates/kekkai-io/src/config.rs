@@ -113,6 +113,11 @@ impl NodeConfig {
                 return Err(format!("address {a} appears twice"));
             }
         }
+        // ADR 0010: one IPv4 /32 and one IPv6 /128 per node.
+        let v4 = addresses.iter().filter(|a| a.is_ipv4()).count();
+        if v4 > 1 || addresses.len() - v4 > 1 {
+            return Err("node.addresses: at most one IPv4 and one IPv6 address".into());
+        }
         let mut keys = HashSet::new();
         let mut names = HashSet::new();
         for peer in &self.peers {
@@ -131,6 +136,10 @@ impl NodeConfig {
             for e in &peer.endpoints {
                 endpoint(e).map_err(|err| format!("peer {}: {err}", peer.name))?;
             }
+        }
+        // Linux disables IPv6 on an interface whose MTU is below 1280.
+        if node.mtu < 1280 && addresses.iter().any(IpAddr::is_ipv6) {
+            return Err("node.mtu below 1280 leaves no IPv6 on the interface".into());
         }
         // log.level is checked by the daemon, which owns the tracing subscriber.
         Ok(())
@@ -293,6 +302,15 @@ level = "info"
             let err = NodeConfig::parse(&text).unwrap_err();
             assert!(err.contains(want), "{extra}: {err}");
         }
+        let two = base.replace("\"10.0.0.1/32\"", "\"10.0.0.1/32\", \"10.0.0.2/32\"");
+        assert!(NodeConfig::parse(&two).unwrap_err().contains("at most one"));
+        let low = base.replace("[node]\n", "[node]\nmtu = 1200\n");
+        assert!(
+            NodeConfig::parse(&low).is_ok(),
+            "IPv4 only: a lower MTU is fine"
+        );
+        let low6 = low.replace("10.0.0.1/32", "fd00::1/128");
+        assert!(NodeConfig::parse(&low6).unwrap_err().contains("IPv6"));
         for bad in ["10.0.0.0/24", "fd00::/64", "10.0.0.1", "nope/32"] {
             let text = base.replace("10.0.0.1/32", bad);
             assert!(NodeConfig::parse(&text).is_err(), "{bad}");

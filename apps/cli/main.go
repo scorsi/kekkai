@@ -3,22 +3,35 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1"
 	"github.com/scorsi/kekkai/cli/internal/keys"
 	"github.com/scorsi/kekkai/cli/internal/version"
 )
 
-// Keeps the generated client in the build so `go vet` covers it.
-var _ controlv1.ControlServiceClient
-
 const usage = `usage:
   kekkai keygen [FILE]   write a new private key to stdout, or to FILE in mode 0400
   kekkai pubkey          read a private key on stdin, print its public key
+  kekkai status --json   print the node's status (protojson)
   kekkai --version`
+
+// controlSocket is the node's control socket (ADR 0015).
+func controlSocket() string {
+	if runtime.GOOS == "darwin" {
+		return "/var/run/kekkai/control.sock"
+	}
+	return "/run/kekkai/control.sock"
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -39,6 +52,8 @@ func run(args []string) error {
 		return keygen(args[1:])
 	case args[0] == "pubkey" && len(args) == 1:
 		return pubkey()
+	case args[0] == "status" && len(args) == 2 && args[1] == "--json":
+		return status()
 	}
 	return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 }
@@ -79,5 +94,25 @@ func pubkey() error {
 		return err
 	}
 	fmt.Println(keys.Encode(p))
+	return nil
+}
+
+func status() error {
+	conn, err := grpc.NewClient("unix://"+controlSocket(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reply, err := controlv1.NewControlServiceClient(conn).GetStatus(ctx, &controlv1.GetStatusRequest{})
+	if err != nil {
+		return err
+	}
+	out, err := protojson.MarshalOptions{Multiline: true, UseProtoNames: true}.Marshal(reply)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
 	return nil
 }

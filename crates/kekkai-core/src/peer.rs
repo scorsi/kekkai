@@ -94,6 +94,17 @@ enum Slot {
     Next,
 }
 
+/// Traffic counters of one peer (§12.6), datagram sizes on the underlay, every outer type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_bytes: u64,
+    /// Data packets refused by the replay window (§8.4).
+    pub replay_rejections: u64,
+}
+
 /// One configured peer. Holds at most three sessions (§8.1) plus one in-flight initiator
 /// handshake (ADR 0008) and `MAX_STAGED_PACKETS` staged packets.
 pub struct Peer {
@@ -108,6 +119,10 @@ pub struct Peer {
     last_init_sent: Option<Duration>,
     new_handshake_at: Option<Duration>,
     passive_keepalive_at: Option<Duration>,
+    /// §12.6, kept by the party-level caller.
+    pub counters: Counters,
+    /// §12.6: instant of the last completed handshake, either role.
+    pub last_handshake: Option<Duration>,
 }
 
 impl Peer {
@@ -123,6 +138,8 @@ impl Peer {
             last_init_sent: None,
             new_handshake_at: None,
             passive_keepalive_at: None,
+            counters: Counters::default(),
+            last_handshake: None,
         }
     }
 
@@ -180,6 +197,7 @@ impl Peer {
             false,
         ));
         self.last_timestamp = timestamp;
+        self.last_handshake = Some(ctx.now);
         self.after_authenticated_receive();
         Ok(datagram)
     }
@@ -211,6 +229,7 @@ impl Peer {
             true,
         );
         self.promote(session, ctx);
+        self.last_handshake = Some(ctx.now);
         self.after_authenticated_receive();
         let staged: Vec<Vec<u8>> = self.staged.drain(..).collect();
         let mut out = Vec::with_capacity(staged.len().max(1));

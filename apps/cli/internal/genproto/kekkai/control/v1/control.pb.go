@@ -9,6 +9,8 @@ package controlv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -20,6 +22,116 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// How a peer is reached (0013, spec section 12.1).
+type Path int32
+
+const (
+	Path_PATH_UNSPECIFIED Path = 0
+	// No live session.
+	Path_PATH_NONE    Path = 1
+	Path_PATH_DIRECT  Path = 2
+	Path_PATH_RELAYED Path = 3
+)
+
+// Enum value maps for Path.
+var (
+	Path_name = map[int32]string{
+		0: "PATH_UNSPECIFIED",
+		1: "PATH_NONE",
+		2: "PATH_DIRECT",
+		3: "PATH_RELAYED",
+	}
+	Path_value = map[string]int32{
+		"PATH_UNSPECIFIED": 0,
+		"PATH_NONE":        1,
+		"PATH_DIRECT":      2,
+		"PATH_RELAYED":     3,
+	}
+)
+
+func (x Path) Enum() *Path {
+	p := new(Path)
+	*p = x
+	return p
+}
+
+func (x Path) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Path) Descriptor() protoreflect.EnumDescriptor {
+	return file_kekkai_control_v1_control_proto_enumTypes[0].Descriptor()
+}
+
+func (Path) Type() protoreflect.EnumType {
+	return &file_kekkai_control_v1_control_proto_enumTypes[0]
+}
+
+func (x Path) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Path.Descriptor instead.
+func (Path) EnumDescriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
+}
+
+// Reason of the last direct-path failure (spec section 12.6).
+type DirectPathFailure int32
+
+const (
+	DirectPathFailure_DIRECT_PATH_FAILURE_UNSPECIFIED        DirectPathFailure = 0
+	DirectPathFailure_DIRECT_PATH_FAILURE_NO_CANDIDATES      DirectPathFailure = 1
+	DirectPathFailure_DIRECT_PATH_FAILURE_TIMEOUT            DirectPathFailure = 2
+	DirectPathFailure_DIRECT_PATH_FAILURE_ABANDONED          DirectPathFailure = 3
+	DirectPathFailure_DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN DirectPathFailure = 4
+)
+
+// Enum value maps for DirectPathFailure.
+var (
+	DirectPathFailure_name = map[int32]string{
+		0: "DIRECT_PATH_FAILURE_UNSPECIFIED",
+		1: "DIRECT_PATH_FAILURE_NO_CANDIDATES",
+		2: "DIRECT_PATH_FAILURE_TIMEOUT",
+		3: "DIRECT_PATH_FAILURE_ABANDONED",
+		4: "DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN",
+	}
+	DirectPathFailure_value = map[string]int32{
+		"DIRECT_PATH_FAILURE_UNSPECIFIED":        0,
+		"DIRECT_PATH_FAILURE_NO_CANDIDATES":      1,
+		"DIRECT_PATH_FAILURE_TIMEOUT":            2,
+		"DIRECT_PATH_FAILURE_ABANDONED":          3,
+		"DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN": 4,
+	}
+)
+
+func (x DirectPathFailure) Enum() *DirectPathFailure {
+	p := new(DirectPathFailure)
+	*p = x
+	return p
+}
+
+func (x DirectPathFailure) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DirectPathFailure) Descriptor() protoreflect.EnumDescriptor {
+	return file_kekkai_control_v1_control_proto_enumTypes[1].Descriptor()
+}
+
+func (DirectPathFailure) Type() protoreflect.EnumType {
+	return &file_kekkai_control_v1_control_proto_enumTypes[1]
+}
+
+func (x DirectPathFailure) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DirectPathFailure.Descriptor instead.
+func (DirectPathFailure) EnumDescriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{1}
+}
 
 type GetStatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -57,8 +169,12 @@ func (*GetStatusRequest) Descriptor() ([]byte, []int) {
 	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
+// Lighthouse and relay sections (v0.4, v0.5) and the firewall section (v0.3) are added with
+// their milestones.
 type GetStatusResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Node          *NodeStatus            `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	Peers         []*PeerStatus          `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -93,13 +209,290 @@ func (*GetStatusResponse) Descriptor() ([]byte, []int) {
 	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *GetStatusResponse) GetNode() *NodeStatus {
+	if x != nil {
+		return x.Node
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetPeers() []*PeerStatus {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+type NodeStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Standard base64 (spec section 4).
+	PublicKey string `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// Overlay addresses with their prefix length.
+	Addresses     []string             `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Version       string               `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	WireVersion   uint32               `protobuf:"varint,4,opt,name=wire_version,json=wireVersion,proto3" json:"wire_version,omitempty"`
+	Uptime        *durationpb.Duration `protobuf:"bytes,5,opt,name=uptime,proto3" json:"uptime,omitempty"`
+	ListenPort    uint32               `protobuf:"varint,6,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeStatus) Reset() {
+	*x = NodeStatus{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeStatus) ProtoMessage() {}
+
+func (x *NodeStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
+func (*NodeStatus) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *NodeStatus) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+func (x *NodeStatus) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *NodeStatus) GetWireVersion() uint32 {
+	if x != nil {
+		return x.WireVersion
+	}
+	return 0
+}
+
+func (x *NodeStatus) GetUptime() *durationpb.Duration {
+	if x != nil {
+		return x.Uptime
+	}
+	return nil
+}
+
+func (x *NodeStatus) GetListenPort() uint32 {
+	if x != nil {
+		return x.ListenPort
+	}
+	return 0
+}
+
+type PeerStatus struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	Addresses []string               `protobuf:"bytes,2,rep,name=addresses,proto3" json:"addresses,omitempty"`
+	Path      Path                   `protobuf:"varint,3,opt,name=path,proto3,enum=kekkai.control.v1.Path" json:"path,omitempty"`
+	// Public key of the relay when `path` is `PATH_RELAYED`.
+	RelayPublicKey string `protobuf:"bytes,4,opt,name=relay_public_key,json=relayPublicKey,proto3" json:"relay_public_key,omitempty"`
+	// Current endpoint (`host:port`), empty when none is known.
+	Endpoint string `protobuf:"bytes,5,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	// Unset until a handshake completed.
+	LastHandshake    *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=last_handshake,json=lastHandshake,proto3" json:"last_handshake,omitempty"`
+	RxBytes          uint64                 `protobuf:"varint,7,opt,name=rx_bytes,json=rxBytes,proto3" json:"rx_bytes,omitempty"`
+	TxBytes          uint64                 `protobuf:"varint,8,opt,name=tx_bytes,json=txBytes,proto3" json:"tx_bytes,omitempty"`
+	RxPackets        uint64                 `protobuf:"varint,9,opt,name=rx_packets,json=rxPackets,proto3" json:"rx_packets,omitempty"`
+	TxPackets        uint64                 `protobuf:"varint,10,opt,name=tx_packets,json=txPackets,proto3" json:"tx_packets,omitempty"`
+	ReplayRejections uint64                 `protobuf:"varint,11,opt,name=replay_rejections,json=replayRejections,proto3" json:"replay_rejections,omitempty"`
+	// Unspecified when no direct path failed yet.
+	LastDirectPathFailure DirectPathFailure `protobuf:"varint,12,opt,name=last_direct_path_failure,json=lastDirectPathFailure,proto3,enum=kekkai.control.v1.DirectPathFailure" json:"last_direct_path_failure,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *PeerStatus) Reset() {
+	*x = PeerStatus{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerStatus) ProtoMessage() {}
+
+func (x *PeerStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
+func (*PeerStatus) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PeerStatus) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *PeerStatus) GetAddresses() []string {
+	if x != nil {
+		return x.Addresses
+	}
+	return nil
+}
+
+func (x *PeerStatus) GetPath() Path {
+	if x != nil {
+		return x.Path
+	}
+	return Path_PATH_UNSPECIFIED
+}
+
+func (x *PeerStatus) GetRelayPublicKey() string {
+	if x != nil {
+		return x.RelayPublicKey
+	}
+	return ""
+}
+
+func (x *PeerStatus) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *PeerStatus) GetLastHandshake() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastHandshake
+	}
+	return nil
+}
+
+func (x *PeerStatus) GetRxBytes() uint64 {
+	if x != nil {
+		return x.RxBytes
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetTxBytes() uint64 {
+	if x != nil {
+		return x.TxBytes
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetRxPackets() uint64 {
+	if x != nil {
+		return x.RxPackets
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetTxPackets() uint64 {
+	if x != nil {
+		return x.TxPackets
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetReplayRejections() uint64 {
+	if x != nil {
+		return x.ReplayRejections
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetLastDirectPathFailure() DirectPathFailure {
+	if x != nil {
+		return x.LastDirectPathFailure
+	}
+	return DirectPathFailure_DIRECT_PATH_FAILURE_UNSPECIFIED
+}
+
 var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1fkekkai/control/v1/control.proto\x12\x11kekkai.control.v1\"\x12\n" +
-	"\x10GetStatusRequest\"\x13\n" +
-	"\x11GetStatusResponse2h\n" +
+	"\x1fkekkai/control/v1/control.proto\x12\x11kekkai.control.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x12\n" +
+	"\x10GetStatusRequest\"{\n" +
+	"\x11GetStatusResponse\x121\n" +
+	"\x04node\x18\x01 \x01(\v2\x1d.kekkai.control.v1.NodeStatusR\x04node\x123\n" +
+	"\x05peers\x18\x02 \x03(\v2\x1d.kekkai.control.v1.PeerStatusR\x05peers\"\xda\x01\n" +
+	"\n" +
+	"NodeStatus\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1c\n" +
+	"\taddresses\x18\x02 \x03(\tR\taddresses\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12!\n" +
+	"\fwire_version\x18\x04 \x01(\rR\vwireVersion\x121\n" +
+	"\x06uptime\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x06uptime\x12\x1f\n" +
+	"\vlisten_port\x18\x06 \x01(\rR\n" +
+	"listenPort\"\xff\x03\n" +
+	"\n" +
+	"PeerStatus\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1c\n" +
+	"\taddresses\x18\x02 \x03(\tR\taddresses\x12+\n" +
+	"\x04path\x18\x03 \x01(\x0e2\x17.kekkai.control.v1.PathR\x04path\x12(\n" +
+	"\x10relay_public_key\x18\x04 \x01(\tR\x0erelayPublicKey\x12\x1a\n" +
+	"\bendpoint\x18\x05 \x01(\tR\bendpoint\x12A\n" +
+	"\x0elast_handshake\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\rlastHandshake\x12\x19\n" +
+	"\brx_bytes\x18\a \x01(\x04R\arxBytes\x12\x19\n" +
+	"\btx_bytes\x18\b \x01(\x04R\atxBytes\x12\x1d\n" +
+	"\n" +
+	"rx_packets\x18\t \x01(\x04R\trxPackets\x12\x1d\n" +
+	"\n" +
+	"tx_packets\x18\n" +
+	" \x01(\x04R\ttxPackets\x12+\n" +
+	"\x11replay_rejections\x18\v \x01(\x04R\x10replayRejections\x12]\n" +
+	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure*N\n" +
+	"\x04Path\x12\x14\n" +
+	"\x10PATH_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tPATH_NONE\x10\x01\x12\x0f\n" +
+	"\vPATH_DIRECT\x10\x02\x12\x10\n" +
+	"\fPATH_RELAYED\x10\x03*\xcf\x01\n" +
+	"\x11DirectPathFailure\x12#\n" +
+	"\x1fDIRECT_PATH_FAILURE_UNSPECIFIED\x10\x00\x12%\n" +
+	"!DIRECT_PATH_FAILURE_NO_CANDIDATES\x10\x01\x12\x1f\n" +
+	"\x1bDIRECT_PATH_FAILURE_TIMEOUT\x10\x02\x12!\n" +
+	"\x1dDIRECT_PATH_FAILURE_ABANDONED\x10\x03\x12*\n" +
+	"&DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN\x10\x042h\n" +
 	"\x0eControlService\x12V\n" +
 	"\tGetStatus\x12#.kekkai.control.v1.GetStatusRequest\x1a$.kekkai.control.v1.GetStatusResponseBLZJgithub.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1b\x06proto3"
 
@@ -115,19 +508,32 @@ func file_kekkai_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_kekkai_control_v1_control_proto_rawDescData
 }
 
-var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_kekkai_control_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_kekkai_control_v1_control_proto_goTypes = []any{
-	(*GetStatusRequest)(nil),  // 0: kekkai.control.v1.GetStatusRequest
-	(*GetStatusResponse)(nil), // 1: kekkai.control.v1.GetStatusResponse
+	(Path)(0),                     // 0: kekkai.control.v1.Path
+	(DirectPathFailure)(0),        // 1: kekkai.control.v1.DirectPathFailure
+	(*GetStatusRequest)(nil),      // 2: kekkai.control.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),     // 3: kekkai.control.v1.GetStatusResponse
+	(*NodeStatus)(nil),            // 4: kekkai.control.v1.NodeStatus
+	(*PeerStatus)(nil),            // 5: kekkai.control.v1.PeerStatus
+	(*durationpb.Duration)(nil),   // 6: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_kekkai_control_v1_control_proto_depIdxs = []int32{
-	0, // 0: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
-	1, // 1: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	4, // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
+	5, // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
+	6, // 2: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
+	0, // 3: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
+	7, // 4: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	1, // 5: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
+	2, // 6: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
+	3, // 7: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
+	7, // [7:8] is the sub-list for method output_type
+	6, // [6:7] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_kekkai_control_v1_control_proto_init() }
@@ -140,13 +546,14 @@ func file_kekkai_control_v1_control_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kekkai_control_v1_control_proto_rawDesc), len(file_kekkai_control_v1_control_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   2,
+			NumEnums:      2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_kekkai_control_v1_control_proto_goTypes,
 		DependencyIndexes: file_kekkai_control_v1_control_proto_depIdxs,
+		EnumInfos:         file_kekkai_control_v1_control_proto_enumTypes,
 		MessageInfos:      file_kekkai_control_v1_control_proto_msgTypes,
 	}.Build()
 	File_kekkai_control_v1_control_proto = out.File

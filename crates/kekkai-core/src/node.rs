@@ -14,7 +14,7 @@ use crate::handshake::{self, Identity};
 use crate::inner::Inner;
 use crate::keys::{PublicKey, StaticKey};
 use crate::mac1::Mac1Key;
-use crate::peer::{Ctx, IndexTable, Peer};
+use crate::peer::{Counters, Ctx, IndexTable, Peer};
 use crate::tai64n::Tai64n;
 use crate::tlv::Tlv;
 use crate::wire::{self, DropReason, Outer};
@@ -32,6 +32,9 @@ pub struct PeerConfig {
 pub struct Output {
     pub datagrams: Vec<(PublicKey, Vec<u8>)>,
     pub packets: Vec<Vec<u8>>,
+    /// The peer that sent the handled datagram, once authenticated (§12.4): the IO layer
+    /// records the datagram's source as that peer's endpoint.
+    pub from: Option<PublicKey>,
 }
 
 /// Per-peer counters for the control API and the tests.
@@ -42,6 +45,10 @@ pub struct PeerStatus {
     /// A message 1 is awaiting its answer (§7.9).
     pub handshake_in_flight: bool,
     pub staged_packets: usize,
+    /// A `current` session exists (§12.1: the peer's path is that session's, else `none`).
+    pub current: bool,
+    pub last_handshake: Option<Duration>,
+    pub counters: Counters,
 }
 
 /// One party. `Node` is the whole public surface the IO layer drives.
@@ -110,6 +117,9 @@ impl Node {
             sessions: p.sessions().count(),
             handshake_in_flight: p.has_in_flight_handshake(),
             staged_packets: p.staged_packets(),
+            current: p.current().is_some(),
+            last_handshake: p.last_handshake,
+            counters: p.counters,
         })
     }
 
@@ -135,18 +145,35 @@ impl Node {
             local: &self.key,
             indices: &mut self.indices,
         };
-        Ok(Output {
+        let output = Output {
             datagrams: peer
                 .send_ip(&mut ctx, packet)
                 .into_iter()
                 .map(|d| (key, d))
                 .collect(),
-            packets: Vec::new(),
-        })
+            ..Output::default()
+        };
+        self.count_tx(&output);
+        Ok(output)
     }
 
     /// §5.6, then §7.6, §7.7 or §8.2 and §10, §11 inbound. `Err` is the silent drop of §16.
     pub fn handle_datagram(
+        &mut self,
+        now: Duration,
+        wall: Tai64n,
+        datagram: &[u8],
+    ) -> Result<Output, DropReason> {
+        let output = self.receive(now, wall, datagram)?;
+        if let Some(peer) = output.from.and_then(|k| self.peers.get_mut(&k)) {
+            peer.counters.rx_packets += 1;
+            peer.counters.rx_bytes += datagram.len() as u64;
+        }
+        self.count_tx(&output);
+        Ok(output)
+    }
+
+    fn receive(
         &mut self,
         now: Duration,
         wall: Tai64n,
@@ -165,6 +192,7 @@ impl Node {
                 let pending = handshake::read_init(&self.key, &init, &Listed(&self.peers))?;
                 let key = pending.initiator_static;
                 let peer = self.peers.get_mut(&key).expect("verify checked the list");
+                output.from = Some(key);
                 output
                     .datagrams
                     .push((key, peer.accept_init(&mut ctx, pending)?));
@@ -176,6 +204,7 @@ impl Node {
                     .owner(resp.receiver_index)
                     .ok_or(DropReason::UnknownIndex)?;
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
+                output.from = Some(key);
                 output.datagrams.extend(
                     peer.handle_resp(&mut ctx, &resp)?
                         .into_iter()
@@ -188,7 +217,14 @@ impl Node {
                     .owner(data.receiver_index)
                     .ok_or(DropReason::UnknownIndex)?;
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
-                let (plaintext, datagrams) = peer.handle_data(&mut ctx, &data)?;
+                let (plaintext, datagrams) = match peer.handle_data(&mut ctx, &data) {
+                    Err(DropReason::CounterRejected) => {
+                        peer.counters.replay_rejections += 1;
+                        return Err(DropReason::CounterRejected);
+                    }
+                    result => result?,
+                };
+                output.from = Some(key);
                 output
                     .datagrams
                     .extend(datagrams.into_iter().map(|d| (key, d)));
@@ -227,7 +263,17 @@ impl Node {
                 .datagrams
                 .extend(peer.tick(&mut ctx).into_iter().map(|d| (*key, d)));
         }
+        self.count_tx(&output);
         output
+    }
+
+    fn count_tx(&mut self, output: &Output) {
+        for (key, datagram) in &output.datagrams {
+            if let Some(peer) = self.peers.get_mut(key) {
+                peer.counters.tx_packets += 1;
+                peer.counters.tx_bytes += datagram.len() as u64;
+            }
+        }
     }
 
     /// The earliest pending deadline over every peer (§9).

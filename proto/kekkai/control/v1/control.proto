@@ -2,14 +2,70 @@ syntax = "proto3";
 
 package kekkai.control.v1;
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1";
 
 // Control API served by the node over a Unix socket (0015).
 service ControlService {
-  // Stub in v0.0; the status content is specified by 0015 and lands with kekkai-node.
+  // The node's state; `kekkai status --json` prints the reply in protojson form.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
 message GetStatusRequest {}
 
-message GetStatusResponse {}
+// Lighthouse and relay sections (v0.4, v0.5) and the firewall section (v0.3) are added with
+// their milestones.
+message GetStatusResponse {
+  NodeStatus node = 1;
+  repeated PeerStatus peers = 2;
+}
+
+message NodeStatus {
+  // Standard base64 (spec section 4).
+  string public_key = 1;
+  // Overlay addresses with their prefix length.
+  repeated string addresses = 2;
+  string version = 3;
+  uint32 wire_version = 4;
+  google.protobuf.Duration uptime = 5;
+  uint32 listen_port = 6;
+}
+
+// How a peer is reached (0013, spec section 12.1).
+enum Path {
+  PATH_UNSPECIFIED = 0;
+  // No live session.
+  PATH_NONE = 1;
+  PATH_DIRECT = 2;
+  PATH_RELAYED = 3;
+}
+
+// Reason of the last direct-path failure (spec section 12.6).
+enum DirectPathFailure {
+  DIRECT_PATH_FAILURE_UNSPECIFIED = 0;
+  DIRECT_PATH_FAILURE_NO_CANDIDATES = 1;
+  DIRECT_PATH_FAILURE_TIMEOUT = 2;
+  DIRECT_PATH_FAILURE_ABANDONED = 3;
+  DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN = 4;
+}
+
+message PeerStatus {
+  string public_key = 1;
+  repeated string addresses = 2;
+  Path path = 3;
+  // Public key of the relay when `path` is `PATH_RELAYED`.
+  string relay_public_key = 4;
+  // Current endpoint (`host:port`), empty when none is known.
+  string endpoint = 5;
+  // Unset until a handshake completed.
+  google.protobuf.Timestamp last_handshake = 6;
+  uint64 rx_bytes = 7;
+  uint64 tx_bytes = 8;
+  uint64 rx_packets = 9;
+  uint64 tx_packets = 10;
+  uint64 replay_rejections = 11;
+  // Unspecified when no direct path failed yet.
+  DirectPathFailure last_direct_path_failure = 12;
+}

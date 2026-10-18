@@ -28,7 +28,7 @@ const (
 //
 // Control API served by the node over a Unix socket (0015).
 type ControlServiceClient interface {
-	// Stub in v0.0; the status content is specified by 0015 and lands with kekkai-node.
+	// The node's state; `kekkai status --json` prints the reply in protojson form.
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
 }
 
@@ -56,7 +56,7 @@ func (c *controlServiceClient) GetStatus(ctx context.Context, in *GetStatusReque
 //
 // Control API served by the node over a Unix socket (0015).
 type ControlServiceServer interface {
-	// Stub in v0.0; the status content is specified by 0015 and lands with kekkai-node.
+	// The node's state; `kekkai status --json` prints the reply in protojson form.
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
 	mustEmbedUnimplementedControlServiceServer()
 }

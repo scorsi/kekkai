@@ -538,6 +538,12 @@ fn junk_and_replays_are_silent() {
     assert_eq!(sim.deliver(1, &data), Err(DropReason::CounterRejected));
     assert_eq!(sim.emitted.len(), emitted + 1, "only the original send");
     assert_eq!(sim.received(1, 0, secs(1)), [1, 2]);
+    // §12.6 reporting: the replay is counted, junk from nobody is not.
+    let status = sim.hosts[1].node.status(&sim.hosts[0].key).unwrap();
+    assert!(status.current && status.last_handshake.is_some());
+    assert_eq!(status.counters.replay_rejections, 1);
+    assert!(status.counters.rx_packets >= 3 && status.counters.tx_packets >= 2);
+    assert!(status.counters.rx_bytes > status.counters.rx_packets * 32);
 }
 
 #[test]

@@ -2,11 +2,189 @@
 //! loading, the UDP socket, the TUN device (`tun` feature, node only) and the loop that drives
 //! the core's `Node`.
 
+pub mod clock;
 pub mod config;
+pub mod mss;
+pub mod systemd;
+#[cfg(all(feature = "tun", target_os = "linux"))]
+pub mod tun;
+pub mod udp;
 
+use std::collections::HashMap;
+use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use kekkai_core::keys::StaticKey;
+use kekkai_core::keys::{PublicKey, StaticKey};
+use kekkai_core::node::{Node, Output};
+use tracing::{debug, info, trace};
+
+/// ADR 0004: the loop never sleeps longer than this, so that a suspend is noticed within a
+/// second of resuming and every deadline that passed meanwhile runs at once.
+pub const MAX_SLEEP: Duration = Duration::from_secs(1);
+
+/// Where the IO layer sends a peer's datagrams (spec §12.2, §12.4), and its name for logs.
+#[derive(Clone, Debug, Default)]
+pub struct PeerInfo {
+    pub name: String,
+    /// Static endpoints from the configuration, resolved at start, in socket form.
+    pub statics: Vec<SocketAddr>,
+    /// Source of the last authenticated datagram from the peer, in socket form.
+    pub endpoint: Option<SocketAddr>,
+}
+
+impl PeerInfo {
+    /// Message 1 goes to every candidate (§12.2): the static endpoints and the last known
+    /// one. Everything else goes to the current endpoint, or the static ones before any.
+    fn targets(&self, datagram: &[u8]) -> Vec<SocketAddr> {
+        let init = datagram.first() == Some(&kekkai_core::wire::TYPE_HANDSHAKE_INIT);
+        match self.endpoint {
+            Some(current) if !init => vec![current],
+            current => {
+                let mut all = self.statics.clone();
+                all.extend(current.filter(|c| !self.statics.contains(c)));
+                all
+            }
+        }
+    }
+}
+
+/// What the loop and the control server share.
+pub struct State {
+    pub node: Node,
+    pub peers: HashMap<PublicKey, PeerInfo>,
+}
+
+/// The overlay interface as the loop sees it: one IP packet per call.
+#[allow(async_fn_in_trait)] // only used through generics on a current-thread runtime
+pub trait Tunnel {
+    async fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
+    async fn send(&self, packet: &[u8]) -> io::Result<()>;
+}
+
+/// Drives the core (ADR 0004): datagrams from `socket`, packets from `tunnel`, and the
+/// deadlines, until an IO error on the tunnel. `mtu` is the interface MTU, for MSS clamping.
+pub async fn run(
+    state: Arc<Mutex<State>>,
+    socket: tokio::net::UdpSocket,
+    tunnel: impl Tunnel,
+    mtu: u16,
+) -> io::Result<()> {
+    let mut udp_buf = vec![0u8; 1 << 16];
+    let mut tun_buf = vec![0u8; 1 << 16];
+    let mut seen: HashMap<PublicKey, (bool, Option<Duration>)> = HashMap::new();
+    let lock = || state.lock().expect("no panic while holding the state");
+    loop {
+        let next = lock().node.next_deadline();
+        let wake = next
+            .map_or(MAX_SLEEP, |d| d.saturating_sub(clock::monotonic()))
+            .min(MAX_SLEEP);
+        let (output, source) = tokio::select! {
+            received = socket.recv_from(&mut udp_buf) => {
+                let (n, source) = match received {
+                    Ok(r) => r,
+                    Err(e) => {
+                        debug!(error = %e, "udp receive failed");
+                        continue;
+                    }
+                };
+                let result = lock()
+                    .node
+                    .handle_datagram(clock::monotonic(), clock::wall(), &udp_buf[..n]);
+                match result {
+                    Ok(output) => (output, Some(source)),
+                    Err(reason) => {
+                        trace!(reason = reason.as_str(), "datagram dropped");
+                        continue;
+                    }
+                }
+            }
+            read = tunnel.recv(&mut tun_buf) => {
+                let packet = &mut tun_buf[..read?];
+                mss::clamp(packet, mtu);
+                let result = lock()
+                    .node
+                    .send_packet(clock::monotonic(), clock::wall(), packet);
+                match result {
+                    Ok(output) => (output, None),
+                    Err(reason) => {
+                        trace!(reason = reason.as_str(), "tunnel packet dropped");
+                        continue;
+                    }
+                }
+            }
+            () = tokio::time::sleep(wake) => {
+                let mut guard = lock();
+                let output = guard.node.tick(clock::monotonic(), clock::wall());
+                log_events(&guard, &mut seen);
+                drop(guard);
+                (output, None)
+            }
+        };
+        let sends = route(&mut lock(), &output, source);
+        for (to, datagram) in sends {
+            if let Err(e) = socket.send_to(&datagram, to).await {
+                debug!(error = %e, to = %udp::canonical(to), "udp send failed");
+            }
+        }
+        for mut packet in output.packets {
+            mss::clamp(&mut packet, mtu);
+            if let Err(e) = tunnel.send(&packet).await {
+                debug!(error = %e, "tunnel write failed");
+            }
+        }
+    }
+}
+
+/// Applies §12.4 for the authenticated sender and maps each datagram to its targets.
+fn route(
+    state: &mut State,
+    output: &Output,
+    source: Option<SocketAddr>,
+) -> Vec<(SocketAddr, Vec<u8>)> {
+    if let (Some(key), Some(source)) = (output.from, source) {
+        if let Some(peer) = state.peers.get_mut(&key) {
+            if peer.endpoint != Some(source) {
+                info!(peer = %peer.name, endpoint = %udp::canonical(source), "endpoint changed");
+                peer.endpoint = Some(source);
+            }
+        }
+    }
+    let mut sends = Vec::new();
+    for (key, datagram) in &output.datagrams {
+        if let Some(peer) = state.peers.get(key) {
+            for to in peer.targets(datagram) {
+                sends.push((to, datagram.clone()));
+            }
+        }
+    }
+    sends
+}
+
+/// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
+/// completed, path change and session expiry.
+fn log_events(state: &State, seen: &mut HashMap<PublicKey, (bool, Option<Duration>)>) {
+    for (key, peer) in &state.peers {
+        let Some(status) = state.node.status(key) else {
+            continue;
+        };
+        let now = (status.current, status.last_handshake);
+        let before = seen.insert(*key, now).unwrap_or((false, None));
+        if now.1 != before.1 {
+            info!(peer = %peer.name, "handshake completed");
+        }
+        if now.0 != before.0 {
+            let (path, reason) = if now.0 {
+                ("direct", "handshake completed")
+            } else {
+                ("none", "session expired")
+            };
+            info!(peer = %peer.name, path, reason, "path changed");
+        }
+    }
+}
 
 /// Reads a private key file (one line of standard base64, as `kekkai keygen` writes it) into
 /// the opaque value the core takes (ADR 0017). Errors never quote the file's content.
@@ -19,6 +197,9 @@ pub fn load_key(path: &Path) -> std::io::Result<StaticKey> {
         )
     })
 }
+
+#[cfg(test)]
+mod loop_tests;
 
 #[cfg(test)]
 mod tests {

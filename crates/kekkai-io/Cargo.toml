@@ -13,5 +13,8 @@ tun = []
 # Dependency policy: ADR 0029.
 [dependencies]
 kekkai-core = { path = "../kekkai-core" }
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+tracing = "0.1"
