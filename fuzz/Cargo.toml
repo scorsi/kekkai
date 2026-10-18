@@ -11,6 +11,7 @@ cargo-fuzz = true
 # Dependency policy: ADR 0020 names cargo-fuzz; ADR 0028 records libfuzzer-sys.
 [dependencies]
 kekkai-core = { path = "../crates/kekkai-core" }
+kekkai-io = { path = "../crates/kekkai-io" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -30,6 +31,13 @@ bench = false
 [[bin]]
 name = "inner_message"
 path = "fuzz_targets/inner_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_config"
+path = "fuzz_targets/node_config.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,14 @@
+[node]
+private_key_file = "/run/secrets/kekkai-key"
+listen_port = 4802
+addresses = ["10.0.0.1/32", "fd00::1/128"]
+mtu = 1280
+
+[[peers]]
+name = "a"
+public_key = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+addresses = ["10.0.0.2/32", "fd00::2/128"]
+endpoints = ["a.example.org:4802", "[2001:db8::2]:4802"]
+
+[log]
+level = "info"

@@ -1,0 +1,5 @@
+[node]
+private_key_file = "/k"
+addresses = ["10.0.0.0/24"]
+[[lighthouses]]
+endpoint = ":"

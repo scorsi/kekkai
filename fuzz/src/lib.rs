@@ -27,6 +27,13 @@ pub fn inner_message(data: &[u8]) {
     }
 }
 
+/// ADR 0016 on arbitrary bytes: the node file parser and validator never panic.
+pub fn node_config(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = kekkai_io::config::NodeConfig::parse(text);
+    }
+}
+
 /// `nix flake check` replays the committed corpus deterministically (ADR 0020).
 #[cfg(test)]
 mod replay {
@@ -53,6 +60,11 @@ mod replay {
     #[test]
     fn tlv_list() {
         replay("tlv_list", super::tlv_list);
+    }
+
+    #[test]
+    fn node_config() {
+        replay("node_config", super::node_config);
     }
 
     #[test]

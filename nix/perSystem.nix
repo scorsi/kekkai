@@ -167,6 +167,8 @@
           }
         );
         cargo-test = craneLib.cargoTest (rustArgs // { inherit cargoArtifacts; });
+        # The CLI build runs `go vet` and `go test`, including the shared keygen vectors (0015).
+        go-test = pkgs.kekkai;
 
         modules-eval = pkgs.runCommand "modules-eval" { } ''
           echo ${evalModule "kekkai-node" inputs.self.nixosModules.node} \
