@@ -146,13 +146,17 @@ pkgs.testers.nixosTest {
         stranger.succeed("sleep 6")
         stranger.succeed("pkill -INT tcpdump")
         stranger.wait_until_fails("pgrep tcpdump")
+        # The test VLAN is a shared segment (VDE hub): eth1 also sees a <-> b traffic, so
+        # every filter names both ends.
         sent = stranger.succeed(
-            "tcpdump -n -r /tmp/silence.pcap 'dst host ${underlay "b"} and dst port 4802'"
+            "tcpdump -n -r /tmp/silence.pcap"
+            " 'src host ${underlay "stranger"} and dst host ${underlay "b"} and dst port 4802'"
             " 2>/dev/null"
         )
         assert len(sent.strip().splitlines()) >= 2, sent
         replies = stranger.succeed(
-            "tcpdump -n -r /tmp/silence.pcap 'src host ${underlay "b"}' 2>/dev/null"
+            "tcpdump -n -r /tmp/silence.pcap"
+            " 'src host ${underlay "b"} and dst host ${underlay "stranger"}' 2>/dev/null"
         )
         assert replies.strip() == "", replies
         out = stranger.succeed("kekkai status --json")
