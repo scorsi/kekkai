@@ -432,8 +432,11 @@ After §5.6:
 
 Both sides may initiate at once; both handshakes may complete and both sessions then
 exist. Each side **sends on its most recently confirmed session** and **accepts on any
-live session**; the loser expires through the timers of §9 (it stops receiving traffic,
-hence is never refreshed, and is rejected at `REJECT_AFTER_TIME`). There is no tie-break.
+live session**. There is no tie-break and, with symmetric concurrent initiations, no loser:
+the session a side confirmed last is the one the other side initiated, so each side sends
+as a responder and receives as an initiator on its `previous`, and neither rekey rule of
+§8.6 fires. Both sessions expire at `REJECT_AFTER_TIME`; the next packet is staged (§8.7)
+and a fresh handshake follows, with no packet lost, as in WireGuard.
 
 ### 7.9 Initiation and retransmission
 

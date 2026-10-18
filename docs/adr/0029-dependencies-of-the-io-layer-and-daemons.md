@@ -1,6 +1,6 @@
 # ADR 0029 — Dependencies of the IO layer, the control API and the daemons
 
-Status: Proposed — 2026-10-18
+Status: Accepted — 2026-10-18
 
 ## Context
 
@@ -49,4 +49,7 @@ already required by the generated client.
 - `unsafe` appears in `kekkai-io` only (ioctls, the clock, the inherited socket fd);
   `kekkai-core` keeps `#![forbid(unsafe_code)]`.
 - The TUN code depends on the Linux ioctl ABI; macOS `utun` (v0.3) adds its own module.
+- On macOS the `utun` interface's MTU, addresses and routes are configured by running
+  `/sbin/ifconfig` and `/sbin/route` (as `wg-quick` does) rather than with routing-socket
+  code, so no extra crate is needed.
 - Adding a crate to these lists is a new ADR, as for the core.
