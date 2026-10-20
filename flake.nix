@@ -18,11 +18,11 @@
 
     # Test-only: the log and metric validators run by the nixosTests (ADR 0019).
     nisshi = {
-      url = "github:scorsi/nisshi";
+      url = "git+ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     masu = {
-      url = "github:scorsi/masu";
+      url = "git+ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/masu.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
