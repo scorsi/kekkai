@@ -32,7 +32,7 @@ Rust, direct dependencies outside `kekkai-core`:
 | `prost-types` | `kekkai-control`, `kekkai-node` | `google.protobuf.Timestamp` and `Duration` (0015) |
 | `tokio-stream` (`net`) | `kekkai-node` | serves tonic on a Unix listener; already pulled by tonic |
 | `tracing` | `kekkai-io`, `kekkai-node` | the logging facade of 0019 and 0027 |
-| `tracing-subscriber` (`fmt`, `std`, no `env-filter`) | `kekkai-node` | stderr output, `Targets` filter for `RUST_LOG` and `[log] level` |
+| `tracing-subscriber` (`registry`, `std`, no `fmt`, no `env-filter`) | `kekkai-node` | `Targets` filter for `RUST_LOG` and `[log] level`, and the `Layer` trait of the hand-written schema layer (`apps/node/src/log.rs`, ADR 0019 amendment 2026-10-20) |
 | `serde` (`derive`), `toml` | `kekkai-io` | the configuration of 0016 |
 | `libc` | `kekkai-io` | TUN ioctls, `CLOCK_BOOTTIME` (0004); already pulled by tokio |
 
@@ -53,3 +53,10 @@ already required by the generated client.
   `/sbin/ifconfig` and `/sbin/route` (as `wg-quick` does) rather than with routing-socket
   code, so no extra crate is needed.
 - Adding a crate to these lists is a new ADR, as for the core.
+
+## Amendment — 2026-10-20: `tracing-subscriber` without `fmt`
+
+Since the log schema of ADR 0019 (amendment 2026-10-20), `kekkai-node` writes every stderr
+line with a hand-written `tracing` layer. The `fmt` feature is no longer used, so the
+dependency is `tracing-subscriber` with `registry` and `std` only: the registry, the
+`Targets` filter and the `Layer` trait. No new crate.
