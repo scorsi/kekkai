@@ -15,6 +15,16 @@
     };
 
     crane.url = "github:ipetkov/crane";
+
+    # Test-only: the log and metric validators run by the nixosTests (ADR 0019).
+    nisshi = {
+      url = "github:scorsi/nisshi";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    masu = {
+      url = "github:scorsi/masu";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =

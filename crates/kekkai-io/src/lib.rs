@@ -12,7 +12,7 @@ pub mod udp;
 #[cfg(all(feature = "tun", target_os = "macos"))]
 pub mod utun;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use kekkai_core::keys::{PublicKey, StaticKey};
 use kekkai_core::node::{Node, Output};
+use kekkai_core::peer::Counters;
+use kekkai_core::wire::DropReason;
 use tracing::{debug, info, trace};
 
 /// ADR 0004: the loop never sleeps longer than this, so that a suspend is noticed within a
@@ -53,10 +55,26 @@ impl PeerInfo {
     }
 }
 
-/// What the loop and the control server share.
+/// What the loop, the control server and the metrics endpoint share.
 pub struct State {
     pub node: Node,
     pub peers: HashMap<PublicKey, PeerInfo>,
+    /// Datagrams and tunnel packets the core dropped, by `DropReason` name (ADR 0019).
+    pub drops: BTreeMap<&'static str, u64>,
+}
+
+impl State {
+    pub fn new(node: Node, peers: HashMap<PublicKey, PeerInfo>) -> Self {
+        Self {
+            node,
+            peers,
+            drops: BTreeMap::new(),
+        }
+    }
+
+    fn count_drop(&mut self, reason: DropReason) {
+        *self.drops.entry(reason.as_str()).or_default() += 1;
+    }
 }
 
 /// The overlay interface as the loop sees it: one IP packet per call.
@@ -76,7 +94,7 @@ pub async fn run(
 ) -> io::Result<()> {
     let mut udp_buf = vec![0u8; 1 << 16];
     let mut tun_buf = vec![0u8; 1 << 16];
-    let mut seen: HashMap<PublicKey, (bool, Option<Duration>)> = HashMap::new();
+    let mut seen: HashMap<PublicKey, (bool, Counters)> = HashMap::new();
     let lock = || state.lock().expect("no panic while holding the state");
     loop {
         let next = lock().node.next_deadline();
@@ -88,17 +106,19 @@ pub async fn run(
                 let (n, source) = match received {
                     Ok(r) => r,
                     Err(e) => {
-                        debug!(error = %e, "udp receive failed");
+                        debug!(event = "udp-receive-failed", error = %e);
                         continue;
                     }
                 };
-                let result = lock()
+                let mut guard = lock();
+                let result = guard
                     .node
                     .handle_datagram(clock::monotonic(), clock::wall(), &udp_buf[..n]);
                 match result {
                     Ok(output) => (output, Some(source)),
                     Err(reason) => {
-                        trace!(reason = reason.as_str(), "datagram dropped");
+                        guard.count_drop(reason);
+                        trace!(event = "datagram-dropped", reason = reason.as_str());
                         continue;
                     }
                 }
@@ -106,13 +126,15 @@ pub async fn run(
             read = tunnel.recv(&mut tun_buf) => {
                 let packet = &mut tun_buf[..read?];
                 mss::clamp(packet, mtu);
-                let result = lock()
+                let mut guard = lock();
+                let result = guard
                     .node
                     .send_packet(clock::monotonic(), clock::wall(), packet);
                 match result {
                     Ok(output) => (output, None),
                     Err(reason) => {
-                        trace!(reason = reason.as_str(), "tunnel packet dropped");
+                        guard.count_drop(reason);
+                        trace!(event = "tunnel-packet-dropped", reason = reason.as_str());
                         continue;
                     }
                 }
@@ -128,13 +150,13 @@ pub async fn run(
         let sends = route(&mut lock(), &output, source);
         for (to, datagram) in sends {
             if let Err(e) = socket.send_to(&datagram, to).await {
-                debug!(error = %e, to = %udp::canonical(to), "udp send failed");
+                debug!(event = "udp-send-failed", error = %e, to = %udp::canonical(to));
             }
         }
         for mut packet in output.packets {
             mss::clamp(&mut packet, mtu);
             if let Err(e) = tunnel.send(&packet).await {
-                debug!(error = %e, "tunnel write failed");
+                debug!(event = "tunnel-write-failed", error = %e);
             }
         }
     }
@@ -149,7 +171,11 @@ fn route(
     if let (Some(key), Some(source)) = (output.from, source) {
         if let Some(peer) = state.peers.get_mut(&key) {
             if peer.endpoint != Some(source) {
-                info!(peer = %peer.name, endpoint = %udp::canonical(source), "endpoint changed");
+                info!(
+                    event = "endpoint-change",
+                    peer = %peer.name,
+                    endpoint = %udp::canonical(source)
+                );
                 peer.endpoint = Some(source);
             }
         }
@@ -167,23 +193,30 @@ fn route(
 
 /// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
 /// completed, path change and session expiry.
-fn log_events(state: &State, seen: &mut HashMap<PublicKey, (bool, Option<Duration>)>) {
+fn log_events(state: &State, seen: &mut HashMap<PublicKey, (bool, Counters)>) {
     for (key, peer) in &state.peers {
         let Some(status) = state.node.status(key) else {
             continue;
         };
-        let now = (status.current, status.last_handshake);
-        let before = seen.insert(*key, now).unwrap_or((false, None));
-        if now.1 != before.1 {
-            info!(peer = %peer.name, "handshake completed");
+        let (current, c) = (status.current, status.counters);
+        let (was_current, b) = seen.insert(*key, (current, c)).unwrap_or_default();
+        // shortcut: two handshakes within one tick log once, initiator wins; counters are exact.
+        let initiated = c.handshakes_initiated != b.handshakes_initiated;
+        if initiated || c.handshakes_responded != b.handshakes_responded {
+            info!(
+                event = "handshake-completed",
+                peer = %peer.name,
+                endpoint = peer.endpoint.map(|e| display(udp::canonical(e))),
+                initiator = initiated
+            );
         }
-        if now.0 != before.0 {
-            let (path, reason) = if now.0 {
-                ("direct", "handshake completed")
+        if current != was_current {
+            let (from, to, reason) = if current {
+                ("none", "direct", "handshake-completed")
             } else {
-                ("none", "session expired")
+                ("direct", "none", "session-expired")
             };
-            info!(peer = %peer.name, path, reason, "path changed");
+            info!(event = "path-change", peer = %peer.name, from, to, reason);
         }
     }
 }

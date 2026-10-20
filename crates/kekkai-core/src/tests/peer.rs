@@ -152,6 +152,11 @@ fn connected(now: Duration) -> (Party, Party) {
         b.peer.current().map(|s| (s.role, s.confirmed)),
         Some((Role::Responder, true))
     );
+    let counts = |p: &Party| {
+        let c = p.peer.counters;
+        (c.handshakes_initiated, c.handshakes_responded)
+    };
+    assert_eq!((counts(&a), counts(&b)), ((1, 0), (0, 1)));
     (a, b)
 }
 
@@ -338,6 +343,7 @@ fn retransmits_then_abandons() {
         sent += 1;
     };
     assert_eq!(sent, MAX_TIMER_HANDSHAKES);
+    assert_eq!(a.peer.counters.handshake_timeouts, 1);
     assert!(last >= t0 + secs(90));
     assert!(!a.peer.has_in_flight_handshake());
     assert_eq!(

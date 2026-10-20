@@ -31,7 +31,8 @@ let
   // lib.optionalAttrs (cfg.firewall.udpFlowsMax != 4096) {
     firewall.udp_flows_max = cfg.firewall.udpFlowsMax;
   }
-  // lib.optionalAttrs (cfg.logLevel != "info") { log.level = cfg.logLevel; };
+  // lib.optionalAttrs (cfg.logLevel != "info") { log.level = cfg.logLevel; }
+  // lib.optionalAttrs (cfg.metrics.listen != null) { metrics.listen = cfg.metrics.listen; };
 
   peerType = types.submodule {
     options = {
@@ -112,6 +113,16 @@ in
       default = "info";
       example = "kekkai_io=debug,info";
       description = "`[log] level`, a tracing filter; `RUST_LOG` overrides it.";
+    };
+    metrics.listen = mkOption {
+      # Loopback only (masu's metric convention): the type refuses any other address.
+      type = types.nullOr (types.strMatching "(127\\.0\\.0\\.1|\\[::1]):[0-9]+");
+      default = null;
+      example = "127.0.0.1:9480";
+      description = ''
+        Loopback address of the `GET /metrics` listener (0019), `127.0.0.1:PORT` or
+        `[::1]:PORT`; `null` runs no listener.
+      '';
     };
     operators = mkOption {
       type = types.listOf types.str;

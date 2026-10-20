@@ -95,6 +95,7 @@
           ];
         };
         firewall.udpFlowsMax = 1024;
+        metrics.listen = "127.0.0.1:9480";
         operators = [ "alice" ];
       };
       # The darwin node module against stubs of the nix-darwin options it sets (0018: it is
@@ -251,6 +252,7 @@
             }
             grep -q 'allow_inbound = \["tcp/22", "udp/53"\]' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'udp_flows_max = 1024' ${darwinEval.services.kekkai-node.configFile}
+            grep -q 'listen = "127.0.0.1:9480"' ${darwinEval.services.kekkai-node.configFile}
             echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
                  ${evalModule "kekkai-lighthouse" inputs.self.nixosModules.lighthouse} \
                  ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
@@ -265,6 +267,8 @@
         two-nodes = import ./tests/two-nodes.nix {
           inherit pkgs;
           module = inputs.self.nixosModules.node;
+          validateLogs = inputs.nisshi.lib.validateLogs.${system};
+          validateMetrics = inputs.masu.lib.validateMetrics.${system};
         };
         firewall = import ./tests/firewall.nix {
           inherit pkgs;

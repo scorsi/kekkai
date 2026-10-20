@@ -105,6 +105,11 @@ pub struct Counters {
     pub replay_rejections: u64,
     /// `ip_packet`s from this peer refused by the inbound firewall (§15).
     pub firewall_drops: u64,
+    /// Completed handshakes as initiator (§7.7) and as responder (§7.6).
+    pub handshakes_initiated: u64,
+    pub handshakes_responded: u64,
+    /// Handshakes abandoned after `MAX_TIMER_HANDSHAKES` attempts (§7.9).
+    pub handshake_timeouts: u64,
 }
 
 /// One configured peer. Holds at most three sessions (§8.1) plus one in-flight initiator
@@ -200,6 +205,7 @@ impl Peer {
         ));
         self.last_timestamp = timestamp;
         self.last_handshake = Some(ctx.now);
+        self.counters.handshakes_responded += 1;
         self.after_authenticated_receive();
         Ok(datagram)
     }
@@ -232,6 +238,7 @@ impl Peer {
         );
         self.promote(session, ctx);
         self.last_handshake = Some(ctx.now);
+        self.counters.handshakes_initiated += 1;
         self.after_authenticated_receive();
         let staged: Vec<Vec<u8>> = self.staged.drain(..).collect();
         let mut out = Vec::with_capacity(staged.len().max(1));
@@ -292,6 +299,7 @@ impl Peer {
         {
             self.abort_in_flight(ctx);
             if attempts >= MAX_TIMER_HANDSHAKES {
+                self.counters.handshake_timeouts += 1;
                 self.staged.clear();
             } else {
                 out.push(self.send_message_1(ctx, attempts + 1));

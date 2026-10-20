@@ -1,7 +1,13 @@
 # v0.2 acceptance (docs/milestones.md): two NixOS nodes on one network with static endpoints
 # ping each other over the overlay, and a third node with an unlisted key gets only silence.
-# Keys are the public test vectors of docs/spec/vectors/keygen.json, never real ones.
-{ pkgs, module }:
+# Also checks the daemon's logs and metrics against nisshi's log schema and masu's metric
+# convention (ADR 0019). Keys are the public test vectors of docs/spec/vectors/keygen.json.
+{
+  pkgs,
+  module,
+  validateLogs,
+  validateMetrics,
+}:
 let
   inherit (pkgs) lib;
   keys = {
@@ -46,7 +52,10 @@ let
       }
     ];
     networking.firewall.allowedUDPPorts = [ 4802 ];
-    environment.systemPackages = [ pkgs.tcpdump ];
+    environment.systemPackages = [
+      pkgs.tcpdump
+      pkgs.curl
+    ];
     # Stands in for the sops-nix secret: owned by the service user, mode 0400 (0017).
     environment.etc."kekkai/key" = {
       text = keys.${name}.private + "\n";
@@ -65,6 +74,7 @@ let
       ];
       peers = lib.genAttrs peers peer;
       operators = [ "alice" ];
+      metrics.listen = "127.0.0.1:9480";
     };
   };
 in
@@ -162,5 +172,25 @@ pkgs.testers.nixosTest {
         out = stranger.succeed("kekkai status --json")
         peer = json.loads(out)["peers"][0]
         assert peer["path"] == "PATH_NONE" and "last_handshake" not in peer, out
+
+    with subtest("logs pass nisshi's schema v1, metrics pass masu's convention"):
+        journal = "journalctl _SYSTEMD_UNIT=kekkai-node.service -o cat"
+        for m, other in ((a, "b"), (b, "a")):
+            # Empty input passes the validator: the expected event must exist.
+            m.wait_until_succeeds(
+                f"{journal} | grep -F '\"event\":\"handshake-completed\",\"peer\":\"{other}\"'"
+            )
+        metrics = "http://127.0.0.1:9480/metrics"
+        for m in (a, b, stranger):
+            m.succeed(f"{journal} | ${validateLogs} validate --logs")
+            m.succeed(f"${validateMetrics} validate --metrics {metrics}")
+        for m, other in ((a, "b"), (b, "a")):
+            text = m.succeed(f"curl -sf {metrics}")
+            ok = f'kekkai_handshakes_total{{peer="{other}",result="ok"}} '
+            counts = [int(line[len(ok):]) for line in text.splitlines() if line.startswith(ok)]
+            assert counts and counts[0] >= 1, text
+            assert f'kekkai_peer_path{{peer="{other}",via="direct"}} 1' in text, text
+        # b dropped the stranger's message 1.
+        assert "kekkai_dropped_packets_total{" in b.succeed(f"curl -sf {metrics}")
   '';
 }

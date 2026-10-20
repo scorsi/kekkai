@@ -65,10 +65,10 @@ async fn two_loops_carry_a_packet_each_way() {
             statics: vec![udp::to_socket(endpoint)],
             endpoint: None,
         };
-        let state = Arc::new(Mutex::new(State {
+        let state = Arc::new(Mutex::new(State::new(
             node,
-            peers: HashMap::from([(peer_key, info)]),
-        }));
+            HashMap::from([(peer_key, info)]),
+        )));
         let (inside, outside) = UnixDatagram::pair().unwrap();
         tokio::spawn(crate::run(state.clone(), socket, inside, 1280));
         outsides.push(outside);

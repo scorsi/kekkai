@@ -23,3 +23,44 @@ Journald everywhere on Linux, launchd on macOS, no metrics collector yet. Debugg
 
 - Session losses on the real network are explained from these events alone.
 - Debugging is `journalctl -u kekkai-node` plus `kekkai status --json`.
+
+## Amendment — 2026-10-20: log schema, metrics endpoint, validators
+
+A collector now exists (hikyaku pushing to nisshi and masu), so the "no metrics exporter in
+v0" line is lifted and the log format is fixed.
+
+- **Logs**: every line `kekkai-node` writes on stderr is one JSON object of nisshi's log
+  schema v1: `v` (`1`), `ts` (UTC, RFC 3339, exactly 9 fractional digits, `Z`), `level`
+  (`debug`, `info`, `warn`, `error`; `trace` events are written as `debug`), `event`
+  (kebab-case), optional `msg`, `err` only on `warn` and `error`, then the event's own
+  fields. Never a field the agent or the store adds (`node`, `service`, `stream`, `seq`,
+  `source`, `recv_ts`, `_*`). This covers start-up and fatal errors (`fatal{err}`, also
+  written by the panic hook), so the journal of the unit holds nothing else.
+- The `info` events above are named `handshake-completed{peer,endpoint,initiator}`,
+  `path-change{peer,from,to,reason}` (`from`/`to` among `direct`, `relayed`, `none`;
+  `reason` kebab-case, e.g. `handshake-completed`, `session-expired`), `endpoint-change{peer,
+  endpoint}`, plus `ready`, `stopping`, `endpoint-unresolved`. `peer` is the configured peer
+  name. Never a key, a nonce or a payload, as before.
+- The line is written by a hand-written `tracing` layer in `kekkai-node`: `tracing` stays
+  the facade, the `Targets` filter of 0016 is unchanged, and no crate is added to 0029
+  (`tracing-subscriber`'s JSON formatter would need `serde_json`).
+- **No journald rate limit**: kekkai does not log per packet or per request (drops are
+  `trace` and counted), so the `LogRateLimit*` defaults nisshi ADR 0009 sets for annai and
+  genkan are not set by the kekkai modules.
+- **Metrics**: `services.kekkai-node.metrics.listen` (`[metrics] listen`, default `null` = no
+  listener) opens a loopback-only `GET /metrics` (the module's type and the daemon both refuse
+  another address), hand-written Prometheus text 0.0.4 following masu's metric convention:
+  `kekkai_build_info{version}`, `kekkai_peer_path{peer,via="direct"}` (`relayed` with the
+  relay, v0.5), `kekkai_handshakes_total{peer,result="ok|timeout"}`,
+  `kekkai_rx_bytes_total{peer}`, `kekkai_tx_bytes_total{peer}`,
+  `kekkai_dropped_packets_total{reason}` with `reason` = kekkai-core's `DropReason` names.
+  Five series per peer plus at most 24 others, within the 500-series budget up to about 95
+  peers. The core's per-peer counters gain the completed handshakes per role and the
+  abandoned ones; `status --json` (0015) is unchanged.
+- **Validators in tests**: the `two-nodes` nixosTest pipes
+  `journalctl _SYSTEMD_UNIT=kekkai-node.service -o cat` of each node into
+  `nisshi validate --logs`, asserts that `handshake-completed` lines exist, runs
+  `masu validate --metrics` on the endpoint and checks that `kekkai_handshakes_total` moved.
+  nisshi and masu are test-only flake inputs; the package and the modules do not use them.
+  Unit tests pin the line format (timestamp, escaping, reserved names) and the exposition.
+- The darwin LaunchDaemon writes the same lines to its log file.

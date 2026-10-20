@@ -2,6 +2,8 @@
 //! `/etc/kekkai/node.toml`, ADR 0016) runs it; `config check` validates the file and exits.
 
 mod control;
+mod log;
+mod metrics;
 
 use std::collections::HashMap;
 use std::io;
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
             _ => words.push(arg),
         }
     }
+    std::panic::set_hook(Box::new(|info| log::fatal(&info.to_string())));
     let result = match words.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => run(&config),
         ["config", "check"] => load(&config).map(|_| println!("{}: ok", config.display())),
@@ -60,8 +63,9 @@ fn main() -> ExitCode {
     }
 }
 
+/// Errors leave as a log schema line too: the daemon's stderr is the journal (ADR 0019).
 fn fail(message: &str) -> ExitCode {
-    eprintln!("kekkai-node: {message}");
+    log::fatal(message);
     ExitCode::FAILURE
 }
 
@@ -85,12 +89,7 @@ fn run(path: &Path) -> Result<(), String> {
         .and_then(|f| f.parse::<Targets>().ok())
         .unwrap_or_else(|| config.log.level.parse().expect("checked by load"));
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(io::stderr)
-                .without_time(),
-        )
-        .with(filter)
+        .with(log::JsonLayer.with_filter(filter))
         .init();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -111,7 +110,12 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         for endpoint in &peer.endpoints {
             match tokio::net::lookup_host(endpoint.as_str()).await {
                 Ok(found) => statics.extend(found.map(udp::to_socket)),
-                Err(e) => warn!(peer = %peer.name, endpoint, error = %e, "endpoint not resolved"),
+                Err(e) => warn!(
+                    event = "endpoint-unresolved",
+                    peer = %peer.name,
+                    endpoint = %endpoint,
+                    err = %e
+                ),
             }
         }
         routes.extend(&addresses);
@@ -140,14 +144,20 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         .map_err(|e| format!("udp port {}: {e}", config.node.listen_port))?;
     let listener = systemd::control_listener(Path::new(CONTROL_SOCKET), "kekkai")
         .map_err(|e| format!("{CONTROL_SOCKET}: {e}"))?;
-    let state = Arc::new(Mutex::new(State { node, peers }));
+    let state = Arc::new(Mutex::new(State::new(node, peers)));
+    if let Some(m) = &config.metrics {
+        let listener = std::net::TcpListener::bind(m.listen)
+            .map_err(|e| format!("metrics.listen {}: {e}", m.listen))?;
+        let state = state.clone();
+        std::thread::spawn(move || metrics::serve(listener, state));
+    }
     // ADR 0018: READY=1 once the interface exists and the socket is bound.
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
     info!(
-        interface,
+        event = "ready",
+        interface = %interface,
         port = config.node.listen_port,
-        peers = config.peers.len(),
-        "ready"
+        peers = config.peers.len()
     );
     tokio::select! {
         r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{interface}: {e}")),
@@ -163,7 +173,7 @@ async fn terminate() {
         _ = term.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
     }
-    info!("stopping");
+    info!(event = "stopping");
 }
 
 #[cfg(target_os = "linux")]
