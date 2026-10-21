@@ -35,5 +35,6 @@ Statuses: **Accepted** (decided on 2026-10-13 unless noted), **Proposed**, **Ope
 | 0027 | Future work and the constraints it imposes on v0        | Accepted |
 | 0028 | Non-cryptographic dependencies of kekkai-core           | Accepted |
 | 0029 | Dependencies of the IO layer, control API and daemons   | Accepted |
+| 0030 | Lighthouse status, logs and metrics                     | Proposed |
 
 Deployment-specific values (overlay prefixes, peers, public keys, which host carries which role, accepted host-level risks) are not recorded here: see 0025.

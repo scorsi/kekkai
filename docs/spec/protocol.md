@@ -878,6 +878,11 @@ The same message 1 reaching `B` by several candidates is accepted once: the copi
 the same timestamp and fail §7.4. `B` answers the source of the first copy. Late responses
 to `A` fail §7.7 step 1.
 
+The endpoints learnt from lighthouse replies and punches are kept as candidates of `B` until
+a handshake with `B` completes (in either role) or the attempt sequence is abandoned
+(§7.9); a retransmission within the sequence goes to them too. A candidate learnt while a
+message 1 is in flight receives **that** message 1 (the same bytes), not a new one.
+
 ### 12.3 Relay fallback and direct retry (v0.5)
 
 If `DIRECT_PATH_TIMEOUT` elapses after a rediscovery started (§12.5) without a completed
@@ -927,7 +932,13 @@ triggered by any of:
    (§9): the node re-handshakes with the lighthouse, re-registers and rediscovers every
    peer with a live session;
 5. receipt of a `lighthouse_punch` for `B` (§13.3), which starts or widens a handshake
-   towards the given endpoints even if a session with `B` exists.
+   towards the given endpoints even if a session with `B` exists. The punch already
+   carries what a query would return, so this trigger sends no `lighthouse_query`.
+
+A rediscovery **runs** from its trigger until a handshake with `B` completes or
+`DIRECT_PATH_TIMEOUT` elapses (§12.6). A trigger that fires while a rediscovery of `B` runs
+joins it: no new query, the in-flight handshake is kept or started as above. This bounds
+the queries of trigger 1 to one per `DIRECT_PATH_TIMEOUT` whatever the traffic.
 
 v0 does not listen to OS network-change events.
 
@@ -939,6 +950,12 @@ the **reason of the last direct-path failure**, one of: `no_candidates`, `timeou
 candidate answered within `DIRECT_PATH_TIMEOUT`), `abandoned` (§7.9), `lighthouse_unknown`
 (the lighthouse did not know the peer). These feed `status --json` (ADR 0015).
 
+The reason is recorded when a running rediscovery (§12.5) reaches `DIRECT_PATH_TIMEOUT`
+without a completed handshake: `lighthouse_unknown` if a lighthouse answered "unknown" and
+no endpoint was learnt; otherwise `no_candidates` if the candidate set is empty; otherwise
+`timeout`. `abandoned` is recorded when §7.9 abandons an attempt sequence. A later success
+does not clear it: it is the **last** failure, and `path` says whether a session exists.
+
 ## 13. Lighthouse procedures (v0.4)
 
 ### 13.1 Registration (node side)
@@ -948,8 +965,10 @@ every persistent-keepalive tick towards a lighthouse, instead of a bare keepaliv
 sends `lighthouse_register` carrying its current local endpoints: `(address, listen_port)`
 for every unicast address of the host's interfaces, excluding loopback, link-local and the
 overlay addresses themselves, at most `MAX_LOCAL_ENDPOINTS` (the IO layer collects them;
-the core only compares the list with the previous one for trigger 3 of §12.5). A node also
-sends a `lighthouse_register` immediately after the lighthouse session completes.
+the core only compares the list with the previous one for trigger 3 of §12.5; the list is
+compared as a set). A node also sends a `lighthouse_register` as soon as a handshake with
+the lighthouse completed and its `current` session can send (for a responder, once that
+session is confirmed, §8.3).
 
 ### 13.2 Lighthouse state and answers
 
@@ -964,10 +983,11 @@ On `lighthouse_query { K' }` from key `K` (source address `S`):
 1. If `K'` is not in the lighthouse's peer list, or has no unexpired entry: reply
    `lighthouse_query_reply { pubkey = K' }` to `K` and stop.
 2. Reply `lighthouse_query_reply { pubkey = K', endpoints = [observed, locals...],
-   last_seen = now − refreshed }` to `K`.
-3. If the lighthouse has a live session with `K'`, send `lighthouse_punch { pubkey = K,
-   endpoints = [S, locals of K...] }` to `K'`, where the locals are those of `K`'s own
-   registration if it has one.
+   last_seen = now − refreshed }` to `K`, in whole seconds rounded down, saturated at
+   2^32 − 1. A local endpoint equal to the observed one is not repeated.
+3. If `K' ≠ K` and the lighthouse has a live session with `K'`, send `lighthouse_punch {
+   pubkey = K, endpoints = [S, locals of K...] }` to `K'`, where the locals are those of
+   `K`'s own registration if it has one (again without repeating `S`).
 
 Any authenticated node may query any listed key in v0 (ADR 0012). Queries from keys that
 are not in the peer list never reach this step: they have no session.
@@ -976,8 +996,8 @@ are not in the peer list never reach this step: they have no session.
 
 On `lighthouse_punch { K, endpoints }` from a configured lighthouse: if `K` is a configured
 peer, add `endpoints` to the candidates of the in-flight handshake towards `K`, or start
-one (§7.9), and send message 1 to those endpoints now, which opens this node's NAT towards
-`K` and gives `K` a response path. If `K` is not a configured peer, drop silently: a
+one (§7.9), and send message 1 to those endpoints now (the in-flight one, or the new one
+to every candidate), which opens this node's NAT towards `K` and gives `K` a response path. If `K` is not a configured peer, drop silently: a
 lighthouse cannot make a node talk to a key it does not list.
 
 ## 14. Relay procedures (v0.5)
