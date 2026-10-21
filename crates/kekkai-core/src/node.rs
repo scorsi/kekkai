@@ -472,6 +472,9 @@ impl Node {
         link.endpoint = Some(from);
         link.last_received = Some(now);
         link.received_since_register = true;
+        if let Some(registry) = &mut self.registry {
+            registry.observe(&key, from);
+        }
         if self.peers[&key].last_handshake != before {
             link.end_attempts();
             link.register_due = link.lighthouse;

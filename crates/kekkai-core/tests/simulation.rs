@@ -108,6 +108,8 @@ struct Event {
     to: usize,
     /// The datagram's source as the receiver sees it (after NAT).
     source: Endpoint,
+    /// The receiver's NAT and public port: its filtering applies on arrival.
+    via: Option<Via>,
     datagram: Vec<u8>,
 }
 
@@ -128,27 +130,59 @@ struct Nat {
     out: HashMap<(Endpoint, Option<Endpoint>), u16>,
     /// Public port → inside endpoint and the remotes it sent to (conntrack filtering).
     back: HashMap<u16, (Endpoint, HashSet<Endpoint>)>,
+    /// The router accepts unsolicited datagrams to itself (no input firewall, like the
+    /// nixosTests' routers before): each one confirms a conntrack entry (see `translate`).
+    holds: bool,
+    /// `(public port, remote)` of such a datagram, until its conntrack entry expires (Linux:
+    /// 30 s after the last one).
+    held: HashMap<(u16, Endpoint), Duration>,
+    /// `(inside, remote)` flows that found their port held: they got another one.
+    moved: HashMap<(Endpoint, Endpoint), u16>,
 }
 
 impl Nat {
-    fn translate(&mut self, inside: Endpoint, to: Endpoint) -> Endpoint {
+    /// Linux `masquerade` keeps a flow's mapped port, but a new flow towards a remote whose
+    /// unanswered datagrams to that port left a conntrack entry gets another port: the
+    /// remote's later datagrams to the first port never reach the inside host.
+    /// shortcut: a moved flow keeps its port forever, enough while it carries traffic.
+    fn translate(&mut self, inside: Endpoint, to: Endpoint, now: Duration) -> Endpoint {
         let key = (inside, (self.kind == NatKind::Symmetric).then_some(to));
         let next = &mut self.next_port;
-        let port = *self.out.entry(key).or_insert_with(|| {
+        let mut port = *self.out.entry(key).or_insert_with(|| {
             *next += 1;
             *next
         });
+        if let Some(p) = self.moved.get(&(inside, to)) {
+            port = *p;
+        } else if !self.back.get(&port).is_some_and(|(_, a)| a.contains(&to))
+            && self.held.get(&(port, to)).is_some_and(|t| now < *t)
+        {
+            self.next_port += 1;
+            port = self.next_port;
+            self.moved.insert((inside, to), port);
+        }
         let entry = self.back.entry(port).or_insert((inside, HashSet::new()));
         entry.1.insert(to);
         Endpoint::new(IpAddr::V4(self.public), port)
     }
 
-    /// The inside endpoint a datagram from `from` to public `port` reaches, if filtering lets it.
-    fn admit(&self, port: u16, from: Endpoint) -> Option<Endpoint> {
-        let (inside, allowed) = self.back.get(&port)?;
-        allowed.contains(&from).then_some(*inside)
+    /// The inside endpoint a datagram from `from` to public `port` reaches, if filtering lets
+    /// it; a dropped one holds `(port, from)` (see `translate`).
+    fn admit(&mut self, port: u16, from: Endpoint, now: Duration) -> Option<Endpoint> {
+        match self.back.get(&port) {
+            Some((inside, allowed)) if allowed.contains(&from) => Some(*inside),
+            _ => {
+                if self.holds {
+                    self.held.insert((port, from), now + secs(30));
+                }
+                None
+            }
+        }
     }
 }
+
+/// A NAT and the public port a datagram enters it by.
+type Via = (usize, u16);
 
 /// One emitted datagram: `(sim time, from, to, outer type)`.
 type Emitted = (Duration, usize, usize, u8);
@@ -313,6 +347,9 @@ impl Sim {
             next_port: 40000,
             out: HashMap::new(),
             back: HashMap::new(),
+            holds: false,
+            held: HashMap::new(),
+            moved: HashMap::new(),
         });
         self.nats.len() - 1
     }
@@ -329,23 +366,24 @@ impl Sim {
         self.hosts.len() - 1
     }
 
-    /// Where a datagram from `from` to `dst` lands, and its source as seen there: hosts on
-    /// the public network or on the same LAN reach each other's address; a NAT translates on
-    /// the way out and filters on the way in; no hairpinning.
-    fn resolve(&mut self, from: usize, dst: Endpoint) -> Option<(usize, Endpoint)> {
-        let (src, lan) = (self.hosts[from].addr, self.hosts[from].nat);
+    /// Where a datagram from `from` to `dst` lands, its source as seen there and the NAT and
+    /// public port it enters by: hosts on the public network or on the same LAN reach each
+    /// other's address; a NAT translates on the way out and filters on the way in, when the
+    /// datagram arrives (`Sim::arrives`); no hairpinning.
+    fn resolve(&mut self, from: usize, dst: Endpoint) -> Option<(usize, Endpoint, Option<Via>)> {
+        let (src, lan, now) = (self.hosts[from].addr, self.hosts[from].nat, self.now);
         let outside = |nats: &mut Vec<Nat>| match lan {
-            Some(n) => nats[n].translate(src, dst),
+            Some(n) => nats[n].translate(src, dst, now),
             None => src,
         };
         if let Some(j) = self.hosts.iter().position(|h| h.addr == dst) {
             if self.hosts[j].nat == lan {
-                return Some((j, src));
+                return Some((j, src, None));
             }
             if self.hosts[j].nat.is_some() {
                 return None;
             }
-            return Some((j, outside(&mut self.nats)));
+            return Some((j, outside(&mut self.nats), None));
         }
         let n = self
             .nats
@@ -355,12 +393,25 @@ impl Sim {
             return None;
         }
         let source = outside(&mut self.nats);
-        let inside = self.nats[n].admit(dst.port, source)?;
+        let Some((inside, _)) = self.nats[n].back.get(&dst.port) else {
+            self.nats[n].admit(dst.port, source, now);
+            return None;
+        };
         let j = self
             .hosts
             .iter()
-            .position(|h| h.addr == inside && h.nat == Some(n))?;
-        Some((j, source))
+            .position(|h| h.addr == *inside && h.nat == Some(n))?;
+        Some((j, source, Some((n, dst.port))))
+    }
+
+    /// Whether an event passes its receiver's NAT now, with the receiver still behind it.
+    fn arrives(&mut self, e: &Event) -> bool {
+        let Some((n, port)) = e.via else {
+            return true;
+        };
+        let host = &self.hosts[e.to];
+        let inside = self.nats[n].admit(port, e.source, self.now);
+        inside == Some(host.addr) && host.nat == Some(n)
     }
 
     fn status(&self, host: usize, peer: usize) -> kekkai_core::node::PeerStatus {
@@ -401,7 +452,7 @@ impl Sim {
         }
         for (dst, datagram) in out.datagrams {
             self.sent.push((self.now, from, dst, datagram.clone()));
-            let Some((to, source)) = self.resolve(from, dst) else {
+            let Some((to, source, via)) = self.resolve(from, dst) else {
                 self.emitted.push((self.now, from, usize::MAX, datagram[0]));
                 continue;
             };
@@ -423,6 +474,7 @@ impl Sim {
                     seq: self.seq,
                     to,
                     source,
+                    via,
                     datagram: datagram.clone(),
                 }));
             }
@@ -471,7 +523,7 @@ impl Sim {
             self.now = next.max(self.now + Duration::from_nanos(1));
             while self.queue.peek().is_some_and(|Reverse(e)| e.at <= self.now) {
                 let Reverse(e) = self.queue.pop().expect("peeked");
-                if !self.hosts[e.to].asleep(self.now) {
+                if !self.hosts[e.to].asleep(self.now) && self.arrives(&e) {
                     let _ = self.deliver(e.to, e.source, &e.datagram);
                 }
             }
@@ -1191,11 +1243,10 @@ fn a_peer_that_moves_is_found_after_an_unanswered_handshake() {
         .find(|(t, p, _)| *t > moved && *p == 0)
         .map(|(t, ..)| *t - moved)
         .expect("traffic resumed");
-    // New handshake at 15 s, unanswered until 20 s, then the query and the punch.
-    assert!(
-        first > secs(15) && first < secs(30),
-        "recovered after {first:?}"
-    );
+    // Host 1 reached the lighthouse from its new network (a passive keepalive), so the
+    // first query (rule 2, about 12 s) gets its new address and crosses with the punch
+    // (§13.2); answered with the register's address, it took more than 15 s.
+    assert!(first < secs(15), "recovered after {first:?}");
     assert!(sim.hosts[lh].node.lighthouse_counters().queries_known > queries);
     let to_b = sim.status(0, 1).endpoint.unwrap();
     assert_eq!(to_b.display().ip(), public_ip(&sim, elsewhere));
@@ -1619,4 +1670,60 @@ fn a_move_just_after_a_handshake_recovers_within_30_s() {
     }
     // The register at 25 s found the move, the deferred handshake left at 29 s.
     assert!(worst > secs(4), "the deferral was exercised: {worst:?}");
+}
+
+/// The `roaming` nixosTest failure: host 0 moves just after a register and, before its next
+/// one, reaches the lighthouse from its new network (a query, a passive keepalive), while
+/// host 1, which sent to it just before the move, rediscovers it (§12.5 rule 2, at about
+/// 20 s). The punch reaches host 0 at its new address and makes it send to host 1's NAT, so
+/// the reply must give host 1 that address too (§13.2: the observed endpoint follows the
+/// last authenticated datagram). With the register's address, host 0's datagrams reached
+/// host 1's NAT before host 1 sent any to host 0's new address, held the port host 1's
+/// mapping needed (Linux conntrack), and no handshake completed in the whole sequence.
+#[test]
+fn a_peer_rediscovering_a_moved_node_learns_its_current_endpoint() {
+    for seed in 0..5 {
+        let mut sim = Sim::discovery(70 + seed, 3);
+        sim.hosts[2].asleep_until = Some(secs(100_000));
+        let home = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+        let away = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), NatKind::Cone);
+        sim.nats[home].holds = true;
+        sim.nats[away].holds = true;
+        sim.place(0, ep(192, 168, 1, 2, 4802), Some(home));
+        sim.place(1, ep(192, 168, 1, 3, 4802), Some(home));
+        sim.run_until(secs(1));
+        sim.send_ip(0, 1).unwrap();
+        sim.run_until(secs(5));
+        assert_eq!(sim.status(0, 1).endpoint, Some(sim.addr(1)), "LAN path");
+        let last = refreshed(&sim, 0);
+        while refreshed(&sim, 0) == last {
+            let t = sim.now + ms(10);
+            sim.run_until(t);
+        }
+        // Host 0 queries for the unregistered host 2; host 1 sends without an answer.
+        let _ = sim.send_ip(0, 2);
+        sim.send_ip(1, 0).unwrap();
+        let t = sim.now + ms(100);
+        sim.run_until(t);
+        let moved = sim.now;
+        sim.place(0, ep(192, 168, 7, 2, 4802), Some(away));
+        let (home_ip, away_ip) = (public_ip(&sim, home), public_ip(&sim, away));
+        let found = |sim: &Sim| {
+            let ip = |host, peer| sim.status(host, peer).endpoint.map(|e| e.display().ip());
+            ip(0, 1) == Some(home_ip) && ip(1, 0) == Some(away_ip)
+        };
+        while !found(&sim) {
+            assert!(
+                sim.now < moved + secs(30),
+                "seed {seed}: not recovered within 30 s {:?} {:?}",
+                sim.status(0, 1),
+                sim.status(1, 0)
+            );
+            let t = sim.now + ms(100);
+            sim.run_until(t);
+        }
+        // Host 1's rediscovery found it, before host 0's register at 25 s.
+        let took = sim.now - moved;
+        assert!(took > secs(15) && took < secs(24), "seed {seed}: {took:?}");
+    }
 }

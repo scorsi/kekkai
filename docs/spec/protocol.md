@@ -826,7 +826,7 @@ stack with mapped addresses, ADR 0010). The `endpoints` value length MUST be a m
 
 | Message | Required TLVs | Optional TLVs | Meaning |
 | --- | --- | --- | --- |
-| `lighthouse_register` (3) | — | `endpoints` (the sender's local endpoints, at most `MAX_LOCAL_ENDPOINTS`) | "Here I am"; the observed endpoint is the datagram's source |
+| `lighthouse_register` (3) | — | `endpoints` (the sender's local endpoints, at most `MAX_LOCAL_ENDPOINTS`) | "Here I am"; the observed endpoint is the datagram's source, and follows the sender's later authenticated datagrams (§13.2) |
 | `lighthouse_query` (4) | `pubkey` | — | "Where is this key?" |
 | `lighthouse_query_reply` (5) | `pubkey` | `endpoints`, `last_seen` | Known: both optional TLVs present, the observed endpoint first, then the registered local ones. Unknown or expired: `pubkey` alone |
 | `lighthouse_punch` (6) | `pubkey`, `endpoints` | — | "This key is trying to reach you at these endpoints; send towards them" |
@@ -1022,8 +1022,17 @@ restarting an in-flight attempt sequence or displacing an admitted learnt candid
 ### 13.2 Lighthouse state and answers
 
 The lighthouse keeps `pubkey → { observed_endpoint, local_endpoints, refreshed }` for each
-registered key; `observed_endpoint` is the UDP source of the authenticated
-`lighthouse_register` datagram. An entry **expires** `LIGHTHOUSE_ENTRY_TIMEOUT` after
+registered key; `observed_endpoint` is the UDP source of the last authenticated datagram
+received from that key (a `lighthouse_register`, a query, a keepalive: the lighthouse's own
+endpoint for it, §12.4); only a `lighthouse_register` sets `local_endpoints` and
+`refreshed`. A node that moved is therefore answered with its new address as soon as it has
+reached the lighthouse from there, the address its punch (step 3) goes to: the querier and
+the target learn each other's current address together and send towards each other at the
+same time. Answered with an older address, the querier would not send to the target's new
+one while the target, punched there, sends to the querier's NAT: unanswered, those
+datagrams can make the querier's NAT map its later flow towards the target to another port
+(a Linux NAT router that accepts them at input keeps a conntrack entry that holds the port),
+and the handshake never completes. An entry **expires** `LIGHTHOUSE_ENTRY_TIMEOUT` after
 `refreshed`; expired entries answer as unknown. The lighthouse holds nothing on disk and
 logs only aggregate counters.
 

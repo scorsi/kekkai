@@ -89,7 +89,12 @@ rec {
         lan
       ];
       boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
-      networking.firewall.enable = false;
+      # Like a real NAT router, drop unsolicited datagrams to itself (input only; forwarding
+      # is not filtered). Accepted, each one confirmed a conntrack entry that made masquerade
+      # map the inside host's later flow towards that sender to another port: a peer's
+      # datagrams arriving before the inside host's own then blocked the hole punch for as
+      # long as they were retransmitted (spec §13.2).
+      networking.firewall.enable = true;
       networking.nftables = {
         enable = true;
         tables.nat = {

@@ -12,7 +12,7 @@ use crate::keys::PublicKey;
 /// One registered node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
-    /// UDP source of the authenticated `lighthouse_register` datagram.
+    /// UDP source of the last authenticated datagram from the node (§13.2).
     pub observed: Endpoint,
     /// The node's own local endpoints, at most `MAX_LOCAL_ENDPOINTS`.
     pub locals: Vec<Endpoint>,
@@ -60,6 +60,14 @@ impl Registry {
                 refreshed: now,
             },
         );
+    }
+
+    /// An authenticated datagram from `key` came from `from`: a node that moved is answered
+    /// with its new address before its next register (§13.2). Does not refresh the entry.
+    pub(crate) fn observe(&mut self, key: &PublicKey, from: Endpoint) {
+        if let Some(r) = self.entries.get_mut(key) {
+            r.observed = from;
+        }
     }
 
     /// The unexpired entry of `key`.
