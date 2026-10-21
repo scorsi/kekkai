@@ -63,7 +63,7 @@ pkgs.testers.nixosTest {
     ${common.script}
     from datetime import datetime
 
-    start_all()
+    boot(lighthouse, home, away, a, b)
     lighthouse.wait_for_unit("kekkai-lighthouse.service")
     for m in (a, b):
         m.wait_for_unit("kekkai-node.service")

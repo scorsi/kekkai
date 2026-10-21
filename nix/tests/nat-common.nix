@@ -63,6 +63,10 @@ rec {
       cores = 1;
     };
     documentation.enable = false;
+    # The test instrumentation waits 300 s for a device (DefaultDeviceTimeoutSec in
+    # nixos/modules/testing/test-instrumentation.nix); past it, dev-hvc0.device fails and
+    # backdoor.service, which requires it, never starts. A slow boot gets 900 s.
+    systemd.settings.Manager.DefaultDeviceTimeoutSec = lib.mkForce 900;
   };
 
   # eth1 on the public vlan 1, eth2 on `lan`: masquerade out of eth1.
@@ -212,6 +216,13 @@ rec {
     import json
 
     LIGHTHOUSE_SOCKET = "${lighthouseSocket}"
+
+
+    def boot(*machines):
+        """Start the VMs one at a time, in order: all at once starve a small builder."""
+        for m in machines:
+            m.start()
+            m.wait_for_unit("multi-user.target")
 
 
     def status(m, socket=None):

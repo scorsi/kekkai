@@ -65,7 +65,7 @@ pkgs.testers.nixosTest {
   testScript = ''
     ${common.script}
 
-    start_all()
+    boot(lighthouse, routera, routerb, a, b)
     lighthouse.wait_for_unit("kekkai-lighthouse.service")
     for m in (a, b, routera):
         m.wait_for_unit("kekkai-node.service")
