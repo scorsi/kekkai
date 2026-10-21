@@ -26,3 +26,10 @@ When no direct path exists (symmetric NAT on both sides, CGNAT, hostile firewall
 
 - MTU budget accounts for the second encryption layer (0009).
 - Relay CPU cost is one ChaCha20-Poly1305 decrypt and encrypt per packet, acceptable on a small VPS.
+
+## Amendment — 2026-10-21: "no dependency on the tunnel decryption path"
+
+Owner decision: "tunnel" means the node's TUN path. The relay links `kekkai-core`'s session code
+for its own authenticated sessions with each node, but never decrypts the payloads it carries
+(they are opaque `relay_forward`/`relay_forwarded` bytes between two nodes), has no `tun` feature
+and no dependency on `kekkai-node`. The `relay-has-no-tunnel` flake check enforces the latter.

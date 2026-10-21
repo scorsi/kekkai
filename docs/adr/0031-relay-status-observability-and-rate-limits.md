@@ -1,6 +1,6 @@
 # ADR 0031 — Relay status, logs, metrics and rate limits
 
-Status: Proposed — 2026-10-21
+Status: Accepted — 2026-10-21
 
 ## Context
 

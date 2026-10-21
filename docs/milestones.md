@@ -194,3 +194,8 @@ Nothing blocks v0.1. Still open, with the milestone they block:
 | Scheduled fuzz job | nothing | Manual fuzzing in v0 (0020) |
 | Release method (branch, changelog) | nothing | Specified at the first tagged release |
 | v1 certificate format (home-grown minimal preferred over X.509), lifetime, groups | nothing in v0 | Decided after v0.6 (0027) |
+
+Note (owner, 2026-10-21): when two crossing handshakes complete, one direct and one relayed, each
+side may keep a different path until the next handshake (at most about 60 s). Accepted until after
+review gate 2; making the direct session always win needs a change to session promotion in
+`peer.rs` (gate 1 scope) and is planned after gate 2.
