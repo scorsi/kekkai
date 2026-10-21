@@ -1,7 +1,9 @@
 # kekkai protocol specification
 
-Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021) and after the
-independent review of v0.4 (2026-10-21: §9 register timer, §12.2 admission, §13.1, §13.2).
+Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021), after the
+independent review of v0.4 (2026-10-21: §9 register timer, §12.2 admission, §13.1, §13.2)
+and for v0.5 (2026-10-21: §12.3 relay fallback and direct retry, §12.4, §13.2 query
+budget, §14, §16, §17), the version submitted to review gate 2.
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
@@ -110,6 +112,8 @@ vectors (§19), because no published analysis covers it (ADR 0021).
 | `DIRECT_RETRY_INTERVAL` | 60 s | §12.3 |
 | `LIGHTHOUSE_ENTRY_TIMEOUT` | 75 s (3 × `PERSISTENT_KEEPALIVE`) | §13 |
 | `KEEPALIVE_FAILURES_BEFORE_REREGISTER` | 3 (failed registers) | §9, §12.5 |
+| Lighthouse query budget | per querier: `2 × L` queries, refilled by `L` every `DIRECT_PATH_TIMEOUT`, `L` the number of listed keys | §13.2 |
+| Relay rate limit | per sender: `relay.max_bytes_per_second` payload bytes, one second's worth as burst; none by default | §14.2 |
 | `UDP_FLOW_TIMEOUT` | 60 s | §15 |
 | `FRAGMENT_ENTRY_TIMEOUT` | 30 s | §15 |
 | `UDP_FLOWS_MAX` | 4096 entries, configurable (`firewall.udp_flows_max`) | §15 |
@@ -874,7 +878,8 @@ on it (§12.4). A peer's reported `path` (ADR 0013, `status --json`) is its `cur
 session's path, or `none`.
 
 Each peer also has at most one **endpoint**, the address used for direct sending; it is
-updated only by directly received authenticated packets (§12.4).
+updated only by directly received authenticated packets (§12.4). A session whose path is
+`direct` sends to the peer's endpoint, whatever address its own packets last came from.
 
 ### 12.2 Candidates
 
@@ -886,9 +891,10 @@ in-flight handshake is sent to **all** candidates known at the time, and to any 
 learnt later while the handshake is in flight. **The first completed handshake wins**; its
 session becomes `current` and its path is kept until the session is lost.
 
-The same message 1 reaching `B` by several candidates is accepted once: the copies carry
-the same timestamp and fail §7.4. `B` answers the source of the first copy. Late responses
-to `A` fail §7.7 step 1.
+The same message 1 reaching `B` by several candidates (or also through a relay, §12.3) is
+accepted once: the copies carry the same timestamp and fail §7.4. `B` answers on the path
+of the first copy: its source address, or the relay it came through (§14.1). Late
+responses to `A` fail §7.7 step 1.
 
 The endpoints learnt from lighthouse replies and punches are kept as candidates of `B` until
 a handshake with `B` completes (in either role) or the attempt sequence is abandoned
@@ -910,17 +916,41 @@ learnt one.
 
 ### 12.3 Relay fallback and direct retry (v0.5)
 
-If `DIRECT_PATH_TIMEOUT` elapses after a rediscovery started (§12.5) without a completed
-handshake, and `A` has a live session with a configured relay `R`, the in-flight message 1
-and its retransmissions are **also** sent through `R` (§14.1). A handshake completing
-through `R` yields a session with `path = relayed(R)`.
+**Fallback.** When a running rediscovery (§12.5) reaches `DIRECT_PATH_TIMEOUT` without a
+completed handshake (the instant §12.6 records the failure) and `A` has a configured relay
+`R` whose `current` session can send, the attempt sequence towards `B` **falls back to the
+relay**: if a message 1 is in flight, the same bytes are sent at once through `R` (§14.1);
+every later message 1 of the sequence (its retransmissions, a deferred start, §7.9) goes to
+the direct candidates **and** through `R`. The fallback belongs to the sequence: it ends
+when the sequence ends, by completion in either role, by abandonment (§7.9), or because a
+confirmed responder session ended it (§8.2 step 5); a later sequence starts direct only.
+With several relays configured (not in v0) the smallest key among the live ones is used.
+A handshake completing through `R` yields a session with `path = relayed(R)`.
 
-While a peer's `current` session is relayed, every `DIRECT_RETRY_INTERVAL` the node starts
-a rediscovery towards that peer **without** the relay for its first `DIRECT_PATH_TIMEOUT`.
-If a direct handshake completes, its session becomes `current` and traffic switches at
-once. If only the relayed one completes, it simply replaces the previous relayed session.
-Rekeys of a relayed session (§8.6) go through the same rediscovery procedure, so a
-rekey is also a direct retry.
+A message 1 that is not part of a fallen-back sequence goes to the direct candidates only:
+a rekey (§8.6) or a "new handshake" (§9) of a relayed session first tries directly; if it is
+unanswered, its first retransmit deadline starts a rediscovery (§12.5 rule 2) and the
+fallback follows `DIRECT_PATH_TIMEOUT` later, while the relayed session still carries
+traffic.
+
+**Direct retry.** While a peer's `current` session is relayed, the node starts a
+rediscovery of that peer (§12.5: a lighthouse query, a fresh in-flight handshake under the
+§7.9 pacing) `DIRECT_RETRY_INTERVAL` after it first saw the relayed path, and again every
+`DIRECT_RETRY_INTERVAL` after the previous retry, until `current` is direct or gone. The
+retry's own sequence is direct only for its first `DIRECT_PATH_TIMEOUT`, then falls back as
+above. Its lighthouse query makes the lighthouse punch the peer (§13.2 step 3), so both
+sides send towards each other's current address. If a direct handshake completes, its
+session becomes `current` and traffic switches at once. If only the relayed one completes,
+it replaces the previous relayed session, so a relayed session normally lives about
+`DIRECT_RETRY_INTERVAL + DIRECT_PATH_TIMEOUT` and the 120 s rekey seldom fires on it.
+
+**Competing sessions.** The session of the **last** completed handshake becomes `current`
+(§8.5), whatever its path: within one sequence only the first copy of message 1 is
+accepted, so its direct and relayed copies never both complete; two crossing sequences
+(the peer was punched, or retries on its own) may complete one directly and one through the
+relay, and then each side sends on the session the other initiated (§7.8) until the next
+handshake. A direct path found that way is kept or found again by the next retry, within
+`DIRECT_RETRY_INTERVAL`.
 
 With no relay configured or no live relay session, the handshake keeps retrying directly
 until abandoned.
@@ -934,9 +964,13 @@ On every authenticated packet (a valid `data`, a fully accepted `handshake_init`
   session's path becomes `direct(source)` (WireGuard's rule);
 - received **inside `relay_forwarded` from `R`**: the session's path becomes `relayed(R)`;
   the endpoint is **not** touched (the datagram's source was the relay's, inside the
-  `A↔R` session).
+  `A↔R` session). The `relay_forwarded` packet itself is an authenticated packet of the
+  `A↔R` session and moves `R`'s endpoint as any other.
 
-Sending on a session follows its path: directly to the peer's endpoint, or wrapped for `R`.
+Sending on a session follows its path: directly to the peer's endpoint, or wrapped for `R`
+(§14.1); a datagram produced while handling a packet (message 2, the staged packets of
+§7.7 and §8.2 step 5, a keepalive) follows the path that packet set. Only the `current`
+session sends `data` (§8.2), so the reported path is the path of everything a peer sends.
 
 ### 12.5 Rediscovery triggers
 
@@ -1050,12 +1084,20 @@ On `lighthouse_query { K' }` from key `K` (source address `S`):
 Any authenticated node may query any listed key in v0 (ADR 0012). Queries from keys that
 are not in the peer list never reach this step: they have no session.
 
-Open point (to settle before review gate 2): the lighthouse answers every authenticated
-query and may punch for each, with no per-sender budget. A compromised listed node can
-therefore make the lighthouse send a punch per query to a target, and the target resend its
-in-flight message 1 to the given endpoints per punch (§13.3): an amplification bounded by
-the listed keys' sessions, not an unauthenticated leak. A per-sender query and punch rate
-limit is the candidate answer.
+**Query budget** (decided for v0.5, ADR 0031; it closes the open point left by the v0.4
+review). Before step 1, the lighthouse charges the querier one token from its bucket: at
+most `2 × L` tokens, refilled continuously at `L` tokens per `DIRECT_PATH_TIMEOUT`, `L` the
+number of listed keys (at least 1), full when first used. A query that finds the bucket
+empty is **dropped silently and counted** (`queries_limited`): no reply, no punch. A node
+that follows §12.5 queries each of its peers at most once per running rediscovery, hence
+about once per `DIRECT_PATH_TIMEOUT` per peer, and rules 3 and 4 query every live peer at
+once, one query per peer: with a lighthouse that lists the whole mesh that is at most
+`L − 1`, and the budget never refuses it. A compromised listed node is held to
+`L` punches per `DIRECT_PATH_TIMEOUT` across all targets, and each target resends at most
+one message 1 copy per punch to at most `MAX_ENDPOINTS` endpoints (§13.3): the
+amplification the open point described is now bounded by the configuration, not by the
+compromised node's sending rate. Registers and keepalives are not budgeted; they carry no
+answer beyond a passive keepalive.
 
 ### 13.3 Punch (node side)
 
@@ -1070,28 +1112,57 @@ lighthouse cannot make a node talk to a key it does not list.
 ### 14.1 Node side
 
 A node keeps a permanent session with each configured relay (§9). To send an outer message
-`m` of its session with `B` on path `relayed(R)`, the node sends `relay_forward { to = B,
-payload = m }` as a `data` packet on its `current` session with `R`.
+`m` of its session with `B` on path `relayed(R)` (§12.3, §12.4), the node sends
+`relay_forward { to = B, payload = m }` as a non-keepalive `data` packet on its `current`
+session with `R`; with no `current` session towards `R` that can send, `m` is not sent.
+`len(m) ≤ MAX_RELAY_PAYLOAD` always holds: the largest outer message is a `data` packet of
+a full-MTU IP packet (§17).
 
 On `relay_forwarded { from = A, payload }` received from configured relay `R` on a direct
-session: process `payload` as a datagram received on path `relayed(R)` through §5.6 and the
-rest of this document, with these restrictions: `payload` MUST NOT itself yield a
-`relay_forward` or `relay_forwarded` (no nested relaying; drop), and `A` MUST be a
-configured peer (otherwise drop; `payload` would fail `verify` anyway).
+session (the outer datagram came from `R`'s address, not itself through a relay):
+
+1. `A` MUST be a configured peer of the node (not a lighthouse or relay); otherwise drop
+   silently.
+2. Process `payload` as a datagram received on path `relayed(R)` through §5.6 and the
+   rest of this document, with one more check: the party that `payload` authenticates as
+   (the static key of a message 1, the owner of the `receiver_index` of a message 2 or a
+   `data` packet) MUST be `A`, checked **before** any state of that party changes;
+   otherwise drop silently. So a relay cannot make one peer's packet count as another's.
+3. Inside `payload`, no relay message is accepted: §10.2 accepts `relay_forwarded` only
+   from a relay on a direct session, and the payload's sender is a peer (no nested
+   relaying). A dropped payload is counted as a drop of the content of `R`'s packet; the
+   transport effects on the `A↔R` session stand (§10.1).
+
+Counters (§12.6): the `relay_forwarded` packet counts for `R`; its payload counts as one
+received datagram of `len(payload)` bytes for `A`. A relayed send counts as one sent
+datagram for `B` and one for `R`.
 
 ### 14.2 Relay side
 
-On `relay_forward { to = B, payload }` from key `A` on a direct session:
+A relay is a party that lists node keys only (ADR 0014): it completes handshakes with them,
+keeps their sessions, accepts `keepalive` and `relay_forward` (§10.2) and routes nothing
+else. On `relay_forward { to = B, payload }` from key `A` on a direct session:
 
-1. `B` MUST be in the relay's peer list and have a live `current` session with the relay;
-   otherwise drop silently and count.
-2. If a per-sender rate limit is configured and `A` exceeds it, drop and count.
-3. Send `relay_forwarded { from = A, payload }` on the relay's session with `B`.
+1. `B` MUST be in the relay's peer list and have a `current` session with the relay that
+   can send; otherwise drop silently and count (`dropped_no_route`).
+2. If a per-sender rate limit `M` (payload bytes per second) is configured: `A`'s bucket
+   holds at most `M` tokens, refilled continuously at `M` per second, full when first
+   used; `len(payload)` tokens are taken, or, if the bucket holds fewer, nothing is taken
+   and the packet is dropped silently and counted (`dropped_rate_limited`). With no limit
+   nothing is dropped here.
+3. Send `relay_forwarded { from = A, payload }` as a `data` packet on the relay's
+   `current` session with `B`, and count it for `A` (`forwarded_packets`,
+   `forwarded_bytes` of payload).
 
-The relay copies `payload` as opaque bytes. Its state per sender is: counters of packets
-and bytes, and the rate-limit bucket. It holds no key of any `A↔B` session by
-construction: the relay's core never derives one, and `kekkai-relay` depends on no tunnel
-decryption path (checked in v0.5).
+The relay copies `payload` as opaque bytes: it never parses it (a payload that is not even
+an outer message is forwarded, and only `B`'s §5.6 drops it). Its state per sender is the
+four counters and the bucket, for listed keys only. It holds no key of any `A↔B` session by
+construction: the relay's core never derives one, and `kekkai-relay` is built without the
+tunnel (no `tun` feature of `kekkai-io`, checked by the `relay-has-no-tunnel` check). A
+`relay_forward` to `B = A` is forwarded back to `A` like any other. The relay never answers
+anything but its sessions' own handshake and keepalive traffic: `relay_forward` produces at
+most one `relay_forwarded`, of the same payload size, towards a listed node (no
+amplification, §16).
 
 ## 15. Per-peer inbound firewall (v0.3)
 
@@ -1147,7 +1218,9 @@ ICMP error induced by the core, no state change other than a counter):
   on this path (§10.2), nested relaying.
 - §11: source address not belonging to the sending peer, non-unicast.
 - §13 and §14: query for an unlisted key answers "unknown" to a **listed** querier only;
-  relay forwarding to an unlisted or absent destination.
+  a query over the querier's budget (§13.2); relay forwarding to an unlisted or absent
+  destination, or over the sender's rate limit (§14.2); a `relay_forwarded` whose sender
+  is not a configured peer or whose payload authenticates as another party (§14.1).
 
 The §10 and §11 conditions (and §15) occur after a `data` packet was authenticated: "no
 state change" there concerns the rejected content only; the transport effects of §8.2
@@ -1182,6 +1255,9 @@ Everything the core allocates is bounded by configuration (ADR 0027):
 | Candidates per in-flight handshake | static endpoints + 1 last known + `MAX_ENDPOINTS` from each lighthouse reply or punch, deduplicated, at most 32; admission rule in §12.2 |
 | Firewall table | `UDP_FLOWS_MAX` = 4096 entries (about 256 KB) |
 | Lighthouse registrations | one per listed key |
+| Lighthouse query budgets | one bucket per listed key that queried |
+| Relay per-sender state | four counters and one bucket per listed key that sent |
+| Relayed sessions | the relay holds at most the three slots of §8.1 per listed key, nothing per node pair |
 
 MTU budget for a 1280-byte IP packet (ADR 0009):
 
@@ -1271,6 +1347,11 @@ tests (`keygen.json`), both run by `nix flake check` (ADR 0020).
 | `handshake.json` | a complete kekkai handshake with fixed keys, indices and timestamp: both datagrams byte for byte, `mac1` keys and values, transport keys, the first data packets of both directions, and datagrams that must be rejected with the reason | §5, §7, §8.2 |
 | `wire.json` | outer header accept and drop cases, endpoint encoding, every inner message encoding, the registries | §5.6, §10, §18 |
 | `replay.json` | a counter sequence with the accept or reject outcome of each | §8.4 |
+
+v0.5 adds no codec: `relay_forward` and `relay_forwarded` were frozen with the registries in
+v0.1 and their encodings are in `wire.json` (`inner_messages`). The token bucket of §13.2
+and §14.2 is checked by a property test (no window grants more than its burst plus its
+refill), the relay procedures by unit tests and the deterministic simulation (ADR 0020).
 
 **Generation.** Every file lists its inputs in full (keys, ephemerals, indices, timestamp,
 plaintexts), so any implementation of this document reproduces it. The files were produced

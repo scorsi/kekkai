@@ -1,7 +1,8 @@
 # kekkai threat model
 
-Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021). Scope fixed by ADR
-0006. Section references of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
+Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021) and for v0.5, the
+version submitted to review gate 2 (complete protocol: lighthouse, NAT traversal, relay).
+Scope fixed by ADR 0006. Section references of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
 
 This document is generic by policy (ADR 0025): it speaks of roles and of "a host whose
 disk is not encrypted", never of a named machine. Which hosts carry which role and which
@@ -23,6 +24,8 @@ accepted risks apply to which host live in the private deployment repository.
   on each host at boot. The deployment repository, the operator's workstation and the
   secrets store are trusted.
 - The **control socket** (gRPC over a Unix socket, `0660 root:kekkai`) is read-only in v0.
+  The lighthouse and the relay serve the same read-only API on their own sockets
+  (`root:kekkai-lighthouse`, `root:kekkai-relay`, ADR 0030, 0031).
 
 ## 2. Assets
 
@@ -36,6 +39,7 @@ accepted risks apply to which host live in the private deployment repository.
 | Availability of the mesh | lighthouse, relay, timers | partly (see §6 below) |
 | Reachability of host services from the overlay | per-peer firewall | §15 |
 | Metadata held by the infrastructure roles | lighthouse, relay memory | §13, §14 (bounded, never on disk) |
+| Capacity of the infrastructure roles | lighthouse, relay | §13.2 query budget, §14.2 rate limit |
 
 ## 3. Trust boundaries
 
@@ -64,7 +68,12 @@ Boundaries crossed by data in v0:
 4. **Operator → core**: the configuration file and the private key, through the IO layer.
    Trusted.
 5. **Local users → control socket**: members of the `kekkai` group read state. Nothing is
-   mutable in v0.
+   mutable in v0. On the public entry point, members of `kekkai-lighthouse` read where
+   every node is, and members of `kekkai-relay` read per-node relay counters (names and
+   keys, no endpoint).
+6. **Relay → node**: a `relay_forwarded` is authenticated as the relay's; its payload is
+   then authenticated on its own as the named peer's (§14.1), so the relay is trusted for
+   nothing but delivery.
 
 ## 4. Attacker classes
 
@@ -162,7 +171,12 @@ Can: withhold or lie about endpoints, send punches to arbitrary configured peers
 "unknown". All of this is denial of service or wasted handshakes towards wrong addresses,
 each of which is silent and costs the recipient at most one `mac1` check. A lying
 lighthouse can also direct a node's message 1 at an attacker-chosen address, which reveals
-to that address that the node exists and the size of a message 1, and nothing more.
+to that address that the node exists and the size of a message 1, and nothing more. By
+withholding endpoints it can push two nodes onto the relay (§12.3); the relay still sees
+only ciphertext (section 4.3), so this is a denial of the direct path, not of
+confidentiality. It can make a node retransmit its in-flight message 1 to up to
+`MAX_ENDPOINTS` addresses per punch it sends; nothing bounds a compromised lighthouse's
+punch rate but the node's link (accepted, section 5).
 
 In v1 the lighthouse will distribute CA-signed certificates that each node verifies itself;
 its trust level does not grow (ADR 0007, 0012).
@@ -172,18 +186,27 @@ its trust level does not grow (ADR 0007, 0012).
 Position: an attacker controls the relay process or host, including its private key.
 
 Learns: the public keys of both ends of each relayed flow (`to_pubkey`, `from_pubkey`),
-their source addresses, packet sizes and timing, per-sender byte and packet counters.
-Nothing is persisted; logs carry aggregate counters only (§14.2).
+their source addresses, packet sizes and timing, per-sender byte and packet counters, and
+which `A↔B` handshakes go through it (message 1 and 2 have fixed sizes, §5). Nothing is
+persisted; logs carry aggregate counters only, its metrics have no per-node label, and its
+status socket shows names, keys and counters but no endpoint (§14.2, ADR 0031).
 
 Cannot: read or modify the relayed traffic. The payload it carries is a complete outer
 message of the `A↔B` session, encrypted under keys the relay never derives (double
-encryption, §14). It cannot inject: an injected payload fails `A↔B` authentication. It
-cannot move a node's endpoint: packets received through `relay_forwarded` never update an
-endpoint (§12.4). It cannot make a node use it for an unlisted peer (§14.1).
+encryption, §14); the `A↔B` handshake runs end to end through it, so `IK`'s properties
+hold against it exactly as against a network attacker (section 4.1) who also knows both
+static public keys. It cannot inject: an injected or replayed payload fails `A↔B`
+authentication or the replay checks (§7.4, §8.4) and is dropped silently. It cannot make a
+payload count as another peer's: the payload must authenticate as the peer the
+`relay_forwarded` names, checked before any state changes (§14.1). It cannot move a node's
+endpoint: packets received through `relay_forwarded` never update an endpoint (§12.4). It
+cannot make a node use it for an unlisted peer (§14.1), nor nest relaying.
 
 Can: drop, delay, reorder, duplicate (absorbed by the replay window), or refuse to forward:
 denial of service of the relayed path only; the direct retry (§12.3) is unaffected because
-it does not pass through the relay.
+it does not pass through the relay. It can send a node `relay_forwarded` packets at any
+rate on its own session; each costs the node one AEAD open and, for a valid-looking
+payload, one more check, as any listed peer's traffic does (section 4.4).
 
 Structural guarantee: the relay's state holds no key material of a node pair, and
 `kekkai-relay` depends on no tunnel decryption code path; checked by a unit test, a
@@ -198,7 +221,13 @@ node's `allow_inbound` rules for the compromised peer allow, plus ICMP, plus rep
 flows the victim node initiated towards it (§15). It can send any IP packet whose source
 is one of its own overlay addresses (§11 drops the others, so it cannot spoof another
 peer). It can query the lighthouse about any listed key and learn its endpoints (ADR
-0012 accepts this in v0). It can use the relay towards any listed peer.
+0012 accepts this in v0), within the per-sender query budget, which also bounds the
+punches it makes the lighthouse send (§13.2). It can use the relay towards any listed
+peer, within the per-sender rate limit when one is configured (§14.2); the relay forwards
+at most one packet of the same size per packet it receives, to a listed node only, so it
+gains no amplification, and the receiving node drops what does not authenticate. Without a
+configured limit it can make the relay forward as much as the relay's link carries
+(accepted, section 5).
 
 Cannot: read traffic between two other nodes (no shared key); impersonate another node
 (no key); escape its overlay addresses; bypass another node's firewall except through the
@@ -230,7 +259,10 @@ public keys, endpoints and counters, never key material or payloads (§16).
 | Traffic analysis, no padding | Not a goal for v0 | Padding is a format change (wire version) |
 | A compromised node keeps its access until redeploy | Static configuration is the source of truth | Certificates with expiry and revocation in v1 (ADR 0027) |
 | Any listed node may learn any other listed node's endpoints through the lighthouse | Small closed membership | Mutual-listing or group policy with v1 |
-| The relay's payload size bound (1313 bytes) and per-sender counters are the only quota by default | Only listed keys can relay; abuse means a compromised node | Per-sender rate limit, configurable (§14.2) |
+| The relay's payload size bound (1313 bytes) and per-sender counters are the only quota by default | Only listed keys can relay; abuse means a compromised node | Per-sender rate limit, configurable (§14.2, `max_bytes_per_second`) |
+| A compromised lighthouse can make a node resend its in-flight message 1 to up to 16 addresses per punch, at any rate | The lighthouse is part of the trusted entry point; each copy is a 151-byte datagram the node would send anyway; recipients stay silent | A node-side punch budget, if ever needed |
+| Two crossing handshakes may leave one side on the relay and the other direct until the next handshake (§12.3) | Both paths are authenticated and encrypted; the next direct retry settles it within 60 s | None planned |
+| A lighthouse or relay host exposes, to members of its group, where every node is (lighthouse) or which nodes use the relay and how much (relay) | Socket permissions; the group should be empty or hold the operator only on the entry point | None planned |
 | Stray non-SYN TCP segments from a peer reach the kernel and elicit a reset over the tunnel | Stateless TCP check, no connection tracking | Connection tracking later (ADR 0027) |
 | Late replies of a UDP flow evicted from a full flow table are subject to the rules | Bounded memory for the iOS target | Larger configured table on hosts that need it |
 
@@ -242,8 +274,11 @@ reordering and duplication within the window; a lost direct path falls back to a
 within `DIRECT_PATH_TIMEOUT` and retries directly every `DIRECT_RETRY_INTERVAL`; a node
 whose lighthouse disappears keeps every established session and re-registers when it
 returns; the lighthouse's and relay's loss of memory on restart is repaired by the next
-keepalive. None of this holds against an attacker who controls the path or floods the
-link.
+keepalive (for the relay: the nodes' "new handshake" timer re-handshakes within 15 s of
+the first unanswered forward, and relayed traffic resumes after a fresh rediscovery, about
+20 s in the simulation). The query budget and the relay's rate limit bound what one
+compromised node takes from the shared roles. None of this holds against an attacker who
+controls the path or floods the link.
 
 ## 7. Assumptions
 
@@ -278,3 +313,24 @@ link.
    and the rekey and reject timers against WireGuard's.
 6. §16: that every drop condition is listed and reachable, and that no path produces
    output before full authentication.
+
+## 9. What reviewers should look at (gate 2)
+
+Gate 2 covers the complete protocol: everything of gate 1 as amended, plus discovery,
+NAT traversal and relaying. The parts no published analysis covers, in order of risk:
+
+1. §14.1 and §12.4: the relayed receive path. A `relay_forwarded` payload re-enters the
+   whole of §5.6 onwards on path `relayed(R)`; the claimed sender is checked before any
+   state change; nothing nested; a relayed packet never moves an endpoint; message 2 and
+   everything a packet triggers follow that packet's path.
+2. §14.2: the relay's state (no key material of a node pair, counters and buckets only,
+   listed keys only), its silence towards unlisted keys and destinations, the absence of
+   amplification, and the rate limit's arithmetic.
+3. §12.3: the fallback's lifetime (tied to one attempt sequence), the direct retry, and the
+   competing direct and relayed sessions; that no path lets a peer or relay choose which
+   session a node uses beyond what an on-path attacker can already do.
+4. §13.2: what the lighthouse answers, to whom, from which address (`observe` follows
+   every authenticated datagram), and the query budget that bounds punches.
+5. §12.2 and §12.5: candidate admission and the rediscovery triggers: bounded memory,
+   bounded queries, and that only authenticated packets move an endpoint.
+6. §16 and §17: that the new drop conditions are listed and every new state is bounded.

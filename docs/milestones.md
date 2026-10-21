@@ -149,6 +149,13 @@ Nothing external blocks v0.1.
 - Silence: a `relay_forward` from an unlisted key gets no reply.
 - Review gate 2 passed (authorizes Internet exposure).
 
+**Note (2026-10-21)**: the per-sender rate limit is in payload bytes per second
+(`[service] max_bytes_per_second`), and the lighthouse's query budget left open by the v0.4
+review is decided with it (spec §13.2, §14.2, ADR 0031, proposed). The "no dependency on
+the tunnel decryption path" criterion is checked by `relay-has-no-tunnel` (no `tun` feature,
+no `kekkai-node` in the relay's `cargo tree`). What review gate 2 receives is listed in ADR
+0021's amendment "review gate 2 brief".
+
 **Dependencies**: v0.4.
 
 **Excluded**: multi-relay, TCP/443, relay selection by RTT.

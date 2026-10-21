@@ -99,3 +99,48 @@ own symmetric state is out of v0 scope.
 
 **Gate 1 status: PASSED on 2026-10-21 — authorizes real use on a local network only (v0.3
 between two hosts on a hypervisor bridge); not Internet exposure (gate 2, end of v0.5).**
+
+## Amendment — 2026-10-21: review gate 2 brief
+
+Gate 2 covers the complete protocol at the end of v0.5 (decision above). What the
+reviewers receive, as for gate 1, never the code alone:
+
+- **Specification**: `docs/spec/protocol.md` as amended for v0.5 (status line of that
+  date): every section, with §9, §10.2, §12 (paths, candidates, §12.3 relay fallback and
+  direct retry, §12.4 roaming, §12.5 rediscovery triggers, §12.6 reporting), §13
+  (lighthouse, with the §13.2 query budget), §14 (relay), §16 and §17 new or changed since
+  gate 1.
+- **Threat model**: `docs/threat-model.md` as amended for v0.5, sections 4.2 to 4.4 and
+  9 ("What reviewers should look at (gate 2)").
+- **Diff**: `71692fe..` the last v0.5 commit, that is all of v0.4 (lighthouse, discovery,
+  hole punching, roaming, their review fixes) and v0.5 (relay). The gate-1 files
+  (`handshake`, `session`, `wire`, `mac1`, `tai64n`, `tlv`, `resolver` in `kekkai-core`)
+  changed in that range only by the `DropReason::RateLimited` variant and its name in
+  `wire.rs`; `peer.rs` only gained accessors in v0.4.
+- **Vectors**: unchanged files `keygen.json`, `tai64n.json`, `tlv.json`,
+  `noise_ikpsk2.json`, `handshake.json`, `wire.json` (whose `inner_messages` hold the four
+  lighthouse messages and `relay_forward` / `relay_forwarded`, frozen since v0.1),
+  `replay.json`. v0.5 adds no codec. The behaviour of §12 to §14 is pinned instead by the
+  deterministic simulation (`crates/kekkai-core/tests/simulation.rs`: cone, symmetric and
+  mixed NATs, moves, lighthouse and relay restarts, relay fallback, direct upgrade, rate
+  limit, silence), unit tests (`src/tests/relay.rs`: opaque forwarding, unlisted
+  destinations, rate-limit and query-budget arithmetic) and a property test of the token
+  bucket.
+- **Integration evidence**: the nixosTests `nat-direct`, `roaming` (v0.4, passed),
+  `nat-relayed` and `relay-upgrade` (v0.5), with their results.
+
+The parts no published analysis covers, which the brief names explicitly:
+
+1. The relayed receive path (§14.1, §12.4): a payload re-entering §5.6 on path
+   `relayed(R)`, the claimed-sender check before any state change, no nesting, a relayed
+   packet never moving an endpoint, responses following the path of what triggered them.
+2. The relay role (§14.2): opaque forwarding, per-sender state without key material, the
+   rate limit, silence towards unlisted keys and destinations, no amplification.
+3. Path selection (§12.2, §12.3, §12.5): candidate admission, the rediscovery triggers and
+   their pacing, the relay fallback tied to one attempt sequence, the direct retry, and
+   competing direct and relayed sessions.
+4. The lighthouse protocol (§13): what is registered and observed, who is told what, the
+   punch, and the query budget that bounds it.
+
+WireGuard's analyses keep covering the handshake and transport (gate 1); the lighthouse and
+relay messages ride inside those sessions and add no cryptography.
