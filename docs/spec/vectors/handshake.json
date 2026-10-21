@@ -46,7 +46,7 @@
     {
       "name": "initiator keepalive right after completion",
       "direction": "initiator_to_responder",
-      "counter": 0,
+      "counter": "0",
       "inner_type": 2,
       "body": "",
       "receiver_index": 1496236940,
@@ -55,7 +55,7 @@
     {
       "name": "initiator ip_packet",
       "direction": "initiator_to_responder",
-      "counter": 1,
+      "counter": "1",
       "inner_type": 1,
       "body": "4500001c00010000400166de0a0000010a0000020800f7ff00000000",
       "receiver_index": 1496236940,
@@ -64,7 +64,7 @@
     {
       "name": "responder keepalive (passive)",
       "direction": "responder_to_initiator",
-      "counter": 0,
+      "counter": "0",
       "inner_type": 2,
       "body": "",
       "receiver_index": 3827897774,
@@ -73,7 +73,7 @@
     {
       "name": "largest counter accepted",
       "direction": "initiator_to_responder",
-      "counter": 18446744073709543486,
+      "counter": "18446744073709543486",
       "inner_type": 2,
       "body": "",
       "receiver_index": 1496236940,

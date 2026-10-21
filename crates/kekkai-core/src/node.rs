@@ -38,6 +38,9 @@ pub struct Output {
     /// The peer that sent the handled datagram, once authenticated (§12.4): the IO layer
     /// records the datagram's source as that peer's endpoint.
     pub from: Option<PublicKey>,
+    /// An authenticated `data` packet whose inner content was rejected (§10, §11, §15): only
+    /// that content is dropped, the transport effects above stand (§8.2). Count it as a drop.
+    pub dropped: Option<DropReason>,
 }
 
 /// Per-peer counters for the control API and the tests.
@@ -177,7 +180,8 @@ impl Node {
         Ok(output)
     }
 
-    /// §5.6, then §7.6, §7.7 or §8.2 and §10, §11 inbound. `Err` is the silent drop of §16.
+    /// §5.6, then §7.6, §7.7 or §8.2 and §10, §11 inbound. `Err` is the silent drop of §16;
+    /// a rejected inner content is `Output::dropped`, with the transport effects kept.
     pub fn handle_datagram(
         &mut self,
         now: Duration,
@@ -249,24 +253,28 @@ impl Node {
                     .datagrams
                     .extend(datagrams.into_iter().map(|d| (key, d)));
                 // §10.2 for a node: ip_packet from peers, keepalive from any session.
-                match Inner::decode(&plaintext)? {
-                    Inner::IpPacket(packet) => {
-                        let (source, destination) =
-                            ip_addresses(packet).ok_or(DropReason::InnerMalformed)?;
-                        if !is_unicast(destination) {
-                            return Err(DropReason::NotUnicast);
+                let accepted = match Inner::decode(&plaintext) {
+                    Ok(Inner::IpPacket(packet)) => match ip_addresses(packet) {
+                        None => Err(DropReason::InnerMalformed),
+                        Some((_, destination)) if !is_unicast(destination) => {
+                            Err(DropReason::NotUnicast)
                         }
-                        if self.routes.get(&source) != Some(&key) {
-                            return Err(DropReason::SourceNotPeer);
+                        Some((source, _)) if self.routes.get(&source) != Some(&key) => {
+                            Err(DropReason::SourceNotPeer)
                         }
-                        if !self.firewall.inbound(now, &self.rules[&key], packet) {
+                        Some(_) if !self.firewall.inbound(now, &self.rules[&key], packet) => {
                             peer.counters.firewall_drops += 1;
-                            return Err(DropReason::Firewall);
+                            Err(DropReason::Firewall)
                         }
-                        output.packets.push(packet.to_vec());
-                    }
-                    Inner::Keepalive => {}
-                    _ => return Err(DropReason::NotAccepted),
+                        Some(_) => Ok(Some(packet.to_vec())),
+                    },
+                    Ok(Inner::Keepalive) => Ok(None),
+                    Ok(_) => Err(DropReason::NotAccepted),
+                    Err(reason) => Err(reason),
+                };
+                match accepted {
+                    Ok(packet) => output.packets.extend(packet),
+                    Err(reason) => output.dropped = Some(reason),
                 }
             }
         }

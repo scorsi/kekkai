@@ -14,7 +14,7 @@ const BITS_PER_WORD: u64 = 64;
 
 /// Sliding window over the counter space (§8.4), as Linux WireGuard's `counter_validate`:
 /// `last` is the highest counter accepted, the bitmap covers the `WORDS × 64` counters below.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayWindow {
     last: u64,
     bitmap: [u64; WORDS as usize],
@@ -127,6 +127,11 @@ impl Session {
     /// Data is sent only on a live, confirmed session whose counter is not exhausted (§8.1, §8.3).
     pub fn can_send(&self, now: Duration) -> bool {
         self.is_live(now) && self.confirmed && self.sending_counter < REJECT_AFTER_MESSAGES
+    }
+
+    #[cfg(test)]
+    pub(crate) fn window(&self) -> &ReplayWindow {
+        &self.window
     }
 
     pub fn sending_counter(&self) -> u64 {

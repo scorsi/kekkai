@@ -258,8 +258,12 @@ impl Sim {
         let (mono, wall) = (host.mono(self.now), host.wall(self.now));
         match host.node.handle_datagram(mono, wall, datagram) {
             Ok(out) => {
+                let dropped = out.dropped;
+                if let Some(reason) = dropped {
+                    host.drops.push((self.now, reason));
+                }
                 self.emit(to, out);
-                Ok(())
+                dropped.map_or(Ok(()), Err)
             }
             Err(reason) => {
                 host.drops.push((self.now, reason));
@@ -617,19 +621,20 @@ fn wall_clock_stepped_backwards() {
     sim.hosts[0].wall_offset = -200;
     sim.stream(0, 1, secs(1), secs(400));
     let rejected = sim.drops(1, DropReason::TimestampNotNewer);
-    assert!(rejected.len() >= 15, "{} rejections", rejected.len());
-    assert!(rejected.iter().all(|t| *t >= secs(240) && *t <= secs(321)));
+    assert!(rejected.len() >= 8, "{} rejections", rejected.len());
+    assert!(rejected.iter().all(|t| *t >= secs(240) && *t < secs(290)));
     let attempts: Vec<_> = sim
         .message_1s(0, 1)
         .into_iter()
-        .filter(|t| *t >= secs(240) && *t < secs(320))
+        .filter(|t| *t >= secs(240))
         .collect();
     assert!(
         attempts.windows(2).all(|w| w[1] - w[0] >= secs(5)),
         "retransmissions keep their monotonic cadence: {attempts:?}"
     );
-    assert!(
-        attempts.len() >= 15,
+    assert_eq!(
+        attempts.len(),
+        rejected.len(),
         "timers are unaffected by the wall-clock step"
     );
     let answered: Vec<_> = sim
@@ -638,23 +643,22 @@ fn wall_clock_stepped_backwards() {
         .filter(|(t, f, _, ty)| *f == 1 && *ty == wire::TYPE_HANDSHAKE_INIT && *t > secs(130))
         .map(|(t, ..)| *t)
         .collect();
-    assert!(
-        answered.iter().any(|t| *t >= secs(280) && *t < secs(300)),
-        "host 1's responder rule initiated and host 0 answered it: {answered:?}"
-    );
+    let answer = *answered
+        .iter()
+        .find(|t| **t >= secs(280) && **t < secs(300))
+        .unwrap_or_else(|| panic!("host 1's responder rule initiated: {answered:?}"));
+    // §8.2 step 5: confirming host 1's session ended host 0's rejected sequence (no further
+    // message 1) and carried its staged packets, so nothing waited for its clock to catch up.
+    assert!(attempts.iter().all(|t| *t < answer));
     assert_eq!(
         unique(&sim.received(1, 0, secs(0))),
         400,
         "traffic never stopped: host 0 still answers its peer's handshakes"
     );
-    let accepted_after: Vec<_> = sim
-        .emitted
-        .iter()
-        .filter(|(t, f, _, ty)| *f == 1 && *ty == wire::TYPE_HANDSHAKE_RESP && *t > secs(320))
-        .collect();
-    assert!(
-        !accepted_after.is_empty(),
-        "host 0's own initiations are accepted once its clock caught up"
+    let status = sim.hosts[0].node.status(&sim.hosts[1].key).unwrap();
+    assert_eq!(
+        (status.handshake_in_flight, status.staged_packets),
+        (false, 0)
     );
 }
 
@@ -818,4 +822,51 @@ fn firewall_rules_flows_and_eviction() {
     assert!(!send(&mut sim, 2, 1, 17, udp(53, 6000)), "evicted flow");
     assert!(send(&mut sim, 2, 1, 17, udp(53, 6001)));
     assert!(send(&mut sim, 2, 1, 17, udp(53, 6002)));
+}
+
+/// §8.2 end (F1): host 1's first data packet confirms host 0's responder session but carries
+/// a spoofed inner source. Only that content is dropped: the confirmation and host 0's staged
+/// packet (step 5) still go out, and the sender is still reported.
+#[test]
+fn rejected_inner_keeps_the_transport_effects() {
+    let mut sim = Sim::new(9, 2, PERFECT);
+    sim.send_ip(0, 1).unwrap();
+    let spoofed = ip_packet(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), address(0), 7);
+    sim.send_raw(1, &spoofed).unwrap();
+    let pop = |sim: &mut Sim, to: usize| {
+        let mut held = Vec::new();
+        let found = loop {
+            let event = sim.queue.pop().expect("queued").0;
+            if event.to == to {
+                break event.datagram;
+            }
+            held.push(event);
+        };
+        sim.queue.extend(held.into_iter().map(Reverse));
+        found
+    };
+    let msg1_1 = pop(&mut sim, 0);
+    let msg1_0 = pop(&mut sim, 1);
+    sim.deliver(0, &msg1_1).unwrap();
+    sim.deliver(1, &msg1_0).unwrap();
+    let lost_msg2 = pop(&mut sim, 0);
+    assert_eq!(lost_msg2[0], wire::TYPE_HANDSHAKE_RESP);
+    let msg2_0 = pop(&mut sim, 1);
+    sim.deliver(1, &msg2_0).unwrap();
+    let data = pop(&mut sim, 0);
+    assert_eq!(sim.deliver(0, &data), Err(DropReason::SourceNotPeer));
+    let status = sim.hosts[0].node.status(&sim.hosts[1].key).unwrap();
+    assert!(status.current && !status.handshake_in_flight);
+    assert_eq!(status.staged_packets, 0);
+    assert_eq!(
+        status.counters.rx_packets, 2,
+        "message 1 and the data packet"
+    );
+    sim.run_until(secs(1));
+    assert_eq!(
+        sim.received(1, 0, secs(0)),
+        [0],
+        "the staged packet went out"
+    );
+    assert!(sim.received(0, 1, secs(0)).is_empty());
 }

@@ -75,6 +75,52 @@ fn vector<T: Serialize + DeserializeOwned>(file: &str, regenerate: impl FnOnce(T
     }
 }
 
+/// §19: a 64-bit counter is a decimal string in the files, exact in any JSON reader.
+mod decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// §19: no vector file carries a JSON number a double cannot hold exactly.
+#[test]
+fn no_json_number_above_2_pow_53() {
+    const MAX: u64 = (1 << 53) - 1;
+    fn walk(file: &str, v: &serde_json::Value) {
+        match v {
+            serde_json::Value::Number(n) => assert!(
+                n.as_u64().is_some_and(|n| n <= MAX)
+                    || n.as_i64().is_some_and(|n| n.unsigned_abs() <= MAX),
+                "{file}: JSON number {n} is not exact as a double; write it as a decimal string"
+            ),
+            serde_json::Value::Array(a) => a.iter().for_each(|v| walk(file, v)),
+            serde_json::Value::Object(o) => o.values().for_each(|v| walk(file, v)),
+            _ => {}
+        }
+    }
+    let mut files = 0;
+    for entry in std::fs::read_dir(DIR).expect("vector directory") {
+        let path = entry.expect("entry").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("UTF-8 name");
+        if name.ends_with(".json") {
+            walk(name, &load::<serde_json::Value>(name).1);
+            files += 1;
+        }
+    }
+    assert_eq!(files, 7, "every vector file is checked");
+}
+
 // --- keygen.json (§4) ---
 
 #[derive(Serialize, Deserialize)]
@@ -338,6 +384,7 @@ struct DataFields {
     ty: u8,
     version: u8,
     receiver_index: u32,
+    #[serde(with = "decimal")]
     counter: u64,
 }
 
@@ -604,6 +651,7 @@ struct TransportKeys {
 struct DataPacket {
     name: String,
     direction: String,
+    #[serde(with = "decimal")]
     counter: u64,
     inner_type: u8,
     body: String,
@@ -803,6 +851,44 @@ fn handshake() {
         }
         v
     });
+}
+
+/// §19 receiver recognition (C2, accepted property of §5.5): from public fields only, an
+/// observer holding candidate keys learns the receiver of each handshake message.
+#[test]
+fn receiver_recognition_from_public_keys() {
+    use blake2::digest::Mac;
+    use blake2::digest::consts::U16;
+    use blake2::{Blake2s256, Blake2sMac, Digest};
+    let (_, v) = load::<HandshakeFile>("handshake.json");
+    let candidates = [&v.initiator.static_public, &v.responder.static_public];
+    let recognized = |m: &Message| -> Vec<(String, String)> {
+        let dg = unhex(&m.datagram);
+        let covered = dg.len() - 32;
+        candidates
+            .iter()
+            .filter_map(|c| {
+                let key = Blake2s256::new()
+                    .chain_update(crate::MAC1_LABEL)
+                    .chain_update(unhex(c))
+                    .finalize();
+                let mut mac = <Blake2sMac<U16> as Mac>::new_from_slice(&key).unwrap();
+                mac.update(&dg[..covered]);
+                let tag = mac.finalize().into_bytes();
+                (tag[..] == dg[covered..covered + 16]).then(|| (hex(&key), hex(&tag)))
+            })
+            .collect()
+    };
+    assert_eq!(
+        recognized(&v.message_2),
+        [(v.message_2.mac1_key.clone(), v.message_2.mac1.clone())],
+        "message 2: exactly the initiator"
+    );
+    assert_eq!(
+        recognized(&v.message_1),
+        [(v.message_1.mac1_key.clone(), v.message_1.mac1.clone())],
+        "message 1: exactly the responder"
+    );
 }
 
 /// Splits a handshake datagram into the vector's fields and checks `mac1` against the key.

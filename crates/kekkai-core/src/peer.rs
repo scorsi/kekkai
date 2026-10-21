@@ -240,16 +240,10 @@ impl Peer {
         self.last_handshake = Some(ctx.now);
         self.counters.handshakes_initiated += 1;
         self.after_authenticated_receive();
-        let staged: Vec<Vec<u8>> = self.staged.drain(..).collect();
-        let mut out = Vec::with_capacity(staged.len().max(1));
-        if staged.is_empty() {
-            out.extend(self.send_keepalive(ctx));
-        } else {
-            for inner in &staged {
-                out.extend(self.seal_on_current(ctx, inner, false));
-            }
+        if self.staged.is_empty() {
+            return Ok(self.send_keepalive(ctx));
         }
-        Ok(out)
+        Ok(self.send_staged(ctx))
     }
 
     /// §8.2 steps 1 to 5 and the responder rekey rule (§8.6). Returns the inner plaintext
@@ -265,11 +259,6 @@ impl Peer {
             .ok_or(DropReason::UnknownIndex)?;
         let session = self.slot_mut(slot).as_mut().expect("slot_of found it");
         let inner = session.open(ctx.now, data.counter, data.ciphertext)?;
-        if slot == Slot::Next {
-            let mut session = self.next.take().expect("slot_of found it");
-            session.confirmed = true;
-            self.promote(session, ctx);
-        }
         self.after_authenticated_receive();
         if inner.first() != Some(&inner::KEEPALIVE) && self.passive_keepalive_at.is_none() {
             self.passive_keepalive_at = Some(ctx.now + KEEPALIVE_TIMEOUT);
@@ -281,6 +270,15 @@ impl Peer {
             });
         if responder_rekey {
             out.extend(self.initiate(ctx));
+        }
+        if slot == Slot::Next {
+            // Step 5: the confirmed responder session ends any in-flight sequence (not an
+            // abandonment) and carries the staged packets; no keepalive if there is none.
+            let mut session = self.next.take().expect("slot_of found it");
+            session.confirmed = true;
+            self.promote(session, ctx);
+            self.abort_in_flight(ctx);
+            out.extend(self.send_staged(ctx));
         }
         Ok((inner, out))
     }
@@ -403,16 +401,17 @@ impl Peer {
         self.current = Some(session);
     }
 
-    /// §7.9: starts a handshake unless a message 1 went out less than `REKEY_TIMEOUT` ago;
-    /// a new one replaces the in-flight one.
+    /// §7.9: a trigger starts an attempt sequence unless one is in flight (it is left
+    /// unchanged: only its retransmit deadline advances it) or a message 1 went out less
+    /// than `REKEY_TIMEOUT` ago.
     fn initiate(&mut self, ctx: &mut Ctx<'_>) -> Option<Vec<u8>> {
-        if self
-            .last_init_sent
-            .is_some_and(|t| ctx.now.saturating_sub(t) < REKEY_TIMEOUT)
+        if self.in_flight.is_some()
+            || self
+                .last_init_sent
+                .is_some_and(|t| ctx.now.saturating_sub(t) < REKEY_TIMEOUT)
         {
             return None;
         }
-        self.abort_in_flight(ctx);
         Some(self.send_message_1(ctx, 1))
     }
 
@@ -433,6 +432,15 @@ impl Peer {
         if let Some(flight) = self.in_flight.take() {
             ctx.indices.release(flight.initiator.sender_index);
         }
+    }
+
+    /// §8.7: the staged packets, in FIFO order, each once, on the new `current`.
+    fn send_staged(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {
+        let staged: Vec<Vec<u8>> = self.staged.drain(..).collect();
+        staged
+            .iter()
+            .flat_map(|inner| self.seal_on_current(ctx, inner, false))
+            .collect()
     }
 
     fn send_keepalive(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {

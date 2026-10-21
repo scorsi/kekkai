@@ -442,3 +442,161 @@ fn unknown_tlvs_in_message_1() {
         DropReason::TimestampMissing
     );
 }
+
+/// §8.4 required regression (C3): a bad-tag packet leaves the window bit for bit as it was,
+/// whatever its counter, through the real decrypt path.
+#[test]
+fn bad_tag_never_moves_the_replay_window() {
+    use crate::handshake::SessionKeys;
+    use crate::session::Session;
+    fn pair() -> (Session, Session) {
+        let keys = SessionKeys {
+            send: [1; 32],
+            recv: [2; 32],
+            handshake_hash: [0; 32],
+        };
+        let mirror = SessionKeys {
+            send: [2; 32],
+            recv: [1; 32],
+            handshake_hash: [0; 32],
+        };
+        (
+            Session::new(keys, Role::Initiator, 1, 2, secs(0), true),
+            Session::new(mirror, Role::Responder, 2, 1, secs(0), true),
+        )
+    }
+    fn packet(from: &mut Session, counter: u64, bad_tag: bool) -> Vec<u8> {
+        from.sending_counter = counter;
+        let mut p = from.seal(secs(0), &[crate::inner::KEEPALIVE]).unwrap();
+        if bad_tag {
+            *p.last_mut().unwrap() ^= 1;
+        }
+        p
+    }
+    fn open(to: &mut Session, p: &[u8]) -> Result<Vec<u8>, DropReason> {
+        let Outer::Data(d) = wire::parse(p).unwrap() else {
+            panic!("data")
+        };
+        to.open(secs(0), d.counter, d.ciphertext)
+    }
+    let (mut a, mut b) = pair();
+    let zero = packet(&mut a, 0, false);
+    open(&mut b, &zero).unwrap();
+    let before = b.window().clone();
+    let forged = packet(&mut a, crate::REJECT_AFTER_MESSAGES - 1, true);
+    assert_eq!(open(&mut b, &forged), Err(DropReason::BadTag));
+    assert_eq!(*b.window(), before);
+    open(&mut b, &packet(&mut a, 1, false)).unwrap();
+    assert_eq!(open(&mut b, &zero), Err(DropReason::CounterRejected));
+
+    // Across the ring: 8342 (word 2) would clear words 0 to 2 and move `last`.
+    let (mut a, mut b) = pair();
+    let high = packet(&mut a, 8150, false);
+    open(&mut b, &high).unwrap();
+    let before = b.window().clone();
+    let forged = packet(&mut a, 8342, true);
+    assert_eq!(open(&mut b, &forged), Err(DropReason::BadTag));
+    assert_eq!(*b.window(), before);
+    open(&mut b, &packet(&mut a, 30, false)).expect("8120 behind 8150: inside the window");
+    assert_eq!(open(&mut b, &high), Err(DropReason::CounterRejected));
+}
+
+/// Simultaneous open where B's answer to A is lost (§8.2 step 5, §8.7, C4): B's first data
+/// packet confirms A's responder session, which ends A's own sequence and carries A's
+/// staged packet at once, exactly once. With `stale_wall`, B rejects A's message 1 because
+/// A's wall clock stepped back below a timestamp B already accepted from A.
+fn simultaneous_open_with_one_lost_response(stale_wall: bool) {
+    let t0 = secs(100);
+    let (mut a, mut b) = parties();
+    if stale_wall {
+        // B accepts a message 1 from A stamped one hour ahead of A's clock.
+        let mut ahead = Party::new(a.key.clone(), b.key.public());
+        let mut ctx = Ctx {
+            now: t0,
+            wall: wall(t0 + secs(3600)),
+            local: &ahead.key,
+            indices: &mut ahead.indices,
+        };
+        let msg1 = ahead.peer.send_ip(&mut ctx, PACKET).remove(0);
+        b.receive_ok(t0, &msg1);
+    }
+    let msg1_a = a.send_ip(t0).remove(0);
+    let msg1_b = b.send_ip(t0).remove(0);
+    match b.receive(t0, &msg1_a) {
+        Ok((_, lost)) => assert_eq!(lost.len(), 1, "B's message 2, lost"),
+        Err(reason) => {
+            assert!(stale_wall);
+            assert_eq!(reason, DropReason::TimestampNotNewer);
+        }
+    }
+    let (_, msg2_a) = a.receive_ok(t0, &msg1_b);
+    let (_, data_b) = b.receive_ok(t0, &msg2_a[0]);
+    assert_eq!(data_b.len(), 1, "B's staged packet");
+    assert_eq!(a.peer.staged_packets(), 1);
+    assert!(a.peer.has_in_flight_handshake());
+    let (inner, data_a) = a.receive_ok(t0, &data_b[0]);
+    assert_eq!(
+        inner.as_deref(),
+        Some(Inner::IpPacket(PACKET).encode().as_slice())
+    );
+    assert_eq!(data_a.len(), 1, "A's staged packet, at once, no keepalive");
+    assert_eq!(a.peer.staged_packets(), 0);
+    assert!(!a.peer.has_in_flight_handshake(), "cleared, not abandoned");
+    assert_eq!(a.peer.counters.handshake_timeouts, 0);
+    assert_eq!(
+        a.peer.current().map(|s| s.role),
+        Some(Role::Responder),
+        "A sends on the session B initiated"
+    );
+    assert_eq!(a.indices.len(), 1, "the in-flight index is released");
+    let (inner, _) = b.receive_ok(t0, &data_a[0]);
+    assert_eq!(
+        inner.as_deref(),
+        Some(Inner::IpPacket(PACKET).encode().as_slice())
+    );
+    assert_eq!(
+        b.receive(t0, &data_a[0]).unwrap_err(),
+        DropReason::CounterRejected,
+        "no duplicate"
+    );
+    assert!(
+        a.tick(t0 + REKEY_TIMEOUT + REKEY_TIMEOUT_JITTER)
+            .iter()
+            .all(|d| d[0] != wire::TYPE_HANDSHAKE_INIT),
+        "no retransmission of the cleared message 1"
+    );
+}
+
+#[test]
+fn responder_confirmation_flushes_staged_packets() {
+    simultaneous_open_with_one_lost_response(false);
+}
+
+#[test]
+fn responder_confirmation_flushes_staged_packets_after_wall_clock_step_back() {
+    simultaneous_open_with_one_lost_response(true);
+}
+
+/// §7.9 strict budget (C5): packets staged just before every retransmit deadline never
+/// reset the sequence; it is abandoned after `MAX_TIMER_HANDSHAKES` message 1s.
+#[test]
+fn sending_never_resets_the_retry_budget() {
+    let (mut a, _) = parties();
+    let t0 = secs(0);
+    let mut sent = a.send_ip(t0).len();
+    let mut last = t0;
+    while let Some(deadline) = a.peer.next_deadline() {
+        let before = deadline - Duration::from_nanos(1);
+        assert!(a.send_ip(before).is_empty(), "the in-flight one is kept");
+        let out = a.tick(deadline);
+        assert!(out.iter().all(|d| d[0] == wire::TYPE_HANDSHAKE_INIT));
+        sent += out.len();
+        last = deadline;
+    }
+    assert_eq!(sent, MAX_TIMER_HANDSHAKES as usize);
+    assert!(last >= t0 + REKEY_TIMEOUT * MAX_TIMER_HANDSHAKES);
+    assert_eq!(a.peer.counters.handshake_timeouts, 1);
+    assert_eq!(a.peer.staged_packets(), 0, "the queue is dropped");
+    assert!(a.indices.is_empty());
+    assert_eq!(a.send_ip(last).len(), 1, "a new sequence starts at once");
+}

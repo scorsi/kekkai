@@ -117,6 +117,26 @@
       "result": "ok",
       "known_tlvs": [],
       "note": "skipped as unknown non-critical"
+    },
+    {
+      "name": "timestamp sent as 0x81 is an unknown critical type",
+      "bytes": "81000c400000006955b90a01000000",
+      "result": "error",
+      "error": "unknown_critical",
+      "known_tlvs": [
+        1
+      ],
+      "note": "the critical bit is part of the type: 0x01 known does not make 0x81 known"
+    },
+    {
+      "name": "0x81 beside a 0x01 timestamp rejects the message",
+      "bytes": "01000c400000006955b90a0100000081000c400000006955b90a01000000",
+      "result": "error",
+      "error": "unknown_critical",
+      "known_tlvs": [
+        1
+      ],
+      "note": "canonical order, two different types"
     }
   ],
   "message_1_v0_known_tlvs": [

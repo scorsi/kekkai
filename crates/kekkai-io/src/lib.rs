@@ -115,7 +115,14 @@ pub async fn run(
                     .node
                     .handle_datagram(clock::monotonic(), clock::wall(), &udp_buf[..n]);
                 match result {
-                    Ok(output) => (output, Some(source)),
+                    Ok(output) => {
+                        // Rejected inner content: the transport effects still go out (§8.2).
+                        if let Some(reason) = output.dropped {
+                            guard.count_drop(reason);
+                            trace!(event = "datagram-dropped", reason = reason.as_str());
+                        }
+                        (output, Some(source))
+                    }
                     Err(reason) => {
                         guard.count_drop(reason);
                         trace!(event = "datagram-dropped", reason = reason.as_str());
