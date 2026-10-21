@@ -26,6 +26,7 @@ use kekkai_core::keys::{PublicKey, StaticKey};
 use kekkai_core::node::{Node, PathFailure, PeerStatus};
 use kekkai_core::peer::Counters;
 use kekkai_core::wire::DropReason;
+use tracing::field::display;
 use tracing::{debug, info, trace};
 
 /// ADR 0004: the loop never sleeps longer than this, so that a suspend is noticed within a
@@ -131,6 +132,7 @@ pub async fn run(
     let mut tun_buf = vec![0u8; 1 << 16];
     let mut seen: HashMap<PublicKey, Seen> = HashMap::new();
     let lock = || state.lock().expect("no panic while holding the state");
+    let log_peers = lock().log_peers;
     loop {
         let next = lock().node.next_deadline();
         let wake = next
@@ -199,16 +201,27 @@ pub async fn run(
                 output
             }
         };
-        for (to, datagram) in output.datagrams {
-            if let Err(e) = socket.send_to(&datagram, to.socket_addr()).await {
-                debug!(event = "udp-send-failed", error = %e, to = %to.display());
-            }
-        }
+        send_datagrams(&socket, output.datagrams, log_peers).await;
         for mut packet in output.packets {
             mss::clamp(&mut packet, mtu);
             if let Err(e) = tunnel.send(&packet).await {
                 debug!(event = "tunnel-write-failed", error = %e);
             }
+        }
+    }
+}
+
+/// Sends what the core produced. A failure is logged with its destination only when
+/// `log_peers`: a lighthouse never logs where a node is, at any level (ADR 0012, 0030).
+async fn send_datagrams(
+    socket: &tokio::net::UdpSocket,
+    datagrams: Vec<(Endpoint, Vec<u8>)>,
+    log_peers: bool,
+) {
+    for (to, datagram) in datagrams {
+        if let Err(e) = socket.send_to(&datagram, to.socket_addr()).await {
+            let to = log_peers.then(|| display(to.display()));
+            debug!(event = "udp-send-failed", error = %e, to);
         }
     }
 }

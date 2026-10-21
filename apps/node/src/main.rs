@@ -7,13 +7,16 @@ mod metrics;
 
 use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kekkai_core::inner::Endpoint;
-use kekkai_core::node::{LighthouseConfig, Node, PeerConfig};
+use kekkai_core::keys::PublicKey;
+use kekkai_core::node::{LighthouseConfig, Node, PeerConfig, PeerStatus};
+use kekkai_core::{KEEPALIVE_FAILURES_BEFORE_REREGISTER, PERSISTENT_KEEPALIVE};
 use kekkai_io::config::{DEFAULT_PATH, NodeConfig};
 use kekkai_io::{Locals, PeerInfo, State, clock, systemd, udp};
 use tracing::{info, warn};
@@ -104,8 +107,11 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
     let mut peers = HashMap::new();
     let mut peer_configs = Vec::new();
     let mut routes = Vec::new();
+    let mut named = Vec::new();
+    let start = clock::monotonic();
     for peer in &config.peers {
         let public_key = peer.key()?;
+        named.extend(Named::new(public_key, &peer.name, &peer.endpoints, start));
         let addresses = peer.host_addresses();
         let mut endpoints = Vec::new();
         for endpoint in &peer.endpoints {
@@ -121,23 +127,23 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
             endpoints,
         });
     }
-    let mut node = Node::new(key, peer_configs);
+    let mut node = Node::new(key, peer_configs.clone());
     node.set_udp_flows_max(config.firewall.udp_flows_max);
     let mut lighthouses = Vec::new();
     let mut lighthouse_configs = Vec::new();
     for l in &config.lighthouses {
         let public_key = l.key()?;
         lighthouses.push((public_key, l.endpoint.clone()));
-        // shortcut: the first resolved address only; DNS is re-resolved on restart (ADR 0016
-        // also asks for keepalive failures, open in the napkin).
-        if let Some(endpoint) = resolve("lighthouse", &l.endpoint).await.first() {
-            lighthouse_configs.push(LighthouseConfig {
-                public_key,
-                endpoint: *endpoint,
-            });
-        }
+        let endpoints = vec![l.endpoint.clone()];
+        named.extend(Named::new(public_key, "lighthouse", &endpoints, start));
+        // Installed even when unresolved: `status` shows it and `reresolve` retries (§13.1).
+        lighthouse_configs.push(LighthouseConfig {
+            public_key,
+            endpoints: resolve("lighthouse", &l.endpoint).await,
+        });
     }
-    node.set_lighthouses(lighthouse_configs);
+    node.set_lighthouses(lighthouse_configs.clone());
+    let configs = (peer_configs, lighthouse_configs);
     let control = control::Control::new(&config, *node.public_key(), clock::monotonic());
     let mtu = config.node.mtu;
     let (tunnel, interface) =
@@ -171,8 +177,101 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
     );
     tokio::select! {
         r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{interface}: {e}")),
-        r = control.serve(state, listener) => r.map_err(|e| format!("control socket: {e}")),
+        r = control.serve(state.clone(), listener) => r.map_err(|e| format!("control socket: {e}")),
+        () = reresolve(state, configs, named) => Ok(()),
         () = terminate() => Ok(()),
+    }
+}
+
+/// A party whose endpoints include a DNS name (ADR 0016), with its resolution backoff.
+struct Named {
+    key: PublicKey,
+    owner: String,
+    /// Every endpoint as written, literals included (they resolve without DNS).
+    endpoints: Vec<String>,
+    delay: Duration,
+    next: Duration,
+}
+
+/// §13.1: a stale party is resolved again `RESOLVE_MIN` after start-up, then with a delay
+/// doubling up to `RESOLVE_MAX` while it stays stale.
+const RESOLVE_MIN: Duration = kekkai_core::REKEY_TIMEOUT;
+const RESOLVE_MAX: Duration = Duration::from_secs(300);
+
+impl Named {
+    fn new(key: PublicKey, owner: &str, endpoints: &[String], now: Duration) -> Option<Self> {
+        let dns = endpoints.iter().any(|e| e.parse::<SocketAddr>().is_err());
+        dns.then(|| Self {
+            key,
+            owner: owner.into(),
+            endpoints: endpoints.to_vec(),
+            delay: RESOLVE_MIN,
+            next: now + RESOLVE_MIN,
+        })
+    }
+
+    /// Whether to resolve now; advances the backoff when it does.
+    fn due(&mut self, status: &PeerStatus, now: Duration) -> bool {
+        if !stale(status, now) {
+            self.delay = RESOLVE_MIN;
+            self.next = now + RESOLVE_MIN;
+            return false;
+        }
+        if now < self.next {
+            return false;
+        }
+        self.next = now + self.delay;
+        self.delay = (self.delay * 2).min(RESOLVE_MAX);
+        true
+    }
+}
+
+/// §13.1, ADR 0016 "keepalive failure": a handshake in flight or a session up, and nothing
+/// authenticated from the party for as long as three failed registers take. An unresolved
+/// lighthouse is always handshaking (§9 last row), hence stale.
+fn stale(status: &PeerStatus, now: Duration) -> bool {
+    let silence = PERSISTENT_KEEPALIVE * KEEPALIVE_FAILURES_BEFORE_REREGISTER;
+    (status.current || status.handshake_in_flight)
+        && status
+            .last_received
+            .is_none_or(|t| now.saturating_sub(t) >= silence)
+}
+
+/// Resolves the stale parties of `named` again and replaces their static candidates when
+/// the addresses changed, without touching sessions or an in-flight sequence (§13.1).
+/// `configs` is the peer and lighthouse list the node was built with.
+async fn reresolve(
+    state: Arc<Mutex<State>>,
+    mut configs: (Vec<PeerConfig>, Vec<LighthouseConfig>),
+    mut named: Vec<Named>,
+) {
+    loop {
+        tokio::time::sleep(kekkai_io::MAX_SLEEP).await;
+        for n in &mut named {
+            let now = clock::monotonic();
+            let status = state.lock().expect("no poison").node.status(&n.key);
+            if !status.is_some_and(|s| n.due(&s, now)) {
+                continue;
+            }
+            let mut found = Vec::new();
+            for endpoint in &n.endpoints {
+                found.extend(resolve(&n.owner, endpoint).await);
+            }
+            found.dedup();
+            let (peers, lighthouses) = &mut configs;
+            let mut guard = state.lock().expect("no poison");
+            if let Some(p) = peers.iter_mut().find(|p| p.public_key == n.key) {
+                if !found.is_empty() && p.endpoints != found {
+                    p.endpoints = found;
+                    guard.node.set_peers(peers.clone());
+                }
+            } else if let Some(l) = lighthouses.iter_mut().find(|l| l.public_key == n.key) {
+                if !found.is_empty() && l.endpoints != found {
+                    l.endpoints = found;
+                    guard.node.set_lighthouses(lighthouses.clone());
+                }
+            }
+        }
     }
 }
 
@@ -216,4 +315,62 @@ fn open_tunnel(
     let utun = kekkai_io::utun::Utun::create(mtu, addresses, routes)?;
     let name = utun.name().to_owned();
     Ok((utun, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use kekkai_core::keys::StaticKey;
+
+    use super::*;
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    /// L4: an unresolved lighthouse is installed with no candidate, shows in the node's
+    /// status as handshaking, and is resolved again 5 s after start-up, then with a doubling
+    /// delay up to 5 minutes while it stays silent; an answer resets the backoff.
+    #[test]
+    fn unresolved_lighthouses_are_retried_with_backoff() {
+        let lh = StaticKey::from_bytes([3; 32]).clamped().public();
+        let mut node = Node::new(StaticKey::from_bytes([1; 32]).clamped(), Vec::new());
+        node.set_lighthouses(vec![LighthouseConfig {
+            public_key: lh,
+            endpoints: Vec::new(),
+        }]);
+        let out = node.tick(
+            secs(0),
+            kekkai_core::tai64n::Tai64n::from_unix(1_800_000_000, 0),
+        );
+        assert!(out.datagrams.is_empty(), "no candidate to send to");
+        let status = node.status(&lh).expect("installed although unresolved");
+        assert_eq!(kekkai_io::session_state(&status), "handshaking");
+
+        let written = vec!["lighthouse.example.org:4800".to_string()];
+        let mut named = Named::new(lh, "lighthouse", &written, secs(0)).expect("a DNS name");
+        let tries: Vec<u64> = (0..700).filter(|t| named.due(&status, secs(*t))).collect();
+        assert_eq!(tries, [5, 10, 20, 40, 80, 160, 320, 620]);
+
+        let answered = PeerStatus {
+            current: true,
+            last_received: Some(secs(700)),
+            ..status
+        };
+        assert!(!named.due(&answered, secs(700)));
+        assert!(
+            !named.due(&answered, secs(774)),
+            "silent for less than 75 s"
+        );
+        assert!(
+            !named.due(&answered, secs(775)),
+            "stale, first try 5 s after the reset"
+        );
+        assert!(named.due(&answered, secs(779)));
+
+        let literals = vec![
+            "192.0.2.1:4800".to_string(),
+            "[2001:db8::1]:4800".to_string(),
+        ];
+        assert!(Named::new(lh, "lighthouse", &literals, secs(0)).is_none());
+    }
 }

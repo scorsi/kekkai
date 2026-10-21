@@ -16,6 +16,7 @@ use kekkai_core::node::{LighthouseConfig, Node, Output, PathFailure, PeerConfig}
 use kekkai_core::tai64n::Tai64n;
 use kekkai_core::wire::{self, DropReason};
 use kekkai_core::{MTU, PERSISTENT_KEEPALIVE, REJECT_AFTER_TIME, REKEY_AFTER_TIME};
+use wire::TYPE_HANDSHAKE_INIT;
 
 const EPOCH: i64 = 1_767_225_600;
 
@@ -163,6 +164,10 @@ struct Sim {
     /// Links cut by a scenario: `(from, to)`.
     partitions: HashSet<(usize, usize)>,
     emitted: Vec<Emitted>,
+    /// Every datagram handed to the network: `(sim time, from, destination, bytes)`.
+    sent: Vec<(Duration, usize, Endpoint, Vec<u8>)>,
+    /// The lighthouse's key, to restart it (`Sim::discovery`).
+    lighthouse_key: Option<StaticKey>,
     /// Datagrams sent per link, the `n` of `mix(seed, link, n)`.
     link_counts: Vec<u64>,
 }
@@ -242,6 +247,8 @@ impl Sim {
             queue: BinaryHeap::new(),
             partitions: HashSet::new(),
             emitted: Vec::new(),
+            sent: Vec::new(),
+            lighthouse_key: None,
             link_counts: vec![0; n * n],
         }
     }
@@ -266,7 +273,7 @@ impl Sim {
         let key = StaticKey::generate();
         let lighthouse = LighthouseConfig {
             public_key: key.public(),
-            endpoint: ep(203, 0, 113, 1, 4800),
+            endpoints: vec![ep(203, 0, 113, 1, 4800)],
         };
         let keys: Vec<PublicKey> = sim.hosts.iter().map(|h| h.key).collect();
         for i in 0..n {
@@ -278,14 +285,14 @@ impl Sim {
                 })
                 .collect();
             sim.hosts[i].node.set_peers(peers);
-            sim.hosts[i].node.set_lighthouses(vec![lighthouse]);
+            sim.hosts[i].node.set_lighthouses(vec![lighthouse.clone()]);
             let addr = sim.hosts[i].addr;
             sim.hosts[i].node.set_local_endpoints(vec![addr]);
         }
         sim.hosts.push(Host {
-            node: Node::lighthouse(key, keys),
+            node: Node::lighthouse(key.clone(), keys),
             key: lighthouse.public_key,
-            addr: lighthouse.endpoint,
+            addr: lighthouse.endpoints[0],
             nat: None,
             drift_ppm: 0,
             wall_offset: 0,
@@ -295,6 +302,7 @@ impl Sim {
             drops: Vec::new(),
         });
         sim.link_counts = vec![0; (n + 1) * (n + 1)];
+        sim.lighthouse_key = Some(key);
         sim
     }
 
@@ -392,6 +400,7 @@ impl Sim {
             self.hosts[from].received.push((self.now, sender, seq));
         }
         for (dst, datagram) in out.datagrams {
+            self.sent.push((self.now, from, dst, datagram.clone()));
             let Some((to, source)) = self.resolve(from, dst) else {
                 self.emitted.push((self.now, from, usize::MAX, datagram[0]));
                 continue;
@@ -1150,7 +1159,7 @@ fn a_node_that_moves_rediscovers_through_the_lighthouse() {
         .find(|(t, p, _)| *t > moved && *p == 0)
         .map(|(t, ..)| *t - moved)
         .expect("traffic resumed");
-    assert!(first < secs(35), "recovered after {first:?}");
+    assert!(first < secs(30), "recovered after {first:?}");
     assert!(back.len() >= 20, "{back:?}");
     let to_b = sim.status(0, 1).endpoint.unwrap();
     assert_eq!(
@@ -1249,5 +1258,281 @@ fn every_nat_combination_gives_direct_or_a_timeout() {
         assert_eq!(s.current, direct, "seed {seed}");
         let failure = (!direct).then_some(PathFailure::Timeout);
         assert_eq!(s.last_direct_path_failure, failure, "seed {seed}");
+    }
+}
+
+// Review of v0.4 (2026-10-21): candidate retention (L1), register timer (L2), discovery
+// timing (L5) and candidate admission (L6).
+
+/// Queries the lighthouse answered so far.
+fn queries(sim: &Sim) -> u64 {
+    let c = sim.hosts[sim.lighthouse()].node.lighthouse_counters();
+    c.queries_known + c.queries_unknown
+}
+
+/// When the lighthouse last refreshed `host`'s registration.
+fn refreshed(sim: &Sim, host: usize) -> Option<Duration> {
+    let lh = sim.lighthouse();
+    let key = sim.hosts[host].key;
+    let entries = sim.hosts[lh].node.registrations(sim.now);
+    entries
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, r)| r.refreshed)
+}
+
+/// Message 1 copies `from` sent since `since`: `(sim time, destination, bytes)`.
+fn message_1_copies(sim: &Sim, from: usize, since: Duration) -> Vec<(Duration, Endpoint, Vec<u8>)> {
+    sim.sent
+        .iter()
+        .filter(|(t, f, _, d)| *t >= since && *f == from && d[0] == TYPE_HANDSHAKE_INIT)
+        .map(|(t, _, to, d)| (*t, *to, d.clone()))
+        .collect()
+}
+
+/// L1, §12.2: endpoints learnt from the lighthouse stay candidates after the 3 s window, so
+/// once the direct path comes back a later retransmission completes the handshake and the
+/// one staged packet goes out, with no further IP packet.
+#[test]
+fn learnt_candidates_outlive_the_discovery_window() {
+    let mut sim = behind_nats(40, NatKind::Cone);
+    sim.partitions.extend([(0, 1), (1, 0)]);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + secs(12));
+    assert!(!sim.status(0, 1).current);
+    let late = sim.message_1s(0, 1);
+    assert!(
+        late.iter().any(|t| *t > start + secs(9)),
+        "retransmissions still reach the learnt candidates: {late:?}"
+    );
+    sim.partitions.clear();
+    sim.run_until(start + secs(25));
+    assert!(sim.status(0, 1).current);
+    assert_eq!(sim.received(1, 0, start), [0], "the staged packet");
+}
+
+/// How long host 0 takes to be found again after leaving the LAN it shares with host 1 for
+/// another NAT, `phase` after one of its registers, with no tunnel traffic: only §12.5 rule
+/// 3 (the register tick) can find host 1. With `query`, host 0 queries the lighthouse (for
+/// host 2, which never registered) just before moving: the reply is followed by host 0's
+/// passive keepalive 10 s later, which postponed the register before L2.
+fn roam(seed: u64, phase: Duration, query: bool) -> Duration {
+    let mut sim = Sim::discovery(seed, 3);
+    sim.hosts[2].asleep_until = Some(secs(100_000));
+    let home = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+    let away = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), NatKind::Cone);
+    sim.place(0, ep(192, 168, 1, 2, 4802), Some(home));
+    sim.place(1, ep(192, 168, 1, 3, 4802), Some(home));
+    sim.run_until(secs(1));
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(secs(5));
+    assert_eq!(sim.status(0, 1).endpoint, Some(sim.addr(1)), "LAN path");
+    let last = refreshed(&sim, 0);
+    while refreshed(&sim, 0) == last {
+        let t = sim.now + ms(10);
+        sim.run_until(t);
+    }
+    let t = sim.now + phase;
+    sim.run_until(t);
+    if query {
+        let _ = sim.send_ip(0, 2);
+        let t = sim.now + ms(100);
+        sim.run_until(t);
+    }
+    let moved = sim.now;
+    sim.place(0, ep(192, 168, 7, 2, 4802), Some(away));
+    let (home_ip, away_ip) = (public_ip(&sim, home), public_ip(&sim, away));
+    let found = |sim: &Sim| {
+        let ip = |host, peer| sim.status(host, peer).endpoint.map(|e| e.display().ip());
+        ip(0, 1) == Some(home_ip) && ip(1, 0) == Some(away_ip)
+    };
+    while !found(&sim) {
+        assert!(
+            sim.now < moved + secs(60),
+            "not recovered: phase {phase:?} query {query} {:?} {:?}",
+            sim.status(0, 1),
+            sim.status(1, 0)
+        );
+        let t = sim.now + ms(100);
+        sim.run_until(t);
+    }
+    sim.now - moved
+}
+
+/// L2, L5, milestone v0.4 "within 30 s": a node that moves at any phase of its register
+/// cycle (every 500 ms of it), with or without a query and reply just before, is found again
+/// within `PERSISTENT_KEEPALIVE` plus a round trip. The worst case is a move just after the
+/// lighthouse answered a register: nothing is pending, the next register tick finds it.
+/// (A move before that answer loses it, and the "new handshake" timer finds it at 15 s.)
+#[test]
+fn a_move_at_any_register_phase_recovers_within_30_s() {
+    let mut worst = Duration::ZERO;
+    for (i, phase) in (0..50).map(|k| k * 500).enumerate() {
+        for query in [false, true] {
+            let took = roam(50 + i as u64, ms(phase), query);
+            assert!(took < secs(26), "phase {phase} ms, query {query}: {took:?}");
+            worst = worst.max(took);
+        }
+    }
+    assert!(worst > secs(24), "the worst case was exercised: {worst:?}");
+}
+
+/// L5, §9, §12.5 rule 4: when the lighthouse's answers stop, the third failed register
+/// re-handshakes and rediscovers the live peers; once healed, the node registers again.
+#[test]
+fn three_failed_registers_reregister_and_rediscover() {
+    let mut sim = behind_nats(41, NatKind::Cone);
+    sim.stream(0, 1, secs(1), secs(5));
+    assert!(sim.status(0, 1).current);
+    let lh = sim.lighthouse();
+    let before = queries(&sim);
+    let c = sim.status(0, 1).counters;
+    let handshakes = c.handshakes_initiated + c.handshakes_responded;
+    sim.partitions.insert((lh, 0));
+    let cut = sim.now;
+    // The last answered register was at most 25 s before the cut: the third failed one
+    // comes 65 to 100 s after it.
+    sim.run_until(cut + secs(64));
+    assert_eq!(queries(&sim), before, "fewer than three failed registers");
+    sim.run_until(cut + secs(101));
+    assert!(queries(&sim) > before, "rule 4 queried for host 1");
+    let c = sim.status(0, 1).counters;
+    assert!(c.handshakes_initiated + c.handshakes_responded > handshakes);
+    sim.partitions.clear();
+    let healed = sim.now;
+    sim.run_until(healed + secs(6));
+    let s = sim.status(0, lh);
+    assert!(s.current && s.last_handshake.is_some_and(|t| t >= healed));
+    assert!(refreshed(&sim, 0).is_some_and(|t| t >= healed));
+}
+
+/// L5: a restarted lighthouse has lost every registration and session; a node's next
+/// register goes unanswered, its "new handshake" timer (§9) re-handshakes 15 s later and
+/// the register that follows restores the entry: within 25 + 15 s and a round trip. The
+/// nodes' own session never broke.
+#[test]
+fn nodes_register_again_after_a_lighthouse_restart() {
+    let mut sim = behind_nats(42, NatKind::Cone);
+    sim.stream(0, 1, secs(1), secs(10));
+    let lh = sim.lighthouse();
+    let keys = vec![sim.hosts[0].key, sim.hosts[1].key];
+    let key = sim.lighthouse_key.clone().expect("discovery sim");
+    sim.hosts[lh].node = Node::lighthouse(key, keys);
+    let restarted = sim.now;
+    sim.stream(0, 1, secs(1), restarted + secs(1));
+    assert!(sim.hosts[lh].node.registrations(sim.now).is_empty());
+    sim.stream(0, 1, secs(1), restarted + secs(41));
+    assert_eq!(sim.hosts[lh].node.registrations(sim.now).len(), 2);
+    assert!(sim.received(1, 0, restarted).len() >= 40);
+}
+
+/// L5, §12.5: triggers that fire while a rediscovery runs join it: one query per 3 s.
+#[test]
+fn a_running_discovery_sends_one_query() {
+    let mut sim = behind_nats(43, NatKind::Symmetric);
+    let before = queries(&sim);
+    let start = sim.now;
+    for i in 1..=5 {
+        sim.send_ip(0, 1).unwrap();
+        sim.run_until(start + ms(500 * i));
+    }
+    sim.run_until(start + ms(2900));
+    assert_eq!(queries(&sim), before + 1);
+    sim.run_until(start + ms(3100));
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + ms(3200));
+    assert_eq!(queries(&sim), before + 2, "a new window");
+}
+
+/// L5, §12.2: an endpoint learnt while message 1 is in flight gets the same bytes, and the
+/// retransmit deadline stays the first copy's.
+#[test]
+fn learnt_candidates_get_the_in_flight_message_1() {
+    let mut sim = behind_nats(44, NatKind::Cone);
+    let nowhere = ep(192, 0, 2, 200, 4802);
+    let peers = vec![PeerConfig {
+        endpoints: vec![nowhere],
+        ..sim.peer_config(1)
+    }];
+    sim.hosts[0].node.set_peers(peers);
+    sim.partitions.extend([(0, 1), (1, 0)]);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + secs(12));
+    let copies = message_1_copies(&sim, 0, start);
+    let (first_at, first_to, first) = copies[0].clone();
+    assert_eq!(first_to, nowhere);
+    assert!(
+        copies
+            .iter()
+            .any(|(t, to, d)| *d == first && *to != nowhere && *t > first_at),
+        "the reply's endpoint got the in-flight message 1"
+    );
+    let (next_at, ..) = copies
+        .iter()
+        .find(|(.., d)| *d != first)
+        .expect("retransmitted");
+    let gap = *next_at - first_at;
+    assert!(gap >= secs(5) && gap <= ms(5334), "{gap:?}");
+}
+
+/// L5, §12.6: `no_candidates` after 3 s, then `abandoned` after 18 attempts, and a later
+/// success keeps the last failure.
+#[test]
+fn failure_reasons_survive_a_success() {
+    let mut sim = Sim::new(45, 2, PERFECT);
+    let peers = vec![PeerConfig {
+        endpoints: Vec::new(),
+        ..sim.peer_config(1)
+    }];
+    sim.hosts[0].node.set_peers(peers);
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(ms(3100));
+    let failure = |sim: &Sim| sim.status(0, 1).last_direct_path_failure;
+    assert_eq!(failure(&sim), Some(PathFailure::NoCandidates));
+    sim.run_until(secs(100));
+    assert_eq!(failure(&sim), Some(PathFailure::Abandoned));
+    assert!(!sim.status(0, 1).handshake_in_flight);
+    let peers = vec![sim.peer_config(1)];
+    sim.hosts[0].node.set_peers(peers);
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(secs(102));
+    assert!(sim.status(0, 1).current);
+    assert_eq!(failure(&sim), Some(PathFailure::Abandoned));
+}
+
+/// L6, §12.2 admission: with 31 static candidates the lighthouse's endpoint is the 32nd and
+/// gets message 1 at once and at every retransmission; with 32 it is never sent to.
+#[test]
+fn a_full_candidate_set_admits_no_learnt_endpoint() {
+    for (statics, admitted) in [(31u8, true), (32, false)] {
+        let mut sim = Sim::discovery(46, 2);
+        sim.run_until(secs(1));
+        // Registered, then silent: the lighthouse still answers with its endpoint.
+        sim.hosts[1].asleep_until = Some(secs(100_000));
+        let nowhere = (0..statics).map(|i| ep(192, 0, 2, 100 + i, 4802)).collect();
+        let peers = vec![PeerConfig {
+            endpoints: nowhere,
+            ..sim.peer_config(1)
+        }];
+        sim.hosts[0].node.set_peers(peers);
+        let start = sim.now;
+        sim.send_ip(0, 1).unwrap();
+        sim.run_until(start + secs(12));
+        let to_b: Vec<Duration> = message_1_copies(&sim, 0, start)
+            .into_iter()
+            .filter(|(_, to, _)| *to == sim.addr(1))
+            .map(|(t, ..)| t - start)
+            .collect();
+        if admitted {
+            assert!(to_b.iter().any(|t| *t < secs(1)), "at once: {to_b:?}");
+            assert!(
+                to_b.iter().any(|t| *t >= secs(5)),
+                "retransmitted: {to_b:?}"
+            );
+        } else {
+            assert!(to_b.is_empty(), "{to_b:?}");
+        }
     }
 }

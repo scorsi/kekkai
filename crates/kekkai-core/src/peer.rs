@@ -360,8 +360,8 @@ impl Peer {
         .min()
     }
 
-    /// The persistent-keepalive deadline (§9); towards a lighthouse the party sends a
-    /// `lighthouse_register` at that instant instead (§13.1).
+    /// The persistent-keepalive deadline (§9); towards a lighthouse the register timer
+    /// (§13.1) sends first, so it does not fire while registers go out.
     pub fn persistent_keepalive_at(&self) -> Option<Duration> {
         self.current
             .as_ref()

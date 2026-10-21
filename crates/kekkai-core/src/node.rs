@@ -20,7 +20,7 @@ use crate::tlv::Tlv;
 use crate::wire::{self, DropReason, Outer};
 use crate::{
     DIRECT_PATH_TIMEOUT, KEEPALIVE_FAILURES_BEFORE_REREGISTER, MAX_CANDIDATES, MAX_LOCAL_ENDPOINTS,
-    MTU, REKEY_TIMEOUT,
+    MTU, PERSISTENT_KEEPALIVE, REKEY_TIMEOUT,
 };
 
 /// One `[[peers]]` entry: the static key, the overlay addresses (`/32` and `/128` only),
@@ -34,11 +34,12 @@ pub struct PeerConfig {
     pub endpoints: Vec<Endpoint>,
 }
 
-/// One `[[lighthouses]]` entry (§13.1): the node keeps a permanent session with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One `[[lighthouses]]` entry (§13.1): the node keeps a permanent session with it. Every
+/// address its endpoint resolved to is a candidate; none while it is unresolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LighthouseConfig {
     pub public_key: PublicKey,
-    pub endpoint: Endpoint,
+    pub endpoints: Vec<Endpoint>,
 }
 
 /// What one call produced: datagrams to send, each with its destination, and IP packets to
@@ -99,8 +100,8 @@ struct Link {
     lighthouse: bool,
     statics: Vec<Endpoint>,
     endpoint: Option<Endpoint>,
-    /// Endpoints from lighthouse answers and punches, kept until a handshake completes or
-    /// the attempt sequence is abandoned (§12.2).
+    /// Admitted endpoints from lighthouse answers and punches, kept until a handshake
+    /// completes or the attempt sequence is abandoned (§12.2).
     learnt: Vec<Endpoint>,
     /// The last message 1 sent, resent to candidates learnt while it is in flight (§12.2).
     message_1: Option<Vec<u8>>,
@@ -111,6 +112,8 @@ struct Link {
     failure: Option<PathFailure>,
     last_received: Option<Duration>,
     // Towards a lighthouse (§9, §13.1).
+    /// The register timer; armed by the first register.
+    register_at: Option<Duration>,
     received_since_register: bool,
     failed_keepalives: u32,
     /// Local endpoints of the last register sent; `None` before the first one.
@@ -136,10 +139,29 @@ impl Link {
         all
     }
 
+    /// §12.2 admission: appends the endpoints of `endpoints` that are new while the set has
+    /// room, and returns the candidate set.
+    fn admit(&mut self, endpoints: &[Endpoint]) -> Vec<Endpoint> {
+        let mut all = self.candidates();
+        for e in endpoints {
+            if !all.contains(e) && all.len() < MAX_CANDIDATES {
+                all.push(*e);
+                self.learnt.push(*e);
+            }
+        }
+        all
+    }
+
+    /// End of the rediscovery window (§12.5); the learnt candidates stay (§12.2).
     fn end_discovery(&mut self) {
         self.discovery = None;
-        self.learnt.clear();
         self.unknown = false;
+    }
+
+    /// A handshake completed or the attempt sequence was abandoned (§12.2).
+    fn end_attempts(&mut self) {
+        self.end_discovery();
+        self.learnt.clear();
     }
 }
 
@@ -250,7 +272,7 @@ impl Node {
         let keep: Vec<PublicKey> = lighthouses.iter().map(|l| l.public_key).collect();
         self.retain(true, &keep);
         for l in lighthouses {
-            self.insert(l.public_key, true, vec![l.endpoint]);
+            self.insert(l.public_key, true, l.endpoints);
         }
     }
 
@@ -379,8 +401,10 @@ impl Node {
             peer.counters.rx_packets += 1;
             peer.counters.rx_bytes += datagram.len() as u64;
             let link = self.links.get_mut(&key).expect("links follow peers");
-            if link.register_due && peer.can_send(now) {
-                self.register(now, wall, key, &mut sends);
+            // §13.1 after a handshake with the lighthouse, which may be how a move shows.
+            if link.register_due && peer.can_send(now) && self.register(now, wall, key, &mut sends)
+            {
+                self.rediscover_live(now, wall, &mut sends);
             }
         }
         output.datagrams = self.route(sends);
@@ -444,7 +468,7 @@ impl Node {
         link.last_received = Some(now);
         link.received_since_register = true;
         if self.peers[&key].last_handshake != before {
-            link.end_discovery();
+            link.end_attempts();
             link.register_due = link.lighthouse;
         }
         let Some(plaintext) = plaintext else {
@@ -585,22 +609,20 @@ impl Node {
             link.unknown = true;
             return Ok(None);
         }
-        let known = link.candidates();
-        let new: Vec<Endpoint> = endpoints
+        let before = link.candidates();
+        let all = link.admit(endpoints);
+        // §12.2: only admitted endpoints are sent to, now as on every retransmission.
+        let to: Vec<Endpoint> = endpoints
             .iter()
-            .filter(|e| !known.contains(e))
+            .filter(|e| all.contains(e) && (punch || !before.contains(e)))
             .copied()
             .collect();
-        link.learnt.extend(&new);
-        let excess = link.learnt.len().saturating_sub(MAX_CANDIDATES);
-        link.learnt.drain(..excess);
         if punch && link.discovery.is_none() {
             link.discovery = Some(now);
         }
         let peer = self.peers.get_mut(&target).expect("links follow peers");
         if peer.has_in_flight_handshake() {
             // §13.3: send now to the punch's endpoints, which opens this node's NAT.
-            let to = if punch { endpoints.to_vec() } else { new };
             if let Some(m1) = &link.message_1 {
                 sends.extend(to.into_iter().map(|e| (target, Some(e), m1.clone())));
             }
@@ -645,21 +667,42 @@ impl Node {
         }
     }
 
-    /// §13.1: `lighthouse_register` with the current local endpoints, on `current`.
-    fn register(&mut self, now: Duration, wall: Tai64n, lh: PublicKey, sends: &mut Vec<Send>) {
+    /// §12.5 rules 3 and 4: every peer with a live session.
+    fn rediscover_live(&mut self, now: Duration, wall: Tai64n, sends: &mut Vec<Send>) {
+        let keys: Vec<PublicKey> = self.peers.keys().copied().collect();
+        for key in keys {
+            if self.peers[&key].can_send(now) && !self.links[&key].lighthouse {
+                self.rediscover(now, wall, key, true, sends);
+            }
+        }
+    }
+
+    /// §13.1: `lighthouse_register` with the current local endpoints, on `current`. Returns
+    /// whether they differ from the previous register's (§12.5 rule 3).
+    fn register(
+        &mut self,
+        now: Duration,
+        wall: Tai64n,
+        lh: PublicKey,
+        sends: &mut Vec<Send>,
+    ) -> bool {
         let inner = Inner::LighthouseRegister {
             endpoints: self.locals.clone(),
         }
         .encode();
         let peer = self.peers.get_mut(&lh).expect("links follow peers");
         let out = peer.send_inner(&mut ctx!(self, now, wall), &inner);
+        let mut moved = false;
         if !out.is_empty() {
             let link = self.links.get_mut(&lh).expect("links follow peers");
+            link.register_at = Some(now + PERSISTENT_KEEPALIVE);
             link.register_due = false;
             link.received_since_register = false;
+            moved = link.registered.as_ref().is_some_and(|r| *r != self.locals);
             link.registered = Some(self.locals.clone());
         }
         sends.extend(out.into_iter().map(|d| (lh, None, d)));
+        moved
     }
 
     /// Runs every deadline that has passed (§9, §12.5, §13).
@@ -677,18 +720,19 @@ impl Node {
                     let out = peer.start_handshake(&mut ctx!(self, now, wall));
                     sends.extend(out.map(|d| (key, None, d)));
                 }
-                let peer = self.peers.get_mut(&key).expect("listed");
-                if peer.persistent_keepalive_at().is_some_and(|t| t <= now) {
-                    // §13.1: a register instead of the keepalive; §9 failed keepalives.
-                    let link = self.links.get_mut(&key).expect("links follow peers");
+                let current = self.peers[&key].current().is_some();
+                let link = self.links.get_mut(&key).expect("links follow peers");
+                if current && link.register_at.is_some_and(|t| t <= now) {
+                    // §9 register tick: failed registers, local endpoints, then the register.
+                    link.register_at = Some(now + PERSISTENT_KEEPALIVE);
                     if link.received_since_register {
                         link.failed_keepalives = 0;
                     } else {
                         link.failed_keepalives += 1;
                     }
-                    let moved = link.registered.as_ref().is_some_and(|r| *r != self.locals);
+                    link.received_since_register = false;
                     let failed = link.failed_keepalives >= KEEPALIVE_FAILURES_BEFORE_REREGISTER;
-                    self.register(now, wall, key, &mut sends);
+                    let moved = self.register(now, wall, key, &mut sends);
                     if failed {
                         // §12.5 rule 4: re-handshake, re-register on completion, rediscover.
                         let link = self.links.get_mut(&key).expect("links follow peers");
@@ -708,7 +752,7 @@ impl Node {
             let peer = &self.peers[&key];
             let link = self.links.get_mut(&key).expect("links follow peers");
             if peer.counters.handshake_timeouts != timeouts {
-                link.end_discovery();
+                link.end_attempts();
                 link.failure = Some(PathFailure::Abandoned);
             }
             let first_timeout = attempts == Some(1) && peer.in_flight_attempts() == Some(2);
@@ -732,13 +776,7 @@ impl Node {
             }
         }
         if rediscover_all {
-            // §12.5 rules 3 and 4: every peer with a live session.
-            for key in keys {
-                let live = self.peers[&key].can_send(now);
-                if live && !self.links[&key].lighthouse {
-                    self.rediscover(now, wall, key, true, &mut sends);
-                }
-            }
+            self.rediscover_live(now, wall, &mut sends);
         }
         if let Some(registry) = &mut self.registry {
             let peers = &self.peers;
@@ -788,7 +826,11 @@ impl Node {
                         peer.last_init_sent()
                             .map_or(Duration::ZERO, |t| t + REKEY_TIMEOUT)
                     });
-            next = [next, discovery, retry].into_iter().flatten().min();
+            let register = link.register_at.filter(|_| peer.current().is_some());
+            next = [next, discovery, retry, register]
+                .into_iter()
+                .flatten()
+                .min();
         }
         next
     }

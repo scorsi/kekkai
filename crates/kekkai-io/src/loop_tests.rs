@@ -126,10 +126,12 @@ async fn discovery_through_a_lighthouse_loop() {
     ));
     let lighthouse = LighthouseConfig {
         public_key: lighthouse_key.public(),
-        endpoint: format!("127.0.0.1:{lh_port}")
-            .parse::<SocketAddr>()
-            .unwrap()
-            .into(),
+        endpoints: vec![
+            format!("127.0.0.1:{lh_port}")
+                .parse::<SocketAddr>()
+                .unwrap()
+                .into(),
+        ],
     };
     let mut outsides = Vec::new();
     let mut states = Vec::new();
@@ -144,7 +146,7 @@ async fn discovery_through_a_lighthouse_loop() {
                 endpoints: vec![],
             }],
         );
-        node.set_lighthouses(vec![lighthouse]);
+        node.set_lighthouses(vec![lighthouse.clone()]);
         let state = Arc::new(Mutex::new(State::new(node, HashMap::new())));
         let (inside, outside) = UnixDatagram::pair().unwrap();
         tokio::spawn(crate::run(
@@ -191,4 +193,59 @@ async fn discovery_through_a_lighthouse_loop() {
     assert!(status.current && status.endpoint.is_some());
     let counters = lh_state.lock().unwrap().node.lighthouse_counters();
     assert!(counters.queries_known >= 1 && counters.punches >= 1);
+}
+
+/// Every field of every event emitted while `f` runs, as `name=value` lines.
+fn capture_events(f: impl FnOnce()) -> Vec<String> {
+    use std::fmt::{Debug, Write as _};
+    use tracing::field::Field;
+    use tracing::{Event, Metadata, span};
+
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut line = String::new();
+            event.record(&mut |field: &Field, value: &dyn Debug| {
+                let _ = write!(line, "{field}={value:?} ");
+            });
+            self.0.lock().unwrap().push(line);
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(lines.clone()), f);
+    let lines = lines.lock().unwrap().clone();
+    lines
+}
+
+/// ADR 0012, 0030 (review finding L3): a failed send names its destination on a node and
+/// never on a lighthouse, whatever the log level.
+#[test]
+fn a_lighthouse_never_logs_a_send_destination() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for log_peers in [true, false] {
+        let lines = capture_events(|| {
+            runtime.block_on(async {
+                let socket = udp::bind(0).unwrap();
+                let to: SocketAddr = "127.0.0.1:9".parse().unwrap();
+                // Larger than any UDP datagram: the send fails on every platform.
+                crate::send_datagrams(&socket, vec![(to.into(), vec![0; 70_000])], log_peers).await;
+            });
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("udp-send-failed"), "{lines:?}");
+        assert_eq!(lines[0].contains("127.0.0.1"), log_peers, "{lines:?}");
+    }
 }
