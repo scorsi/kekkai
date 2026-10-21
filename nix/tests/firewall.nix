@@ -116,8 +116,11 @@ pkgs.testers.nixosTest {
     def tcp(target: str, port: int) -> str:
         return f"socat -u TCP:{target}:{port},connect-timeout=4 - 2>&1"
 
+    # One request datagram: socat's default UDP shut-null would follow it with an empty
+    # one, which a UDP-LISTEN fork parent may take before its child connects, forking a
+    # second child that answers too.
     def udp(target: str, port: int) -> str:
-        return f"echo query | socat -T 4 - UDP:{target}:{port} 2>&1"
+        return f"echo query | socat -T 4 - UDP:{target}:{port},shut-none 2>&1"
 
     start_all()
     for m in (a, b, c):
