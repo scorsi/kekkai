@@ -222,10 +222,11 @@ fn log_events(state: &State, seen: &mut HashMap<PublicKey, (bool, Counters)>) {
 }
 
 /// Reads a private key file (one line of standard base64, as `kekkai keygen` writes it) into
-/// the opaque value the core takes (ADR 0017). Errors never quote the file's content.
+/// the opaque value the core takes (ADR 0017). Errors never quote the file's content; the core
+/// erases the text (§8.5).
 pub fn load_key(path: &Path) -> std::io::Result<StaticKey> {
     let text = std::fs::read_to_string(path)?;
-    StaticKey::from_text(&text).ok_or_else(|| {
+    StaticKey::from_file_text(text).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("{}: not a base64 32-byte key", path.display()),

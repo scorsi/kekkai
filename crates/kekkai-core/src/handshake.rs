@@ -6,6 +6,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::keys::{PublicKey, StaticKey};
 use crate::mac1::Mac1Key;
+use crate::resolver::Resolver;
 use crate::tai64n::Tai64n;
 use crate::tlv::{self, Tlv, TlvError};
 use crate::wire::{self, DropReason, HandshakeInit, HandshakeResp};
@@ -38,13 +39,14 @@ pub struct SessionKeys {
     pub(crate) handshake_hash: [u8; 32],
 }
 
-/// `Builder::new(name).prologue(PROLOGUE).local_private_key(s).remote_public_key(rs).psk(2, PSK)`.
+/// `Builder::with_resolver(name, kekkai resolver).prologue(PROLOGUE).local_private_key(s).remote_public_key(rs).psk(2, PSK)`.
 fn builder<'b>(
     local: &'b StaticKey,
     remote: Option<&'b PublicKey>,
     ephemeral: Option<&'b [u8; 32]>,
 ) -> Builder<'b> {
-    let mut b = Builder::new(NOISE_PATTERN.parse().expect("valid Noise protocol name"))
+    let params = NOISE_PATTERN.parse().expect("valid Noise protocol name");
+    let mut b = Builder::with_resolver(params, Box::new(Resolver))
         .prologue(PROLOGUE)
         .and_then(|b| b.local_private_key(local.as_bytes()))
         .and_then(|b| b.psk(2, &PSK))
@@ -140,12 +142,15 @@ impl Initiator {
             .read_message(resp.noise, &mut payload)
             .map_err(|_| DropReason::NoiseFailure)?;
         tlv::decode(&payload[..len], MESSAGE_2_KNOWN_TLVS)?;
-        let (i2r, r2i) = self.state.dangerously_get_raw_split();
-        Ok(SessionKeys {
+        let (mut i2r, mut r2i) = self.state.dangerously_get_raw_split();
+        let keys = SessionKeys {
             send: i2r,
             recv: r2i,
             handshake_hash: handshake_hash(&self.state),
-        })
+        };
+        i2r.zeroize();
+        r2i.zeroize();
+        Ok(keys)
     }
 }
 
@@ -223,14 +228,14 @@ impl Pending {
             &noise,
             &Mac1Key::for_receiver(&self.initiator_static),
         );
-        let (i2r, r2i) = self.state.dangerously_get_raw_split();
-        (
-            datagram,
-            SessionKeys {
-                send: r2i,
-                recv: i2r,
-                handshake_hash: handshake_hash(&self.state),
-            },
-        )
+        let (mut i2r, mut r2i) = self.state.dangerously_get_raw_split();
+        let keys = SessionKeys {
+            send: r2i,
+            recv: i2r,
+            handshake_hash: handshake_hash(&self.state),
+        };
+        i2r.zeroize();
+        r2i.zeroize();
+        (datagram, keys)
     }
 }

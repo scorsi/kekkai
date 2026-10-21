@@ -487,13 +487,17 @@ struct NoiseMessage {
 #[test]
 fn noise_ikpsk2() {
     let (_, v) = load::<NoiseVector>("noise_ikpsk2.json");
-    let params = crate::NOISE_PATTERN.parse().unwrap();
+    // Through kekkai's resolver: this vector is its correctness check (§8.5).
+    let builder = || {
+        let params = crate::NOISE_PATTERN.parse().unwrap();
+        snow::Builder::with_resolver(params, Box::new(crate::resolver::Resolver))
+    };
     let (init_prologue, resp_prologue) = (unhex(&v.init_prologue), unhex(&v.resp_prologue));
     let (init_psk, resp_psk): ([u8; 32], [u8; 32]) = (arr(&v.init_psks[0]), arr(&v.resp_psks[0]));
     let (init_static, resp_static) = (unhex(&v.init_static), unhex(&v.resp_static));
     let (init_ephemeral, resp_ephemeral) = (unhex(&v.init_ephemeral), unhex(&v.resp_ephemeral));
     let remote_static = unhex(&v.init_remote_static);
-    let mut initiator = snow::Builder::new(params)
+    let mut initiator = builder()
         .prologue(&init_prologue)
         .unwrap()
         .psk(2, &init_psk)
@@ -505,7 +509,7 @@ fn noise_ikpsk2() {
         .fixed_ephemeral_key_for_testing_only(&init_ephemeral)
         .build_initiator()
         .unwrap();
-    let mut responder = snow::Builder::new(crate::NOISE_PATTERN.parse().unwrap())
+    let mut responder = builder()
         .prologue(&resp_prologue)
         .unwrap()
         .psk(2, &resp_psk)

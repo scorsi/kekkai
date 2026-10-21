@@ -17,6 +17,7 @@ pub mod keys;
 pub mod mac1;
 pub mod node;
 pub mod peer;
+mod resolver;
 pub mod session;
 pub mod tai64n;
 pub mod tlv;

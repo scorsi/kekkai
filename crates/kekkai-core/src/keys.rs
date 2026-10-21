@@ -1,9 +1,11 @@
 //! Identity keys (§4, ADR 0017).
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use snow::params::DHChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use snow::types::Dh;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+use crate::resolver::X25519;
 
 /// A static X25519 public key.
 pub type PublicKey = [u8; 32];
@@ -35,12 +37,10 @@ impl StaticKey {
         Self(bytes)
     }
 
-    /// `X25519(k, 9)`, through snow's X25519 so that the handshake and this derivation
-    /// cannot disagree.
+    /// `X25519(k, 9)`, through the handshake's X25519 so that the two cannot disagree. The
+    /// resolver object holding the key copy is erased when it drops here (§8.5).
     pub fn public(&self) -> PublicKey {
-        let mut dh = DefaultResolver
-            .resolve_dh(&DHChoice::Curve25519)
-            .expect("snow's default resolver provides X25519");
+        let mut dh = X25519::default();
         dh.set(&self.0);
         dh.pubkey()
             .try_into()
@@ -59,6 +59,14 @@ impl StaticKey {
     /// Parses the text form; `None` unless it decodes to exactly 32 bytes.
     pub fn from_text(text: &str) -> Option<Self> {
         decode_key(text).map(Self)
+    }
+
+    /// [`Self::from_text`] for the content of a key file, which is erased before returning,
+    /// on success and on failure (§8.5).
+    pub fn from_file_text(mut text: String) -> Option<Self> {
+        let key = Self::from_text(&text);
+        text.zeroize();
+        key
     }
 }
 
@@ -79,8 +87,12 @@ pub fn public_key_from_text(text: &str) -> Option<PublicKey> {
     decode_key(text)
 }
 
+/// Decodes into a stack buffer that is erased on every path (§8.5); 33 bytes is the decoder's
+/// estimate for a 44-character key, and longer input is refused before any byte is written.
 fn decode_key(text: &str) -> Option<[u8; 32]> {
-    STANDARD.decode(text.trim()).ok()?.try_into().ok()
+    let mut buf = Zeroizing::new([0u8; 33]);
+    let len = STANDARD.decode_slice(text.trim(), buf.as_mut()).ok()?;
+    (len == 32).then(|| buf[..32].try_into().expect("32 bytes"))
 }
 
 /// Fills `dest` from the OS random source, through snow's resolver so the core has a single
