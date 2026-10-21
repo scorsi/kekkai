@@ -237,39 +237,48 @@ fn stale(status: &PeerStatus, now: Duration) -> bool {
             .is_none_or(|t| now.saturating_sub(t) >= silence)
 }
 
+type Configs = (Vec<PeerConfig>, Vec<LighthouseConfig>);
+
+/// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver.
+async fn reresolve(state: Arc<Mutex<State>>, mut configs: Configs, mut named: Vec<Named>) {
+    loop {
+        tokio::time::sleep(kekkai_io::MAX_SLEEP).await;
+        reresolve_pass(&state, &mut configs, &mut named, clock::monotonic, resolve).await;
+    }
+}
+
 /// Resolves the stale parties of `named` again and replaces their static candidates when
 /// the addresses changed, without touching sessions or an in-flight sequence (§13.1).
 /// `configs` is the peer and lighthouse list the node was built with.
-async fn reresolve(
-    state: Arc<Mutex<State>>,
-    mut configs: (Vec<PeerConfig>, Vec<LighthouseConfig>),
-    mut named: Vec<Named>,
+async fn reresolve_pass(
+    state: &Mutex<State>,
+    configs: &mut Configs,
+    named: &mut [Named],
+    now: impl Fn() -> Duration,
+    mut resolve: impl AsyncFnMut(&str, &str) -> Vec<Endpoint>,
 ) {
-    loop {
-        tokio::time::sleep(kekkai_io::MAX_SLEEP).await;
-        for n in &mut named {
-            let now = clock::monotonic();
-            let status = state.lock().expect("no poison").node.status(&n.key);
-            if !status.is_some_and(|s| n.due(&s, now)) {
-                continue;
+    for n in named {
+        let now = now();
+        let status = state.lock().expect("no poison").node.status(&n.key);
+        if !status.is_some_and(|s| n.due(&s, now)) {
+            continue;
+        }
+        let mut found = Vec::new();
+        for endpoint in &n.endpoints {
+            found.extend(resolve(&n.owner, endpoint).await);
+        }
+        found.dedup();
+        let (peers, lighthouses) = configs;
+        let mut guard = state.lock().expect("no poison");
+        if let Some(p) = peers.iter_mut().find(|p| p.public_key == n.key) {
+            if !found.is_empty() && p.endpoints != found {
+                p.endpoints = found;
+                guard.node.set_peers(peers.clone());
             }
-            let mut found = Vec::new();
-            for endpoint in &n.endpoints {
-                found.extend(resolve(&n.owner, endpoint).await);
-            }
-            found.dedup();
-            let (peers, lighthouses) = &mut configs;
-            let mut guard = state.lock().expect("no poison");
-            if let Some(p) = peers.iter_mut().find(|p| p.public_key == n.key) {
-                if !found.is_empty() && p.endpoints != found {
-                    p.endpoints = found;
-                    guard.node.set_peers(peers.clone());
-                }
-            } else if let Some(l) = lighthouses.iter_mut().find(|l| l.public_key == n.key) {
-                if !found.is_empty() && l.endpoints != found {
-                    l.endpoints = found;
-                    guard.node.set_lighthouses(lighthouses.clone());
-                }
+        } else if let Some(l) = lighthouses.iter_mut().find(|l| l.public_key == n.key) {
+            if !found.is_empty() && l.endpoints != found {
+                l.endpoints = found;
+                guard.node.set_lighthouses(lighthouses.clone());
             }
         }
     }
@@ -372,5 +381,126 @@ mod tests {
             "[2001:db8::1]:4800".to_string(),
         ];
         assert!(Named::new(lh, "lighthouse", &literals, secs(0)).is_none());
+    }
+
+    /// R4, §13.1: the re-resolution pass with a controlled resolver. The lighthouse failed to
+    /// resolve at start-up and fails again at 5 s; the peer's name moves from E1 to E2 at
+    /// 5 s and its in-flight sequence goes on towards E2; the lighthouse resolves at 10 s,
+    /// its session comes up, and once it answers it is no longer resolved again. The
+    /// peer's sequence survives the lighthouse update.
+    #[test]
+    fn reresolution_replaces_candidates_and_keeps_the_handshake() {
+        let wall =
+            |t: Duration| kekkai_core::tai64n::Tai64n::from_unix(1_800_000_000 + t.as_secs(), 0);
+        let ep = |s: &str| Endpoint::from(s.parse::<SocketAddr>().unwrap());
+        let (e1, e2, el, me) = (
+            ep("192.0.2.10:4802"),
+            ep("192.0.2.20:4802"),
+            ep("192.0.2.30:4800"),
+            ep("192.0.2.1:4802"),
+        );
+        let key = |b: u8| StaticKey::from_bytes([b; 32]).clamped();
+        let (p, l) = (key(2).public(), key(3).public());
+        let peer = PeerConfig {
+            public_key: p,
+            addresses: vec!["10.0.0.2".parse().unwrap()],
+            allow_inbound: Vec::new(),
+            endpoints: vec![e1],
+        };
+        let unresolved = LighthouseConfig {
+            public_key: l,
+            endpoints: Vec::new(),
+        };
+        let mut node = Node::new(key(1), vec![peer.clone()]);
+        node.set_lighthouses(vec![unresolved.clone()]);
+        let mut lighthouse = Node::lighthouse(key(3), vec![key(1).public()]);
+        let mut packet = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1];
+        packet.extend([10, 0, 0, 2]);
+        let out = node.send_packet(secs(0), wall(secs(0)), &packet).unwrap();
+        let to: Vec<Endpoint> = out.datagrams.iter().map(|(e, _)| *e).collect();
+        assert_eq!(to, [e1], "message 1 to the start-up address");
+        assert!(node.tick(secs(0), wall(secs(0))).datagrams.is_empty());
+
+        let state = Mutex::new(State::new(node, HashMap::new()));
+        let mut configs = (vec![peer], vec![unresolved]);
+        let written = |name: &str| vec![format!("{name}.example.org:4800")];
+        let mut named: Vec<Named> = [(p, "peer"), (l, "lighthouse")]
+            .into_iter()
+            .filter_map(|(k, name)| Named::new(k, name, &written(name), secs(0)))
+            .collect();
+        let mut answers: HashMap<&str, Vec<Endpoint>> =
+            HashMap::from([("peer", vec![e2]), ("lighthouse", Vec::new())]);
+        let mut calls: Vec<(Duration, String)> = Vec::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut pass = |at: Duration, answers: &HashMap<&str, Vec<Endpoint>>| {
+            let resolver = async |owner: &str, _: &str| {
+                calls.push((at, owner.to_string()));
+                answers[owner].clone()
+            };
+            runtime.block_on(reresolve_pass(
+                &state,
+                &mut configs,
+                &mut named,
+                || at,
+                resolver,
+            ));
+        };
+        let tick = |at: Duration| {
+            let mut guard = state.lock().unwrap();
+            guard.node.tick(at, wall(at)).datagrams
+        };
+        let status_of = |key: &PublicKey| state.lock().unwrap().node.status(key).unwrap();
+
+        pass(secs(4), &answers);
+        pass(secs(5), &answers);
+        assert!(
+            status_of(&p).handshake_in_flight,
+            "the sequence was not restarted"
+        );
+        let out = tick(secs(6));
+        assert!(
+            !out.is_empty() && out.iter().all(|(e, _)| *e == e2),
+            "{out:?}"
+        );
+        assert!(!status_of(&l).current);
+
+        answers.insert("lighthouse", vec![el]);
+        pass(secs(10), &answers);
+        assert!(
+            status_of(&p).handshake_in_flight,
+            "kept across the lighthouse update"
+        );
+        let out = tick(secs(12));
+        let to_lighthouse: Vec<&Vec<u8>> = out
+            .iter()
+            .filter(|(e, _)| *e == el)
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(to_lighthouse.len(), 1, "{out:?}");
+        let reply = lighthouse
+            .handle_datagram(secs(12), wall(secs(12)), me, to_lighthouse[0])
+            .unwrap();
+        for (_, d) in reply.datagrams {
+            let mut guard = state.lock().unwrap();
+            guard
+                .node
+                .handle_datagram(secs(12), wall(secs(12)), el, &d)
+                .unwrap();
+        }
+        assert!(status_of(&l).current, "the lighthouse session is up");
+        pass(secs(20), &answers);
+
+        let tried = |owner: &str| -> Vec<u64> {
+            calls
+                .iter()
+                .filter(|(_, o)| o == owner)
+                .map(|(t, _)| t.as_secs())
+                .collect()
+        };
+        assert_eq!(tried("lighthouse"), [5, 10], "not again once it answered");
+        assert_eq!(tried("peer"), [5, 10, 20], "stale: backoff 5, 10, 20");
+        assert!(status_of(&p).handshake_in_flight);
     }
 }

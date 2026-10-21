@@ -109,6 +109,8 @@ struct Link {
     discovery: Option<Duration>,
     /// A lighthouse answered "unknown" during the running rediscovery.
     unknown: bool,
+    /// When a rediscovery or punch handshake refused by the §7.9 pacing may start.
+    deferred: Option<Duration>,
     failure: Option<PathFailure>,
     last_received: Option<Duration>,
     // Towards a lighthouse (§9, §13.1).
@@ -124,15 +126,17 @@ struct Link {
 
 impl Link {
     /// §12.2: statics, the last known endpoint, the learnt ones; deduplicated, bounded (§17).
+    /// The admitted learnt ones keep their room when the statics are replaced.
     fn candidates(&self) -> Vec<Endpoint> {
+        let room = MAX_CANDIDATES.saturating_sub(self.learnt.len());
         let mut all: Vec<Endpoint> = Vec::new();
-        for e in self
-            .statics
-            .iter()
-            .chain(&self.endpoint)
-            .chain(&self.learnt)
-        {
-            if !all.contains(e) && all.len() < MAX_CANDIDATES {
+        for e in self.statics.iter().chain(&self.endpoint) {
+            if !all.contains(e) && all.len() < room {
+                all.push(*e);
+            }
+        }
+        for e in &self.learnt {
+            if !all.contains(e) {
                 all.push(*e);
             }
         }
@@ -158,10 +162,11 @@ impl Link {
         self.unknown = false;
     }
 
-    /// A handshake completed or the attempt sequence was abandoned (§12.2).
+    /// A handshake completed or the attempt sequence was abandoned (§7.9, §12.2).
     fn end_attempts(&mut self) {
         self.end_discovery();
         self.learnt.clear();
+        self.deferred = None;
     }
 }
 
@@ -627,10 +632,24 @@ impl Node {
                 sends.extend(to.into_iter().map(|e| (target, Some(e), m1.clone())));
             }
         } else if punch || !peer.can_send(now) {
-            let out = peer.start_handshake(&mut ctx!(self, now, wall));
-            sends.extend(out.map(|d| (target, None, d)));
+            self.initiate(now, wall, target, sends);
         }
         Ok(None)
+    }
+
+    /// §7.9 for a rediscovery or a punch: starts an attempt sequence, or defers one that
+    /// the `REKEY_TIMEOUT` pacing refuses to the end of that pacing.
+    fn initiate(&mut self, now: Duration, wall: Tai64n, key: PublicKey, sends: &mut Vec<Send>) {
+        let peer = self.peers.get_mut(&key).expect("links follow peers");
+        let out = peer.start_handshake(&mut ctx!(self, now, wall));
+        let link = self.links.get_mut(&key).expect("links follow peers");
+        link.deferred = match out {
+            None if !peer.has_in_flight_handshake() => {
+                peer.last_init_sent().map(|t| t + REKEY_TIMEOUT)
+            }
+            _ => None,
+        };
+        sends.extend(out.map(|d| (key, None, d)));
     }
 
     /// §12.5: queries every lighthouse with a live session (once per rediscovery) and, when
@@ -661,9 +680,7 @@ impl Node {
             }
         }
         if handshake {
-            let peer = self.peers.get_mut(&target).expect("links follow peers");
-            let out = peer.start_handshake(&mut ctx!(self, now, wall));
-            sends.extend(out.map(|d| (target, None, d)));
+            self.initiate(now, wall, target, sends);
         }
     }
 
@@ -737,12 +754,13 @@ impl Node {
                         // §12.5 rule 4: re-handshake, re-register on completion, rediscover.
                         let link = self.links.get_mut(&key).expect("links follow peers");
                         link.failed_keepalives = 0;
-                        let peer = self.peers.get_mut(&key).expect("listed");
-                        let out = peer.start_handshake(&mut ctx!(self, now, wall));
-                        sends.extend(out.map(|d| (key, None, d)));
+                        self.initiate(now, wall, key, &mut sends);
                     }
                     rediscover_all |= moved || failed;
                 }
+            }
+            if self.links[&key].deferred.is_some_and(|t| t <= now) {
+                self.initiate(now, wall, key, &mut sends);
             }
             let peer = self.peers.get_mut(&key).expect("listed");
             let (attempts, timeouts) =
@@ -827,7 +845,7 @@ impl Node {
                             .map_or(Duration::ZERO, |t| t + REKEY_TIMEOUT)
                     });
             let register = link.register_at.filter(|_| peer.current().is_some());
-            next = [next, discovery, retry, register]
+            next = [next, discovery, retry, register, link.deferred]
                 .into_iter()
                 .flatten()
                 .min();

@@ -1536,3 +1536,87 @@ fn a_full_candidate_set_admits_no_learnt_endpoint() {
         }
     }
 }
+
+/// R2, §12.2, §13.1: a DNS refresh that replaces 31 statics by 32 keeps the admitted learnt
+/// endpoint in the candidate set: the next retransmission still reaches it.
+#[test]
+fn a_dns_refresh_keeps_an_admitted_learnt_endpoint() {
+    let mut sim = Sim::discovery(47, 2);
+    sim.run_until(secs(1));
+    sim.hosts[1].asleep_until = Some(secs(100_000));
+    let statics = |base: u8, n: u8| (0..n).map(|i| ep(192, 0, 2, base + i, 4802)).collect();
+    let peers = vec![PeerConfig {
+        endpoints: statics(100, 31),
+        ..sim.peer_config(1)
+    }];
+    sim.hosts[0].node.set_peers(peers);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + secs(1));
+    let to_b = |sim: &Sim, since| {
+        message_1_copies(sim, 0, since)
+            .into_iter()
+            .filter(|(_, to, _)| *to == sim.addr(1))
+            .count()
+    };
+    assert!(to_b(&sim, start) > 0, "admitted as the 32nd");
+    let refreshed = vec![PeerConfig {
+        endpoints: statics(140, 32),
+        ..sim.peer_config(1)
+    }];
+    sim.hosts[0].node.set_peers(refreshed);
+    sim.run_until(start + secs(6));
+    assert!(sim.status(0, 1).handshake_in_flight, "same sequence");
+    assert!(to_b(&sim, start + secs(1)) > 0, "retransmitted to it");
+}
+
+/// R1, §7.9, §12.5: host 0 and host 1 both initiate on their shared LAN 24 s after one of
+/// host 0's registers, host 0 moves at 24.5 s and its register tick at 25 s finds the move;
+/// the handshake that rediscovery asks for is refused by the 5 s pacing of the handshake
+/// that just completed. It is deferred, not lost: with no tunnel traffic, both sides find
+/// each other's new endpoint within 30 s of the move.
+#[test]
+fn a_move_just_after_a_handshake_recovers_within_30_s() {
+    let mut worst = Duration::ZERO;
+    for seed in 0..10 {
+        let mut sim = Sim::discovery(60 + seed, 2);
+        let home = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+        let away = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), NatKind::Cone);
+        sim.place(0, ep(192, 168, 1, 2, 4802), Some(home));
+        sim.place(1, ep(192, 168, 1, 3, 4802), Some(home));
+        sim.run_until(secs(1));
+        let last = refreshed(&sim, 0);
+        while refreshed(&sim, 0) == last {
+            let t = sim.now + ms(10);
+            sim.run_until(t);
+        }
+        let register = sim.now;
+        sim.run_until(register + secs(24));
+        sim.send_ip(0, 1).unwrap();
+        sim.send_ip(1, 0).unwrap();
+        sim.run_until(register + ms(24_500));
+        assert_eq!(sim.status(0, 1).endpoint, Some(sim.addr(1)), "LAN path");
+        let lan = sim.status(0, 1).last_handshake;
+        assert!(lan.is_some_and(|t| t >= register + secs(24)));
+        let moved = sim.now;
+        sim.place(0, ep(192, 168, 7, 2, 4802), Some(away));
+        let (home_ip, away_ip) = (public_ip(&sim, home), public_ip(&sim, away));
+        let found = |sim: &Sim| {
+            let ip = |host, peer| sim.status(host, peer).endpoint.map(|e| e.display().ip());
+            ip(0, 1) == Some(home_ip) && ip(1, 0) == Some(away_ip)
+        };
+        while !found(&sim) {
+            assert!(
+                sim.now < moved + secs(30),
+                "seed {seed}: not recovered within 30 s {:?} {:?}",
+                sim.status(0, 1),
+                sim.status(1, 0)
+            );
+            let t = sim.now + ms(100);
+            sim.run_until(t);
+        }
+        worst = worst.max(sim.now - moved);
+    }
+    // The register at 25 s found the move, the deferred handshake left at 29 s.
+    assert!(worst > secs(4), "the deferral was exercised: {worst:?}");
+}

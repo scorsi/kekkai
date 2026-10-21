@@ -9,8 +9,11 @@
 # pending and the next register tick finds it 25 s later (a move before that answer loses
 # it and the 15 s "new handshake" timer finds it first); the handshake through the
 # lighthouse's answer and punch then takes a few round trips. The 30 s bound is checked on
-# A's own clock, from just before the move to the completed handshake it reports, so the
-# status polling does not eat into it; the waits are only a watchdog.
+# A's own clock, in one guest command: from just before the move to the first instant at
+# which A reports B's new direct endpoint AND a ping to B succeeds. That ping's reply proves
+# B's transition too: B answered A's new NAT address, which an authenticated packet from it
+# sets as B's endpoint (spec §12.4); B's status is checked right after. The command's
+# timeout is only a watchdog.
 {
   pkgs,
   nodeModule,
@@ -61,7 +64,6 @@ pkgs.testers.nixosTest {
 
   testScript = ''
     ${common.script}
-    from datetime import datetime
 
     boot(lighthouse, home, away, a, b)
     lighthouse.wait_for_unit("kekkai-lighthouse.service")
@@ -78,32 +80,29 @@ pkgs.testers.nixosTest {
         a.wait_until_succeeds(jq_peer("${keys.b.public}", '.endpoint == "10.2.0.3:4803"'), timeout=30)
         b.wait_until_succeeds(jq_peer("${keys.a.public}", '.endpoint == "10.2.0.2:4802"'), timeout=30)
 
-    with subtest("A moves behind another NAT: both learn a new endpoint within 30 s"):
-        moved = float(
-            a.succeed(
-                "date +%s.%N && ip addr flush dev eth1 && ip link set eth1 down"
-                " && ip link set eth2 up && ip addr add 10.1.0.2/24 dev eth2"
-                " && ip route replace default via 10.1.0.1 dev eth2"
-            )
+    with subtest("A moves behind another NAT: endpoints and traffic recover within 30 s"):
+        a_sees_b = jq_peer(
+            "${keys.b.public}",
+            '.path == "PATH_DIRECT" and (.endpoint | startswith("192.0.2.1:"))',
         )
-        a.wait_until_succeeds(
-            jq_peer(
-                "${keys.b.public}",
-                '.path == "PATH_DIRECT" and (.endpoint | startswith("192.0.2.1:"))',
-            ),
-            timeout=60,
+        out = a.succeed(
+            "moved=$(date +%s.%N) && ip addr flush dev eth1 && ip link set eth1 down"
+            " && ip link set eth2 up && ip addr add 10.1.0.2/24 dev eth2"
+            " && ip route replace default via 10.1.0.1 dev eth2"
+            f" && until {a_sees_b} >/dev/null && ping -c 1 -W 1 ${overlay4 "b"} >/dev/null;"
+            " do sleep 0.2; done"
+            ' && echo "$moved $(date +%s.%N)"',
+            timeout=120,
         )
-        b.wait_until_succeeds(
+        moved, recovered = map(float, out.split())
+        took = recovered - moved
+        assert 0 < took < 30, f"recovered after {took:.1f} s"
+        b.succeed(
             jq_peer(
                 "${keys.a.public}",
                 '.path == "PATH_DIRECT" and (.endpoint | startswith("192.0.2.2:"))',
-            ),
-            timeout=60,
+            )
         )
-        handshake = peer(a, "${keys.b.public}")["last_handshake"]
-        took = datetime.fromisoformat(handshake.replace("Z", "+00:00")).timestamp() - moved
-        assert 0 < took < 30, f"recovered after {took:.1f} s"
-        a.wait_until_succeeds("ping -c 1 -W 1 ${overlay4 "b"}", timeout=30)
         out = b.succeed("ping -c 3 -W 2 ${overlay4 "a"}")
         assert " 0% packet loss" in out, out
   '';
