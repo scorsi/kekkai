@@ -64,7 +64,7 @@ Nothing external blocks v0.1.
 - Simulation "long suspend then resume": the monotonic clock jumps forward by more than `REJECT_AFTER_TIME` in one step; on the next tick the core expires the stale sessions, re-handshakes and resumes traffic without waiting out the old timers.
 - `cargo fuzz run <target>` for the parsers builds and the committed corpus replays green in `nix flake check`.
 - Every ADR 0027 constraint on the core is checked: no tokio or socket dependency in `kekkai-core`, no generics or async in its public surface, bounded buffers with documented sizes.
-- Review gate 1 passed.
+- Review gate 1 passed (2026-10-21, ADR 0021 amendment of that date).
 
 **Dependencies**: v0.0.
 
