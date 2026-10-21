@@ -1,0 +1,18 @@
+[service]
+private_key_file = "/run/secrets/kekkai-relay-key"
+listen_port = 4801
+max_bytes_per_second = 1000000
+
+[[peers]]
+name = "a"
+public_key = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+
+[[peers]]
+name = "b"
+public_key = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08="
+
+[log]
+level = "info"
+
+[metrics]
+listen = "127.0.0.1:9482"

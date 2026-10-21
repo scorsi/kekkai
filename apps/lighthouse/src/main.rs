@@ -241,13 +241,14 @@ fn render(state: &State) -> String {
         &mut out,
         "kekkai_lighthouse_queries_total",
         "counter",
-        "lighthouse_query messages answered, by whether the key was known.",
+        "lighthouse_query messages, by whether the key was known or the query over budget.",
     );
     let _ = writeln!(
         out,
         "kekkai_lighthouse_queries_total{{result=\"known\"}} {}\n\
-         kekkai_lighthouse_queries_total{{result=\"unknown\"}} {}",
-        c.queries_known, c.queries_unknown
+         kekkai_lighthouse_queries_total{{result=\"unknown\"}} {}\n\
+         kekkai_lighthouse_queries_total{{result=\"limited\"}} {}",
+        c.queries_known, c.queries_unknown, c.queries_limited
     );
     family(
         &mut out,

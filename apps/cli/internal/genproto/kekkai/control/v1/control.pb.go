@@ -222,8 +222,8 @@ func (*GetStatusRequest) Descriptor() ([]byte, []int) {
 	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
-// A node fills node, peers, firewall and lighthouses; a lighthouse fills node (its own
-// key, version and port) and registrations. Relay sections (v0.5) come with their milestone.
+// A node fills node, peers, firewall, lighthouses and relays; a lighthouse fills node (its
+// own key, version and port) and registrations; a relay fills node and senders.
 type GetStatusResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Node          *NodeStatus            `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
@@ -231,6 +231,8 @@ type GetStatusResponse struct {
 	Firewall      *FirewallStatus        `protobuf:"bytes,3,opt,name=firewall,proto3" json:"firewall,omitempty"`
 	Lighthouses   []*LighthouseStatus    `protobuf:"bytes,4,rep,name=lighthouses,proto3" json:"lighthouses,omitempty"`
 	Registrations []*Registration        `protobuf:"bytes,5,rep,name=registrations,proto3" json:"registrations,omitempty"`
+	Relays        []*RelayStatus         `protobuf:"bytes,6,rep,name=relays,proto3" json:"relays,omitempty"`
+	Senders       []*RelaySender         `protobuf:"bytes,7,rep,name=senders,proto3" json:"senders,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -296,6 +298,20 @@ func (x *GetStatusResponse) GetLighthouses() []*LighthouseStatus {
 func (x *GetStatusResponse) GetRegistrations() []*Registration {
 	if x != nil {
 		return x.Registrations
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetRelays() []*RelayStatus {
+	if x != nil {
+		return x.Relays
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetSenders() []*RelaySender {
+	if x != nil {
+		return x.Senders
 	}
 	return nil
 }
@@ -380,6 +396,184 @@ func (x *LighthouseStatus) GetLastReceived() *timestamppb.Timestamp {
 	return nil
 }
 
+// The node's view of one configured relay (spec section 14.1).
+type RelayStatus struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// The configured endpoint, as written.
+	Endpoint string       `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	State    SessionState `protobuf:"varint,3,opt,name=state,proto3,enum=kekkai.control.v1.SessionState" json:"state,omitempty"`
+	// Unset until a handshake completed.
+	LastHandshake *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_handshake,json=lastHandshake,proto3" json:"last_handshake,omitempty"`
+	// Last authenticated packet (keepalive or forwarded packet) from the relay.
+	LastReceived  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_received,json=lastReceived,proto3" json:"last_received,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelayStatus) Reset() {
+	*x = RelayStatus{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelayStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelayStatus) ProtoMessage() {}
+
+func (x *RelayStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelayStatus.ProtoReflect.Descriptor instead.
+func (*RelayStatus) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RelayStatus) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *RelayStatus) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *RelayStatus) GetState() SessionState {
+	if x != nil {
+		return x.State
+	}
+	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *RelayStatus) GetLastHandshake() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastHandshake
+	}
+	return nil
+}
+
+func (x *RelayStatus) GetLastReceived() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastReceived
+	}
+	return nil
+}
+
+// What a relay counts for one listed node as a sender (spec section 14.2).
+type RelaySender struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// The name the relay's configuration gives the key.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// The relay holds a live session with this node.
+	Connected bool `protobuf:"varint,3,opt,name=connected,proto3" json:"connected,omitempty"`
+	// relay_forward messages forwarded, and their payload bytes.
+	ForwardedPackets uint64 `protobuf:"varint,4,opt,name=forwarded_packets,json=forwardedPackets,proto3" json:"forwarded_packets,omitempty"`
+	ForwardedBytes   uint64 `protobuf:"varint,5,opt,name=forwarded_bytes,json=forwardedBytes,proto3" json:"forwarded_bytes,omitempty"`
+	// Dropped: destination unlisted or not connected.
+	DroppedNoRoute uint64 `protobuf:"varint,6,opt,name=dropped_no_route,json=droppedNoRoute,proto3" json:"dropped_no_route,omitempty"`
+	// Dropped: over the per-sender rate limit.
+	DroppedRateLimited uint64 `protobuf:"varint,7,opt,name=dropped_rate_limited,json=droppedRateLimited,proto3" json:"dropped_rate_limited,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *RelaySender) Reset() {
+	*x = RelaySender{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelaySender) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelaySender) ProtoMessage() {}
+
+func (x *RelaySender) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelaySender.ProtoReflect.Descriptor instead.
+func (*RelaySender) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RelaySender) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *RelaySender) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RelaySender) GetConnected() bool {
+	if x != nil {
+		return x.Connected
+	}
+	return false
+}
+
+func (x *RelaySender) GetForwardedPackets() uint64 {
+	if x != nil {
+		return x.ForwardedPackets
+	}
+	return 0
+}
+
+func (x *RelaySender) GetForwardedBytes() uint64 {
+	if x != nil {
+		return x.ForwardedBytes
+	}
+	return 0
+}
+
+func (x *RelaySender) GetDroppedNoRoute() uint64 {
+	if x != nil {
+		return x.DroppedNoRoute
+	}
+	return 0
+}
+
+func (x *RelaySender) GetDroppedRateLimited() uint64 {
+	if x != nil {
+		return x.DroppedRateLimited
+	}
+	return 0
+}
+
 // One unexpired registration held by a lighthouse (spec section 13.2).
 type Registration struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -397,7 +591,7 @@ type Registration struct {
 
 func (x *Registration) Reset() {
 	*x = Registration{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -409,7 +603,7 @@ func (x *Registration) String() string {
 func (*Registration) ProtoMessage() {}
 
 func (x *Registration) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -422,7 +616,7 @@ func (x *Registration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Registration.ProtoReflect.Descriptor instead.
 func (*Registration) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Registration) GetPublicKey() string {
@@ -473,7 +667,7 @@ type FirewallStatus struct {
 
 func (x *FirewallStatus) Reset() {
 	*x = FirewallStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +679,7 @@ func (x *FirewallStatus) String() string {
 func (*FirewallStatus) ProtoMessage() {}
 
 func (x *FirewallStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +692,7 @@ func (x *FirewallStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FirewallStatus.ProtoReflect.Descriptor instead.
 func (*FirewallStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FirewallStatus) GetUdpFlows() uint64 {
@@ -538,7 +732,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +744,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +757,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *NodeStatus) GetPublicKey() string {
@@ -639,7 +833,7 @@ type PeerStatus struct {
 
 func (x *PeerStatus) Reset() {
 	*x = PeerStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -651,7 +845,7 @@ func (x *PeerStatus) String() string {
 func (*PeerStatus) ProtoMessage() {}
 
 func (x *PeerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -664,7 +858,7 @@ func (x *PeerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
 func (*PeerStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PeerStatus) GetPublicKey() string {
@@ -777,20 +971,38 @@ var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1fkekkai/control/v1/control.proto\x12\x11kekkai.control.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x12\n" +
-	"\x10GetStatusRequest\"\xc8\x02\n" +
+	"\x10GetStatusRequest\"\xba\x03\n" +
 	"\x11GetStatusResponse\x121\n" +
 	"\x04node\x18\x01 \x01(\v2\x1d.kekkai.control.v1.NodeStatusR\x04node\x123\n" +
 	"\x05peers\x18\x02 \x03(\v2\x1d.kekkai.control.v1.PeerStatusR\x05peers\x12=\n" +
 	"\bfirewall\x18\x03 \x01(\v2!.kekkai.control.v1.FirewallStatusR\bfirewall\x12E\n" +
 	"\vlighthouses\x18\x04 \x03(\v2#.kekkai.control.v1.LighthouseStatusR\vlighthouses\x12E\n" +
-	"\rregistrations\x18\x05 \x03(\v2\x1f.kekkai.control.v1.RegistrationR\rregistrations\"\x88\x02\n" +
+	"\rregistrations\x18\x05 \x03(\v2\x1f.kekkai.control.v1.RegistrationR\rregistrations\x126\n" +
+	"\x06relays\x18\x06 \x03(\v2\x1e.kekkai.control.v1.RelayStatusR\x06relays\x128\n" +
+	"\asenders\x18\a \x03(\v2\x1e.kekkai.control.v1.RelaySenderR\asenders\"\x88\x02\n" +
 	"\x10LighthouseStatus\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x125\n" +
 	"\x05state\x18\x03 \x01(\x0e2\x1f.kekkai.control.v1.SessionStateR\x05state\x12A\n" +
 	"\x0elast_handshake\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\rlastHandshake\x12?\n" +
-	"\rlast_received\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\flastReceived\"\xcf\x01\n" +
+	"\rlast_received\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\flastReceived\"\x83\x02\n" +
+	"\vRelayStatus\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1a\n" +
+	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x125\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1f.kekkai.control.v1.SessionStateR\x05state\x12A\n" +
+	"\x0elast_handshake\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\rlastHandshake\x12?\n" +
+	"\rlast_received\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\flastReceived\"\x90\x02\n" +
+	"\vRelaySender\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
+	"\tconnected\x18\x03 \x01(\bR\tconnected\x12+\n" +
+	"\x11forwarded_packets\x18\x04 \x01(\x04R\x10forwardedPackets\x12'\n" +
+	"\x0fforwarded_bytes\x18\x05 \x01(\x04R\x0eforwardedBytes\x12(\n" +
+	"\x10dropped_no_route\x18\x06 \x01(\x04R\x0edroppedNoRoute\x120\n" +
+	"\x14dropped_rate_limited\x18\a \x01(\x04R\x12droppedRateLimited\"\xcf\x01\n" +
 	"\fRegistration\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x12\n" +
@@ -865,7 +1077,7 @@ func file_kekkai_control_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_kekkai_control_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_kekkai_control_v1_control_proto_goTypes = []any{
 	(SessionState)(0),             // 0: kekkai.control.v1.SessionState
 	(Path)(0),                     // 1: kekkai.control.v1.Path
@@ -873,34 +1085,41 @@ var file_kekkai_control_v1_control_proto_goTypes = []any{
 	(*GetStatusRequest)(nil),      // 3: kekkai.control.v1.GetStatusRequest
 	(*GetStatusResponse)(nil),     // 4: kekkai.control.v1.GetStatusResponse
 	(*LighthouseStatus)(nil),      // 5: kekkai.control.v1.LighthouseStatus
-	(*Registration)(nil),          // 6: kekkai.control.v1.Registration
-	(*FirewallStatus)(nil),        // 7: kekkai.control.v1.FirewallStatus
-	(*NodeStatus)(nil),            // 8: kekkai.control.v1.NodeStatus
-	(*PeerStatus)(nil),            // 9: kekkai.control.v1.PeerStatus
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 11: google.protobuf.Duration
+	(*RelayStatus)(nil),           // 6: kekkai.control.v1.RelayStatus
+	(*RelaySender)(nil),           // 7: kekkai.control.v1.RelaySender
+	(*Registration)(nil),          // 8: kekkai.control.v1.Registration
+	(*FirewallStatus)(nil),        // 9: kekkai.control.v1.FirewallStatus
+	(*NodeStatus)(nil),            // 10: kekkai.control.v1.NodeStatus
+	(*PeerStatus)(nil),            // 11: kekkai.control.v1.PeerStatus
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 13: google.protobuf.Duration
 }
 var file_kekkai_control_v1_control_proto_depIdxs = []int32{
-	8,  // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
-	9,  // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
-	7,  // 2: kekkai.control.v1.GetStatusResponse.firewall:type_name -> kekkai.control.v1.FirewallStatus
+	10, // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
+	11, // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
+	9,  // 2: kekkai.control.v1.GetStatusResponse.firewall:type_name -> kekkai.control.v1.FirewallStatus
 	5,  // 3: kekkai.control.v1.GetStatusResponse.lighthouses:type_name -> kekkai.control.v1.LighthouseStatus
-	6,  // 4: kekkai.control.v1.GetStatusResponse.registrations:type_name -> kekkai.control.v1.Registration
-	0,  // 5: kekkai.control.v1.LighthouseStatus.state:type_name -> kekkai.control.v1.SessionState
-	10, // 6: kekkai.control.v1.LighthouseStatus.last_handshake:type_name -> google.protobuf.Timestamp
-	10, // 7: kekkai.control.v1.LighthouseStatus.last_received:type_name -> google.protobuf.Timestamp
-	11, // 8: kekkai.control.v1.Registration.last_seen:type_name -> google.protobuf.Duration
-	11, // 9: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
-	1,  // 10: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
-	10, // 11: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
-	2,  // 12: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
-	3,  // 13: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
-	4,  // 14: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
-	14, // [14:15] is the sub-list for method output_type
-	13, // [13:14] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	8,  // 4: kekkai.control.v1.GetStatusResponse.registrations:type_name -> kekkai.control.v1.Registration
+	6,  // 5: kekkai.control.v1.GetStatusResponse.relays:type_name -> kekkai.control.v1.RelayStatus
+	7,  // 6: kekkai.control.v1.GetStatusResponse.senders:type_name -> kekkai.control.v1.RelaySender
+	0,  // 7: kekkai.control.v1.LighthouseStatus.state:type_name -> kekkai.control.v1.SessionState
+	12, // 8: kekkai.control.v1.LighthouseStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	12, // 9: kekkai.control.v1.LighthouseStatus.last_received:type_name -> google.protobuf.Timestamp
+	0,  // 10: kekkai.control.v1.RelayStatus.state:type_name -> kekkai.control.v1.SessionState
+	12, // 11: kekkai.control.v1.RelayStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	12, // 12: kekkai.control.v1.RelayStatus.last_received:type_name -> google.protobuf.Timestamp
+	13, // 13: kekkai.control.v1.Registration.last_seen:type_name -> google.protobuf.Duration
+	13, // 14: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
+	1,  // 15: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
+	12, // 16: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	2,  // 17: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
+	3,  // 18: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
+	4,  // 19: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
+	19, // [19:20] is the sub-list for method output_type
+	18, // [18:19] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_kekkai_control_v1_control_proto_init() }
@@ -914,7 +1133,7 @@ func file_kekkai_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kekkai_control_v1_control_proto_rawDesc), len(file_kekkai_control_v1_control_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

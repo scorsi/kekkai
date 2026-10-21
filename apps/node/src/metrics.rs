@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use kekkai_io::State;
 use kekkai_io::metrics::{drops, family, label};
 
-/// The exposition. Series: 1 + 5 per peer + one per drop reason seen (at most 23).
+/// The exposition. Series: 1 + 6 per peer + one per drop reason seen (at most 24).
 pub fn render(state: &State) -> String {
     let mut peers: Vec<_> = state
         .peers
@@ -30,13 +30,16 @@ pub fn render(state: &State) -> String {
         &mut out,
         "kekkai_peer_path",
         "gauge",
-        "1 when the peer is reached over this path (v0: direct only).",
+        "1 when the peer is reached over this path.",
     );
     for (peer, s) in &peers {
+        let path = kekkai_io::path_name(s);
         let _ = writeln!(
             out,
-            "kekkai_peer_path{{peer=\"{peer}\",via=\"direct\"}} {}",
-            u8::from(s.current)
+            "kekkai_peer_path{{peer=\"{peer}\",via=\"direct\"}} {}\n\
+             kekkai_peer_path{{peer=\"{peer}\",via=\"relayed\"}} {}",
+            u8::from(path == "direct"),
+            u8::from(path == "relayed")
         );
     }
     family(
@@ -124,9 +127,10 @@ mod tests {
             "# HELP kekkai_build_info Version of this kekkai-node.
 # TYPE kekkai_build_info gauge
 kekkai_build_info{{version=\"{version}\"}} 1
-# HELP kekkai_peer_path 1 when the peer is reached over this path (v0: direct only).
+# HELP kekkai_peer_path 1 when the peer is reached over this path.
 # TYPE kekkai_peer_path gauge
 kekkai_peer_path{{peer=\"node-\\\"b\\\"\",via=\"direct\"}} 0
+kekkai_peer_path{{peer=\"node-\\\"b\\\"\",via=\"relayed\"}} 0
 # HELP kekkai_handshakes_total Handshakes completed (either role) or abandoned after the last retransmit.
 # TYPE kekkai_handshakes_total counter
 kekkai_handshakes_total{{peer=\"node-\\\"b\\\"\",result=\"ok\"}} 0

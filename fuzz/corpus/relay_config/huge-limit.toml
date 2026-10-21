@@ -1,0 +1,3 @@
+[service]
+private_key_file = "/k"
+max_bytes_per_second = 18446744073709551615

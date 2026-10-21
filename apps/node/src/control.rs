@@ -6,10 +6,10 @@ use std::time::{Duration, SystemTime};
 use kekkai_control::v1::control_service_server::{ControlService, ControlServiceServer};
 use kekkai_control::v1::{
     DirectPathFailure, FirewallStatus, GetStatusRequest, GetStatusResponse, LighthouseStatus,
-    NodeStatus, Path, PeerStatus, SessionState,
+    NodeStatus, Path, PeerStatus, RelayStatus, SessionState,
 };
 use kekkai_core::keys::{PublicKey, public_key_to_text};
-use kekkai_core::node::PathFailure;
+use kekkai_core::node::{self, PathFailure};
 use kekkai_io::config::NodeConfig;
 use kekkai_io::{State, clock};
 use tokio_stream::wrappers::UnixListenerStream;
@@ -81,13 +81,17 @@ impl Control {
                     // Same source as the metrics `peer` label (ADR 0019).
                     name: info.map(|p| p.name.clone()).unwrap_or_default(),
                     addresses: addresses.clone(),
-                    // §12.1: the current session's path; every session is direct before v0.5.
-                    path: if status.current {
-                        Path::Direct
-                    } else {
-                        Path::None
+                    // §12.1: the current session's path.
+                    path: match status.path {
+                        Some(node::Path::Direct(_)) => Path::Direct,
+                        Some(node::Path::Relayed(_)) => Path::Relayed,
+                        None => Path::None,
                     }
                     .into(),
+                    relay_public_key: match status.path {
+                        Some(node::Path::Relayed(r)) => public_key_to_text(&r),
+                        _ => String::new(),
+                    },
                     endpoint: status
                         .endpoint
                         .map(|e| e.display().to_string())
@@ -104,27 +108,33 @@ impl Control {
                     replay_rejections: status.counters.replay_rejections,
                     allow_inbound: allow_inbound.clone(),
                     firewall_drops: status.counters.firewall_drops,
-                    ..PeerStatus::default()
                 }
             })
             .collect();
-        let lighthouses = state
-            .lighthouses
-            .iter()
-            .filter_map(|(key, endpoint)| {
-                let status = state.node.status(key)?;
-                let session = match kekkai_io::session_state(&status) {
-                    "connected" => SessionState::Connected,
-                    "handshaking" => SessionState::Handshaking,
-                    _ => SessionState::Down,
-                };
-                Some(LighthouseStatus {
-                    public_key: public_key_to_text(key),
-                    endpoint: endpoint.clone(),
-                    state: session.into(),
-                    last_handshake: status.last_handshake.map(at),
-                    last_received: status.last_received.map(at),
-                })
+        // Lighthouses and relays share the status shape (ADR 0015, 0030).
+        let service = |(key, endpoint): &(PublicKey, String)| {
+            let status = state.node.status(key)?;
+            let session = match kekkai_io::session_state(&status) {
+                "connected" => SessionState::Connected,
+                "handshaking" => SessionState::Handshaking,
+                _ => SessionState::Down,
+            };
+            Some(LighthouseStatus {
+                public_key: public_key_to_text(key),
+                endpoint: endpoint.clone(),
+                state: session.into(),
+                last_handshake: status.last_handshake.map(at),
+                last_received: status.last_received.map(at),
+            })
+        };
+        let lighthouses = state.lighthouses.iter().filter_map(service).collect();
+        let relays = (state.relays.iter().filter_map(service))
+            .map(|l| RelayStatus {
+                public_key: l.public_key,
+                endpoint: l.endpoint,
+                state: l.state,
+                last_handshake: l.last_handshake,
+                last_received: l.last_received,
             })
             .collect();
         let firewall = state.node.firewall_status();
@@ -137,7 +147,8 @@ impl Control {
                 evictions: firewall.evictions,
             }),
             lighthouses,
-            registrations: Vec::new(),
+            relays,
+            ..GetStatusResponse::default()
         }
     }
 }

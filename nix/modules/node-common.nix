@@ -34,6 +34,12 @@ let
       inherit (l) endpoint;
     }) cfg.lighthouses;
   }
+  // lib.optionalAttrs (cfg.relays != [ ]) {
+    relays = map (r: {
+      public_key = r.publicKey;
+      inherit (r) endpoint;
+    }) cfg.relays;
+  }
   // lib.optionalAttrs (cfg.firewall.udpFlowsMax != 4096) {
     firewall.udp_flows_max = cfg.firewall.udpFlowsMax;
   }
@@ -70,19 +76,29 @@ let
       };
     };
   };
-  lighthouseType = types.submodule {
-    options = {
-      publicKey = mkOption {
-        type = types.str;
-        description = "The lighthouse's public key, standard base64.";
-      };
-      endpoint = mkOption {
-        type = types.str;
-        example = "lighthouse.example.org:4800";
-        description = "`host:port` of the lighthouse; a DNS name is resolved at start.";
+  # A lighthouse or relay entry (`role`, default port).
+  serviceType =
+    role: port:
+    types.submodule {
+      options = {
+        publicKey = mkOption {
+          type = types.str;
+          description = "The ${role}'s public key, standard base64.";
+        };
+        endpoint = mkOption {
+          type = types.str;
+          example = "${role}.example.org:${toString port}";
+          description = "`host:port` of the ${role}; a DNS name is resolved at start.";
+        };
       };
     };
-  };
+  # A list from the start, one element supported in v0 (0005, 0012, 0014).
+  atMostOne =
+    role: port:
+    types.addCheck (types.listOf (serviceType role port)) (l: builtins.length l <= 1)
+    // {
+      description = "list of at most one ${role}";
+    };
 in
 {
   options.services.kekkai-node = {
@@ -123,14 +139,19 @@ in
       description = "Peers by name; only listed keys complete a handshake.";
     };
     lighthouses = mkOption {
-      # A list from the start, one element supported in v0 (0005, 0012).
-      type = types.addCheck (types.listOf lighthouseType) (l: builtins.length l <= 1) // {
-        description = "list of at most one lighthouse";
-      };
+      type = atMostOne "lighthouse" 4800;
       default = [ ];
       description = ''
         Lighthouses this node registers with and queries to find peers without static
         endpoints (0012, 0013). v0 supports one.
+      '';
+    };
+    relays = mkOption {
+      type = atMostOne "relay" 4801;
+      default = [ ];
+      description = ''
+        Relays this node falls back to when no direct path to a peer completes within 3 s
+        (0013, 0014). v0 supports one.
       '';
     };
     firewall.udpFlowsMax = mkOption {

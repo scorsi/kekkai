@@ -7,7 +7,8 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1";
 
-// Control API served by the node, and by the lighthouse, over a Unix socket (0015, 0030).
+// Control API served by the node, the lighthouse and the relay over a Unix socket (0015,
+// 0030, 0031).
 service ControlService {
   // The daemon's state; `kekkai status --json` prints the reply in protojson form.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
@@ -15,14 +16,16 @@ service ControlService {
 
 message GetStatusRequest {}
 
-// A node fills node, peers, firewall and lighthouses; a lighthouse fills node (its own
-// key, version and port) and registrations. Relay sections (v0.5) come with their milestone.
+// A node fills node, peers, firewall, lighthouses and relays; a lighthouse fills node (its
+// own key, version and port) and registrations; a relay fills node and senders.
 message GetStatusResponse {
   NodeStatus node = 1;
   repeated PeerStatus peers = 2;
   FirewallStatus firewall = 3;
   repeated LighthouseStatus lighthouses = 4;
   repeated Registration registrations = 5;
+  repeated RelayStatus relays = 6;
+  repeated RelaySender senders = 7;
 }
 
 // State of a session with a lighthouse or relay (0015).
@@ -43,6 +46,34 @@ message LighthouseStatus {
   google.protobuf.Timestamp last_handshake = 4;
   // Last authenticated packet (keepalive or answer) from the lighthouse.
   google.protobuf.Timestamp last_received = 5;
+}
+
+// The node's view of one configured relay (spec section 14.1).
+message RelayStatus {
+  string public_key = 1;
+  // The configured endpoint, as written.
+  string endpoint = 2;
+  SessionState state = 3;
+  // Unset until a handshake completed.
+  google.protobuf.Timestamp last_handshake = 4;
+  // Last authenticated packet (keepalive or forwarded packet) from the relay.
+  google.protobuf.Timestamp last_received = 5;
+}
+
+// What a relay counts for one listed node as a sender (spec section 14.2).
+message RelaySender {
+  string public_key = 1;
+  // The name the relay's configuration gives the key.
+  string name = 2;
+  // The relay holds a live session with this node.
+  bool connected = 3;
+  // relay_forward messages forwarded, and their payload bytes.
+  uint64 forwarded_packets = 4;
+  uint64 forwarded_bytes = 5;
+  // Dropped: destination unlisted or not connected.
+  uint64 dropped_no_route = 6;
+  // Dropped: over the per-sender rate limit.
+  uint64 dropped_rate_limited = 7;
 }
 
 // One unexpired registration held by a lighthouse (spec section 13.2).

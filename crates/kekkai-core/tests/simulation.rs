@@ -12,7 +12,7 @@ use std::time::Duration;
 use kekkai_core::firewall::Rule;
 use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::{PublicKey, StaticKey};
-use kekkai_core::node::{LighthouseConfig, Node, Output, PathFailure, PeerConfig};
+use kekkai_core::node::{LighthouseConfig, Node, Output, Path, PathFailure, PeerConfig};
 use kekkai_core::tai64n::Tai64n;
 use kekkai_core::wire::{self, DropReason};
 use kekkai_core::{MTU, PERSISTENT_KEEPALIVE, REJECT_AFTER_TIME, REKEY_AFTER_TIME};
@@ -202,6 +202,8 @@ struct Sim {
     sent: Vec<(Duration, usize, Endpoint, Vec<u8>)>,
     /// The lighthouse's key, to restart it (`Sim::discovery`).
     lighthouse_key: Option<StaticKey>,
+    /// The relay's key, to restart it (`Sim::add_relay`).
+    relay_key: Option<StaticKey>,
     /// Datagrams sent per link, the `n` of `mix(seed, link, n)`.
     link_counts: Vec<u64>,
 }
@@ -283,6 +285,7 @@ impl Sim {
             emitted: Vec::new(),
             sent: Vec::new(),
             lighthouse_key: None,
+            relay_key: None,
             link_counts: vec![0; n * n],
         }
     }
@@ -363,7 +366,56 @@ impl Sim {
     }
 
     fn lighthouse(&self) -> usize {
-        self.hosts.len() - 1
+        let key = self
+            .lighthouse_key
+            .as_ref()
+            .expect("discovery sim")
+            .public();
+        self.hosts
+            .iter()
+            .position(|h| h.key == key)
+            .expect("a host")
+    }
+
+    fn relay(&self) -> usize {
+        let key = self.relay_key.as_ref().expect("relay sim").public();
+        self.hosts
+            .iter()
+            .position(|h| h.key == key)
+            .expect("a host")
+    }
+
+    /// Adds a public relay at `203.0.113.2:4801` listing the nodes `listed`, and configures
+    /// it on every node (§14), with an optional per-sender limit in bytes per second.
+    fn add_relay(&mut self, listed: &[usize], limit: Option<u64>) -> usize {
+        let key = StaticKey::generate();
+        let config = LighthouseConfig {
+            public_key: key.public(),
+            endpoints: vec![ep(203, 0, 113, 2, 4801)],
+        };
+        let lighthouse = self.lighthouse();
+        for (i, h) in self.hosts.iter_mut().enumerate() {
+            if i != lighthouse {
+                h.node.set_relays(vec![config.clone()]);
+            }
+        }
+        let keys = listed.iter().map(|&i| self.hosts[i].key).collect();
+        self.hosts.push(Host {
+            node: Node::relay(key.clone(), keys, limit),
+            key: config.public_key,
+            addr: config.endpoints[0],
+            nat: None,
+            drift_ppm: 0,
+            wall_offset: 0,
+            asleep_until: None,
+            next_seq: 0,
+            received: Vec::new(),
+            drops: Vec::new(),
+        });
+        let n = self.hosts.len();
+        self.link_counts = vec![0; n * n];
+        self.relay_key = Some(key);
+        n - 1
     }
 
     /// Where a datagram from `from` to `dst` lands, its source as seen there and the NAT and
@@ -1726,4 +1778,250 @@ fn a_peer_rediscovering_a_moved_node_learns_its_current_endpoint() {
         let took = sim.now - moved;
         assert!(took > secs(15) && took < secs(24), "seed {seed}: {took:?}");
     }
+}
+
+// v0.5: relay (§12.3, §14).
+
+/// Hosts 0 and 1 behind symmetric NATs, the lighthouse and a relay listing both on the
+/// public network; every permanent session is up after two seconds.
+fn behind_symmetric_nats_with_a_relay(seed: u64, limit: Option<u64>) -> Sim {
+    let mut sim = behind_nats(seed, NatKind::Symmetric);
+    let relay = sim.add_relay(&[0, 1], limit);
+    sim.run_until(secs(2));
+    for host in [0, 1] {
+        assert!(sim.status(host, relay).current, "relay session of {host}");
+    }
+    sim
+}
+
+fn relay_key(sim: &Sim) -> PublicKey {
+    sim.hosts[sim.relay()].key
+}
+
+/// Milestone v0.5, §12.3, §12.4: with symmetric NATs on both sides no direct handshake
+/// completes; 3 s after the first packet the attempt goes through the relay as well and
+/// both sides report `path = relayed` with the relay's key, the failure reason `timeout`,
+/// and traffic in both directions. A relayed packet never changes the peer's endpoint.
+#[test]
+fn symmetric_nats_on_both_sides_go_through_the_relay() {
+    let mut sim = behind_symmetric_nats_with_a_relay(50, None);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + ms(2900));
+    assert!(!sim.status(0, 1).current, "direct only for the first 3 s");
+    sim.run_until(start + ms(3200));
+    let relayed = Some(Path::Relayed(relay_key(&sim)));
+    for (host, peer) in [(0, 1), (1, 0)] {
+        let s = sim.status(host, peer);
+        assert_eq!(s.path, relayed, "{host} -> {peer}");
+        assert_eq!(s.endpoint, None, "a relayed packet never sets the endpoint");
+    }
+    assert_eq!(
+        sim.received(1, 0, start),
+        [0],
+        "the staged packet went through"
+    );
+    assert_eq!(
+        sim.status(0, 1).last_direct_path_failure,
+        Some(PathFailure::Timeout)
+    );
+    sim.stream(0, 1, ms(500), start + secs(10));
+    sim.stream(1, 0, ms(500), start + secs(15));
+    assert!(sim.received(1, 0, start).len() >= 14);
+    assert!(sim.received(0, 1, start).len() >= 9);
+    for (host, peer) in [(0, 1), (1, 0)] {
+        let s = sim.status(host, peer);
+        assert_eq!(s.path, relayed);
+        assert_eq!(s.endpoint, None, "{host} -> {peer}");
+    }
+    let r = sim.relay();
+    let senders = sim.hosts[r].node.relay_senders();
+    assert_eq!(senders.len(), 2);
+    for (_, c) in &senders {
+        assert!(c.forwarded_packets >= 9 && c.forwarded_bytes > 0, "{c:?}");
+        assert_eq!((c.dropped_no_route, c.dropped_rate_limited), (0, 0));
+    }
+}
+
+/// §14.2, ADR 0014: the relay holds sessions with the listed nodes only and nothing of the
+/// A↔B session: its state is those sessions plus per-sender counters, and the A↔B
+/// handshake and data reach the relay only as `relay_forward` payloads it never opens.
+#[test]
+fn the_relay_holds_nothing_of_the_session_it_carries() {
+    let mut sim = behind_symmetric_nats_with_a_relay(51, None);
+    let start = sim.now;
+    sim.stream(0, 1, ms(500), start + secs(8));
+    assert!(matches!(sim.status(0, 1).path, Some(Path::Relayed(_))));
+    let r = sim.relay();
+    // Every datagram the relay received or sent was on its own sessions with 0 and 1: the
+    // A↔B messages never reached it as outer datagrams.
+    for (_, from, to, ty) in &sim.emitted {
+        if *to == r || *from == r {
+            assert!(*from != r || *to <= 1, "relay talked to {to}");
+            assert!(*to != r || *from <= 1, "{from} talked to the relay");
+            let _ = ty;
+        }
+    }
+    let relay = &sim.hosts[r].node;
+    for host in [0, 1] {
+        let s = relay.status(&sim.hosts[host].key).expect("listed");
+        assert!(s.sessions >= 1 && s.sessions <= 3);
+    }
+    assert!(relay.status(&sim.hosts[sim.lighthouse()].key).is_none());
+    // The relay's handshakes are its own: one completed per node, none for the pair.
+    let handshakes: u64 = [0, 1]
+        .iter()
+        .map(|h| {
+            let c = relay.status(&sim.hosts[*h].key).unwrap().counters;
+            c.handshakes_initiated + c.handshakes_responded
+        })
+        .sum();
+    assert_eq!(handshakes, 2, "only the relay's own sessions");
+}
+
+/// Milestone v0.5 (`relay-upgrade` in the simulation), §12.3: relayed first; the NATs turn
+/// into cone NATs (conntrack flushed); a direct retry finds the direct path within 90 s
+/// and traffic moves to it at once.
+#[test]
+fn relayed_peers_upgrade_to_direct_when_the_nats_allow_it() {
+    let mut sim = behind_symmetric_nats_with_a_relay(52, None);
+    let start = sim.now;
+    sim.stream(0, 1, secs(1), start + secs(10));
+    assert!(matches!(sim.status(0, 1).path, Some(Path::Relayed(_))));
+    assert!(matches!(sim.status(1, 0).path, Some(Path::Relayed(_))));
+    for nat in &mut sim.nats {
+        nat.kind = NatKind::Cone;
+        nat.out.clear();
+        nat.back.clear();
+    }
+    let switched = sim.now;
+    let mut direct_at = None;
+    while sim.now < switched + secs(90) && direct_at.is_none() {
+        let _ = sim.send_ip(0, 1);
+        let _ = sim.send_ip(1, 0);
+        let next = sim.now + secs(1);
+        sim.run_until(next);
+        let direct = |h, p| matches!(sim.status(h, p).path, Some(Path::Direct(_)));
+        if direct(0, 1) && direct(1, 0) {
+            direct_at = Some(sim.now - switched);
+        }
+    }
+    let took = direct_at.expect("direct within 90 s");
+    assert!(took > secs(1), "a retry, not luck: {took:?}");
+    let to_b = sim.status(0, 1).endpoint.unwrap();
+    assert_eq!(to_b.display().ip(), public_ip(&sim, 1));
+    // Traffic now goes direct: the relay forwards nothing more.
+    let r = sim.relay();
+    let forwarded = |sim: &Sim| -> u64 {
+        let senders = sim.hosts[r].node.relay_senders();
+        senders.iter().map(|(_, c)| c.forwarded_packets).sum()
+    };
+    let before = forwarded(&sim);
+    let now = sim.now;
+    sim.stream(0, 1, secs(1), now + secs(5));
+    assert_eq!(forwarded(&sim), before);
+    assert!(sim.received(1, 0, now).len() >= 4);
+}
+
+/// §9 last row, §12.3: a restarted relay has lost every session; the nodes' relay sessions
+/// come back through the "new handshake" timer and relayed traffic resumes, still relayed.
+#[test]
+fn relayed_traffic_resumes_after_a_relay_restart() {
+    let mut sim = behind_symmetric_nats_with_a_relay(53, None);
+    let start = sim.now;
+    sim.stream(0, 1, secs(1), start + secs(10));
+    let r = sim.relay();
+    let keys = vec![sim.hosts[0].key, sim.hosts[1].key];
+    let key = sim.relay_key.clone().expect("relay sim");
+    sim.hosts[r].node = Node::relay(key, keys, None);
+    let restarted = sim.now;
+    sim.stream(0, 1, secs(1), restarted + secs(60));
+    let first = sim.hosts[1]
+        .received
+        .iter()
+        .find(|(t, p, _)| *t > restarted && *p == 0)
+        .map(|(t, ..)| *t - restarted)
+        .expect("traffic resumed");
+    assert!(first < secs(30), "resumed after {first:?}");
+    assert!(matches!(sim.status(0, 1).path, Some(Path::Relayed(_))));
+    assert!(sim.received(1, 0, restarted + secs(30)).len() >= 25);
+}
+
+/// Milestone v0.5, §14.2: with a per-sender limit a flooding sender is capped and the
+/// relay counts its drops; without a limit nothing is dropped.
+#[test]
+fn the_relay_rate_limit_caps_a_flooding_sender() {
+    // Data packets of the harness carry 65 bytes of A↔B payload: 200 per second is
+    // 13 000 bytes per second.
+    let limit = 6_500;
+    for (seed, limit) in [(54, Some(limit)), (55, None)] {
+        let mut sim = behind_symmetric_nats_with_a_relay(seed, limit);
+        let start = sim.now;
+        sim.send_ip(0, 1).unwrap();
+        sim.run_until(start + secs(4));
+        assert!(matches!(sim.status(0, 1).path, Some(Path::Relayed(_))));
+        let flood = sim.now;
+        sim.stream(0, 1, ms(5), flood + secs(10));
+        sim.run_until(flood + secs(11));
+        let got = sim.received(1, 0, flood).len();
+        let r = sim.relay();
+        let senders = sim.hosts[r].node.relay_senders();
+        let a = senders
+            .iter()
+            .find(|(k, _)| *k == sim.hosts[0].key)
+            .unwrap()
+            .1;
+        match limit {
+            Some(limit) => {
+                assert!(a.dropped_rate_limited > 500, "{a:?}");
+                // At most one second's burst plus ten seconds' worth.
+                let cap = 11 * limit as usize / 65 + 1;
+                assert!(got <= cap && got >= cap / 2, "{got} delivered, cap {cap}");
+            }
+            None => {
+                assert_eq!(a.dropped_rate_limited, 0);
+                assert_eq!(got, 2000, "nothing dropped");
+            }
+        }
+    }
+}
+
+/// Silence (§14.2, §16): a key the relay does not list never gets a datagram from it, so it
+/// can send no `relay_forward`; a listed node forwarding to a key the relay does not list
+/// is dropped and counted, nothing goes out.
+#[test]
+fn relay_silence_and_unlisted_destinations() {
+    let mut sim = Sim::discovery(56, 3);
+    for (host, last) in [(0, 1), (1, 2), (2, 3)] {
+        let nat = sim.add_nat(Ipv4Addr::new(198, 51, 100, last), NatKind::Symmetric);
+        sim.place(host, ep(192, 168, last, 2, 4802), Some(nat));
+    }
+    let r = sim.add_relay(&[0, 1], None);
+    sim.run_until(secs(20));
+    let answered = sim
+        .emitted
+        .iter()
+        .filter(|(_, f, t, _)| *f == r && *t == 2)
+        .count();
+    assert_eq!(answered, 0, "the unlisted host got no datagram");
+    assert!(!sim.drops(r, DropReason::IdentityRejected).is_empty());
+    assert!(!sim.status(2, r).current);
+    // Host 0 lists host 2 as a peer; the relay does not.
+    let start = sim.now;
+    sim.send_ip(0, 2).unwrap();
+    sim.run_until(start + secs(10));
+    assert!(!sim.status(0, 2).current);
+    let a = sim.hosts[r].node.relay_senders()[0..2]
+        .iter()
+        .find(|(k, _)| *k == sim.hosts[0].key)
+        .unwrap()
+        .1;
+    assert!(a.dropped_no_route >= 1, "{a:?}");
+    assert_eq!(a.forwarded_packets, 0);
+    let to_2 = sim
+        .emitted
+        .iter()
+        .filter(|(t, f, to, _)| *t >= start && *f == r && *to == 2)
+        .count();
+    assert_eq!(to_2, 0);
 }

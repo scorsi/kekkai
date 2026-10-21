@@ -54,29 +54,13 @@
         ];
         text = ''
           if [ "$#" -ne 2 ]; then
-            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message|node_config|lighthouse_config|firewall> <seconds>" >&2
+            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message|node_config|lighthouse_config|relay_config|firewall> <seconds>" >&2
             exit 2
           fi
           exec cargo fuzz run --sanitizer none "$1" -- -max_total_time="$2"
         '';
       };
       cargoArtifacts = craneLib.buildDepsOnly rustArgs;
-      # Stub of the option NixOS and nix-darwin both provide, to evaluate the modules anywhere.
-      evalModule =
-        name: module:
-        let
-          ev = lib.evalModules {
-            modules = [
-              module
-              {
-                config._module.args.pkgs = pkgs;
-                options.environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; };
-                config.services.${name}.enable = true;
-              }
-            ];
-          };
-        in
-        lib.concatMapStrings (p: p.name) ev.config.environment.systemPackages;
       # Shared node settings for the module evaluations (keys: public test vectors).
       nodeSettings = {
         enable = true;
@@ -100,6 +84,12 @@
             endpoint = "lighthouse.example.org:4800";
           }
         ];
+        relays = [
+          {
+            publicKey = "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=";
+            endpoint = "relay.example.org:4801";
+          }
+        ];
         firewall.udpFlowsMax = 1024;
         metrics.listen = "127.0.0.1:9480";
         operators = [ "alice" ];
@@ -112,15 +102,22 @@
         metrics.listen = "127.0.0.1:9481";
         operators = [ "alice" ];
       };
-      # The lighthouse module against stubs of the NixOS options it sets, on this system, so
-      # that `modules-eval` can run `config check` on its file with this system's binary.
-      lighthouseFile =
+      relaySettings = lighthouseSettings // {
+        privateKeyFile = "/run/secrets/kekkai-relay-key";
+        maxBytesPerSecond = 1000000;
+        metrics.listen = "127.0.0.1:9482";
+      };
+      # The lighthouse or relay module against stubs of the NixOS options it sets, on this
+      # system, so that `modules-eval` can run `config check` on its file with this system's
+      # binary.
+      serviceFile =
+        name: module: settings:
         let
           stub = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
         in
         (lib.evalModules {
           modules = [
-            inputs.self.nixosModules.lighthouse
+            module
             {
               config._module.args.pkgs = pkgs;
               options = {
@@ -131,10 +128,14 @@
                 systemd.sockets = stub;
                 systemd.services = stub;
               };
-              config.services.kekkai-lighthouse = lighthouseSettings;
+              config.services.${name} = settings;
             }
           ];
-        }).config.services.kekkai-lighthouse.configFile;
+        }).config.services.${name}.configFile;
+      lighthouseFile =
+        serviceFile "kekkai-lighthouse" inputs.self.nixosModules.lighthouse
+          lighthouseSettings;
+      relayFile = serviceFile "kekkai-relay" inputs.self.nixosModules.relay relaySettings;
       # The darwin node module against stubs of the nix-darwin options it sets (0018: it is
       # tested by evaluation only); `modules-eval` runs `config check` on its node file.
       darwinEval =
@@ -177,11 +178,12 @@
           }
         ];
       };
-      # Same for the lighthouse module, with the node on the same host (0005).
+      # Same for the lighthouse and relay modules, with the node on the same host (0005).
       lighthouseEval = inputs.nixpkgs.lib.nixosSystem {
         modules = [
           inputs.self.nixosModules.node
           inputs.self.nixosModules.lighthouse
+          inputs.self.nixosModules.relay
           {
             nixpkgs.hostPlatform = if pkgs.stdenv.hostPlatform.isLinux then system else "aarch64-linux";
             nixpkgs.overlays = [ inputs.self.overlays.default ];
@@ -194,6 +196,7 @@
             users.users.alice.isNormalUser = true;
             services.kekkai-node = nodeSettings;
             services.kekkai-lighthouse = lighthouseSettings;
+            services.kekkai-relay = relaySettings;
           }
         ];
       };
@@ -287,6 +290,25 @@
           }
         );
         cargo-test = craneLib.cargoTest (rustArgs // { inherit cargoArtifacts; });
+        # ADR 0014, milestone v0.5: kekkai-relay builds without the tunnel (kekkai-io's `tun`
+        # feature, which kekkai-node enables, the control check that the pattern matches).
+        relay-has-no-tunnel = craneLib.mkCargoDerivation (
+          rustArgs
+          // {
+            inherit cargoArtifacts;
+            pnameSuffix = "-relay-has-no-tunnel";
+            buildPhaseCargoCommand = ''
+              cargo tree --offline -p kekkai-node -e features > node.txt
+              cargo tree --offline -p kekkai-relay -e features > relay.txt
+              grep -q 'kekkai-io feature "tun"' node.txt
+              if grep -E 'kekkai-io feature "tun"|kekkai-node ' relay.txt; then
+                echo "kekkai-relay depends on the tunnel" >&2
+                exit 1
+              fi
+            '';
+            installPhaseCommand = "mkdir -p $out && cp relay.txt $out/";
+          }
+        );
         # The CLI build runs `go vet` and `go test`, including the shared keygen vectors (0015).
         go-test = pkgs.kekkai;
 
@@ -311,10 +333,12 @@
             grep -q 'udp_flows_max = 1024' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'listen = "127.0.0.1:9480"' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'endpoint = "lighthouse.example.org:4800"' ${darwinEval.services.kekkai-node.configFile}
+            grep -q 'endpoint = "relay.example.org:4801"' ${darwinEval.services.kekkai-node.configFile}
             ${lib.getExe pkgs.kekkai-lighthouse} config check --config ${lighthouseFile}
+            ${lib.getExe pkgs.kekkai-relay} config check --config ${relayFile}
+            grep -q 'max_bytes_per_second = 1000000' ${relayFile}
             echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
                  ${builtins.unsafeDiscardStringContext lighthouseEval.config.system.build.toplevel.drvPath} \
-                 ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
                  ${lib.concatMapStrings (p: p.name) darwinEval.environment.systemPackages} > $out
           '';
       }
@@ -344,6 +368,20 @@
           inherit pkgs;
           nodeModule = inputs.self.nixosModules.node;
           lighthouseModule = inputs.self.nixosModules.lighthouse;
+        };
+        nat-relayed = import ./tests/nat-relayed.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          lighthouseModule = inputs.self.nixosModules.lighthouse;
+          relayModule = inputs.self.nixosModules.relay;
+          validateLogs = inputs.nisshi.lib.validateLogs.${system};
+          validateMetrics = inputs.masu.lib.validateMetrics.${system};
+        };
+        relay-upgrade = import ./tests/relay-upgrade.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          lighthouseModule = inputs.self.nixosModules.lighthouse;
+          relayModule = inputs.self.nixosModules.relay;
         };
       };
 

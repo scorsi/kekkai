@@ -796,6 +796,17 @@ dependencies = [
 [[package]]
 name = "kekkai-relay"
 version = "0.0.0"
+dependencies = [
+ "kekkai-control",
+ "kekkai-core",
+ "kekkai-io",
+ "prost-types",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lazy_static"

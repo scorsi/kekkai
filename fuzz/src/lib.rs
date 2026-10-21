@@ -41,6 +41,13 @@ pub fn lighthouse_config(data: &[u8]) {
     }
 }
 
+/// ADR 0016, 0031 on arbitrary bytes: the relay file parser and validator never panic.
+pub fn relay_config(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = kekkai_io::config::RelayConfig::parse(text);
+    }
+}
+
 /// §15 on arbitrary IP packets: recording and filtering never panic and the table stays
 /// within its bound.
 pub fn firewall(data: &[u8]) {
@@ -89,6 +96,11 @@ mod replay {
     #[test]
     fn lighthouse_config() {
         replay("lighthouse_config", super::lighthouse_config);
+    }
+
+    #[test]
+    fn relay_config() {
+        replay("relay_config", super::relay_config);
     }
 
     #[test]

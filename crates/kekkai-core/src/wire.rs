@@ -34,6 +34,8 @@ pub enum DropReason {
     PacketTooLarge,
     /// §15: refused by the receiving node's inbound firewall.
     Firewall,
+    /// §13.2, §14.2: over a lighthouse's query budget or a relay's per-sender rate limit.
+    RateLimited,
 }
 
 impl DropReason {
@@ -62,6 +64,7 @@ impl DropReason {
             DropReason::NotUnicast => "not_unicast",
             DropReason::PacketTooLarge => "packet_too_large",
             DropReason::Firewall => "firewall",
+            DropReason::RateLimited => "rate_limited",
         }
     }
 }

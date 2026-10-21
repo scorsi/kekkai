@@ -26,7 +26,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Control API served by the node, and by the lighthouse, over a Unix socket (0015, 0030).
+// Control API served by the node, the lighthouse and the relay over a Unix socket (0015,
+// 0030, 0031).
 type ControlServiceClient interface {
 	// The daemon's state; `kekkai status --json` prints the reply in protojson form.
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
@@ -54,7 +55,8 @@ func (c *controlServiceClient) GetStatus(ctx context.Context, in *GetStatusReque
 // All implementations must embed UnimplementedControlServiceServer
 // for forward compatibility.
 //
-// Control API served by the node, and by the lighthouse, over a Unix socket (0015, 0030).
+// Control API served by the node, the lighthouse and the relay over a Unix socket (0015,
+// 0030, 0031).
 type ControlServiceServer interface {
 	// The daemon's state; `kekkai status --json` prints the reply in protojson form.
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)

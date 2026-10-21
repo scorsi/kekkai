@@ -143,7 +143,20 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         });
     }
     node.set_lighthouses(lighthouse_configs.clone());
-    let configs = (peer_configs, lighthouse_configs);
+    let mut relays = Vec::new();
+    let mut relay_configs = Vec::new();
+    for r in &config.relays {
+        let public_key = r.key()?;
+        relays.push((public_key, r.endpoint.clone()));
+        let endpoints = vec![r.endpoint.clone()];
+        named.extend(Named::new(public_key, "relay", &endpoints, start));
+        relay_configs.push(LighthouseConfig {
+            public_key,
+            endpoints: resolve("relay", &r.endpoint).await,
+        });
+    }
+    node.set_relays(relay_configs.clone());
+    let configs = (peer_configs, lighthouse_configs, relay_configs);
     let control = control::Control::new(&config, *node.public_key(), clock::monotonic());
     let mtu = config.node.mtu;
     let (tunnel, interface) =
@@ -160,6 +173,7 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         });
     }
     state.lighthouses = lighthouses;
+    state.relays = relays;
     let state = Arc::new(Mutex::new(state));
     if let Some(m) = &config.metrics {
         let listener = std::net::TcpListener::bind(m.listen)
@@ -237,7 +251,12 @@ fn stale(status: &PeerStatus, now: Duration) -> bool {
             .is_none_or(|t| now.saturating_sub(t) >= silence)
 }
 
-type Configs = (Vec<PeerConfig>, Vec<LighthouseConfig>);
+/// Peers, lighthouses and relays, as the node was built with them.
+type Configs = (
+    Vec<PeerConfig>,
+    Vec<LighthouseConfig>,
+    Vec<LighthouseConfig>,
+);
 
 /// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver.
 async fn reresolve(state: Arc<Mutex<State>>, mut configs: Configs, mut named: Vec<Named>) {
@@ -249,7 +268,7 @@ async fn reresolve(state: Arc<Mutex<State>>, mut configs: Configs, mut named: Ve
 
 /// Resolves the stale parties of `named` again and replaces their static candidates when
 /// the addresses changed, without touching sessions or an in-flight sequence (§13.1).
-/// `configs` is the peer and lighthouse list the node was built with.
+/// `configs` is the peer, lighthouse and relay list the node was built with.
 async fn reresolve_pass(
     state: &Mutex<State>,
     configs: &mut Configs,
@@ -268,7 +287,7 @@ async fn reresolve_pass(
             found.extend(resolve(&n.owner, endpoint).await);
         }
         found.dedup();
-        let (peers, lighthouses) = configs;
+        let (peers, lighthouses, relays) = configs;
         let mut guard = state.lock().expect("no poison");
         if let Some(p) = peers.iter_mut().find(|p| p.public_key == n.key) {
             if !found.is_empty() && p.endpoints != found {
@@ -279,6 +298,11 @@ async fn reresolve_pass(
             if !found.is_empty() && l.endpoints != found {
                 l.endpoints = found;
                 guard.node.set_lighthouses(lighthouses.clone());
+            }
+        } else if let Some(r) = relays.iter_mut().find(|r| r.public_key == n.key) {
+            if !found.is_empty() && r.endpoints != found {
+                r.endpoints = found;
+                guard.node.set_relays(relays.clone());
             }
         }
     }
@@ -422,7 +446,7 @@ mod tests {
         assert!(node.tick(secs(0), wall(secs(0))).datagrams.is_empty());
 
         let state = Mutex::new(State::new(node, HashMap::new()));
-        let mut configs = (vec![peer], vec![unresolved]);
+        let mut configs = (vec![peer], vec![unresolved], Vec::new());
         let written = |name: &str| vec![format!("{name}.example.org:4800")];
         let mut named: Vec<Named> = [(p, "peer"), (l, "lighthouse")]
             .into_iter()

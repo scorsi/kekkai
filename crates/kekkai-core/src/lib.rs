@@ -18,6 +18,7 @@ pub mod lighthouse;
 pub mod mac1;
 pub mod node;
 pub mod peer;
+pub mod relay;
 mod resolver;
 pub mod session;
 pub mod tai64n;

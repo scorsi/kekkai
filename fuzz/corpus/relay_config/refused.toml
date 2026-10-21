@@ -1,0 +1,6 @@
+[service]
+private_key_file = "/k"
+max_bytes_per_second = 0
+[[peers]]
+name = "a"
+public_key = "AAAA"

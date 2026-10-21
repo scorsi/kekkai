@@ -1,11 +1,13 @@
-# Shared pieces of the v0.4 nixosTests (docs/milestones.md): nftables NAT routers
-# (`masquerade`, a cone NAT for ADR 0020), a public lighthouse and nodes that know no
-# endpoint of each other. Addresses are documentation ranges; keys are the public test
-# vectors of docs/spec/vectors/keygen.json.
+# Shared pieces of the v0.4 and v0.5 nixosTests (docs/milestones.md): nftables NAT routers
+# (`masquerade`, a cone NAT for ADR 0020, or `masquerade fully-random`, a symmetric one), a
+# public lighthouse, a public relay and nodes that know no endpoint of each other. Addresses
+# are documentation ranges; keys are the public test vectors of
+# docs/spec/vectors/keygen.json.
 {
   pkgs,
   nodeModule,
   lighthouseModule,
+  relayModule ? null,
 }:
 let
   inherit (pkgs) lib;
@@ -29,6 +31,11 @@ rec {
       private = "4AjQ/Jh90CPykTRR/N+lFlQIUHWC1qeWnb+Wws8/3UE=";
       public = "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=";
     };
+    # The "unclamped input" vector, clamped.
+    relay = {
+      private = "uH47CkiK1r4jwwG3lMtZe7O+mNwQdi7TF4+WS3sUK1Q=";
+      public = "Ch5PtKcJ7vA1o8/evc8w7xJCKf0CRfJiLj+ZwYTkSgE=";
+    };
   };
   number = {
     a = 1;
@@ -40,6 +47,9 @@ rec {
   # vlan 1 is the public network.
   lighthouseIp = "192.0.2.10";
   lighthouseSocket = "/run/kekkai-lighthouse/control.sock";
+  relaySocket = "/run/kekkai-relay/control.sock";
+  # `masquerade fully-random`: a new random public port per flow, a symmetric NAT.
+  symmetric = "masquerade fully-random";
 
   # Only the addresses a test gives, IPv4 only; eth0 (the driver's) stays unconfigured.
   interfaces = ifs: {
@@ -69,13 +79,20 @@ rec {
     systemd.settings.Manager.DefaultDeviceTimeoutSec = lib.mkForce 900;
   };
 
-  # eth1 on the public vlan 1, eth2 on `lan`: masquerade out of eth1.
+  # eth1 on the public vlan 1, eth2 on `lan`: masquerade out of eth1. Another `masquerade`
+  # statement applies to the LAN's datagrams only, so that the router's own (the nat-relayed
+  # stranger's) keep their source port.
   router =
     {
       public,
       lan,
       inside,
+      masquerade ? "masquerade",
     }:
+    let
+      lanNet = lib.concatStringsSep "." (lib.init (lib.splitString "." inside) ++ [ "0" ]);
+      match = lib.optionalString (masquerade != "masquerade") "ip saddr ${lanNet}/24 ";
+    in
     {
       imports = [
         (size 384)
@@ -102,7 +119,7 @@ rec {
           content = ''
             chain postrouting {
               type nat hook postrouting priority srcnat; policy accept;
-              oifname "eth1" masquerade
+              ${match}oifname "eth1" ${masquerade}
             }
           '';
         };
@@ -145,6 +162,34 @@ rec {
     };
   };
 
+  # The relay service, beside the lighthouse on its public VM (0005: roles, not hosts).
+  relay = {
+    imports = [ relayModule ];
+    networking.firewall.allowedUDPPorts = [ 4801 ];
+    environment.systemPackages = [ pkgs.tcpdump ];
+    environment.etc."kekkai/relay-key" = {
+      text = keys.relay.private + "\n";
+      mode = "0400";
+      user = "kekkai-relay";
+      group = "kekkai-relay";
+    };
+    services.kekkai-relay = {
+      enable = true;
+      privateKeyFile = "/etc/kekkai/relay-key";
+      # The stranger is not listed.
+      peers =
+        lib.genAttrs
+          [
+            "a"
+            "b"
+          ]
+          (n: {
+            publicKey = keys.${n}.public;
+          });
+      metrics.listen = "127.0.0.1:9482";
+    };
+  };
+
   # The kekkai-node service with no static endpoint: everything comes from the lighthouse.
   # Without network settings, so that a router can also run one (the nat-direct stranger).
   kekkaiNode =
@@ -152,6 +197,7 @@ rec {
       name,
       peers,
       port ? 4802,
+      relay ? false,
     }:
     {
       imports = [ nodeModule ];
@@ -189,6 +235,10 @@ rec {
             endpoint = "${lighthouseIp}:4800";
           }
         ];
+        relays = lib.optional relay {
+          publicKey = keys.relay.public;
+          endpoint = "${lighthouseIp}:4801";
+        };
         metrics.listen = "127.0.0.1:9480";
       };
     };
@@ -202,10 +252,18 @@ rec {
       gateway,
       peers,
       port ? 4802,
+      relay ? false,
     }:
     {
       imports = [
-        (kekkaiNode { inherit name peers port; })
+        (kekkaiNode {
+          inherit
+            name
+            peers
+            port
+            relay
+            ;
+        })
         (size 512)
         (interfaces ifs)
       ];
@@ -221,6 +279,7 @@ rec {
     import json
 
     LIGHTHOUSE_SOCKET = "${lighthouseSocket}"
+    RELAY_SOCKET = "${relaySocket}"
 
 
     def boot(*machines):

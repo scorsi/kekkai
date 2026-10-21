@@ -55,3 +55,10 @@ path = "fuzz_targets/lighthouse_config.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "relay_config"
+path = "fuzz_targets/relay_config.rs"
+test = false
+doc = false
+bench = false

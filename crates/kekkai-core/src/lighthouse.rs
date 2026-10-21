@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::LIGHTHOUSE_ENTRY_TIMEOUT;
 use crate::inner::Endpoint;
 use crate::keys::PublicKey;
+use crate::relay::Bucket;
+use crate::{DIRECT_PATH_TIMEOUT, LIGHTHOUSE_ENTRY_TIMEOUT};
 
 /// One registered node.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,12 +36,16 @@ pub struct LighthouseCounters {
     pub queries_known: u64,
     pub queries_unknown: u64,
     pub punches: u64,
+    /// Queries over the sender's budget, dropped unanswered (§13.2).
+    pub queries_limited: u64,
 }
 
 #[derive(Default)]
 pub(crate) struct Registry {
     entries: HashMap<PublicKey, Registration>,
     pub(crate) counters: LighthouseCounters,
+    /// Per-sender query budgets (§13.2).
+    budgets: HashMap<PublicKey, Bucket>,
 }
 
 impl Registry {
@@ -70,6 +75,23 @@ impl Registry {
         }
     }
 
+    /// §13.2 query budget: `2 × listed` queries, refilled by `listed` every
+    /// `DIRECT_PATH_TIMEOUT`, per querier; a well-behaved node queries each of its peers at
+    /// most once per `DIRECT_PATH_TIMEOUT` (§12.5). Counts a refusal.
+    pub(crate) fn budget(&mut self, querier: PublicKey, now: Duration, listed: usize) -> bool {
+        let listed = listed.max(1) as u64;
+        let ok = self.budgets.entry(querier).or_default().take(
+            now,
+            2 * listed,
+            DIRECT_PATH_TIMEOUT * 2,
+            1,
+        );
+        if !ok {
+            self.counters.queries_limited += 1;
+        }
+        ok
+    }
+
     /// The unexpired entry of `key`.
     pub(crate) fn lookup(&self, key: &PublicKey, now: Duration) -> Option<&Registration> {
         self.entries
@@ -81,6 +103,7 @@ impl Registry {
     pub(crate) fn expire(&mut self, now: Duration, listed: impl Fn(&PublicKey) -> bool) {
         self.entries
             .retain(|k, r| listed(k) && now < r.refreshed + LIGHTHOUSE_ENTRY_TIMEOUT);
+        self.budgets.retain(|k, _| listed(k));
     }
 
     pub(crate) fn entries(&self, now: Duration) -> Vec<(PublicKey, Registration)> {

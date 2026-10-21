@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::{PublicKey, StaticKey};
-use kekkai_core::node::{Node, PathFailure, PeerStatus};
+use kekkai_core::node::{self, Node, PathFailure, PeerStatus};
 use kekkai_core::peer::Counters;
 use kekkai_core::wire::DropReason;
 use tracing::field::display;
@@ -53,6 +53,8 @@ pub struct State {
     pub peers: HashMap<PublicKey, PeerInfo>,
     /// Configured lighthouses and their endpoint as written, for logs and status.
     pub lighthouses: Vec<(PublicKey, String)>,
+    /// Configured relays and their endpoint as written, for logs and status.
+    pub relays: Vec<(PublicKey, String)>,
     /// Local endpoints to collect at every tick, when a lighthouse is configured.
     pub locals: Option<Locals>,
     /// `false` on a lighthouse: it logs aggregate counters only, never per-peer events
@@ -68,6 +70,7 @@ impl State {
             node,
             peers,
             lighthouses: Vec::new(),
+            relays: Vec::new(),
             locals: None,
             log_peers: true,
             drops: BTreeMap::new(),
@@ -76,6 +79,15 @@ impl State {
 
     fn count_drop(&mut self, reason: DropReason) {
         *self.drops.entry(reason.as_str()).or_default() += 1;
+    }
+}
+
+/// A peer's path as logs and metrics name it (ADR 0019): `direct`, `relayed` or `none`.
+pub fn path_name(status: &PeerStatus) -> &'static str {
+    match status.path {
+        Some(node::Path::Direct(_)) => "direct",
+        Some(node::Path::Relayed(_)) => "relayed",
+        None => "none",
     }
 }
 
@@ -113,7 +125,7 @@ impl Tunnel for NoTunnel {
 /// What `log_events` remembers of a peer between two ticks.
 #[derive(Default)]
 struct Seen {
-    current: bool,
+    path: &'static str,
     counters: Counters,
     endpoint: Option<Endpoint>,
     failure: Option<PathFailure>,
@@ -227,7 +239,8 @@ async fn send_datagrams(
 }
 
 /// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
-/// completed, path change, endpoint change, direct-path failure, lighthouse session state.
+/// completed, path change, endpoint change, direct-path failure, lighthouse and relay
+/// session state.
 fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
     if !state.log_peers {
         return;
@@ -236,15 +249,18 @@ fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
         let Some(status) = state.node.status(key) else {
             continue;
         };
-        let (current, c) = (status.current, status.counters);
+        let (path, c) = (path_name(&status), status.counters);
         let now = Seen {
-            current,
+            path,
             counters: c,
             endpoint: status.endpoint,
             failure: status.last_direct_path_failure,
             state: "",
         };
-        let b = seen.insert(*key, now).unwrap_or_default();
+        let b = seen.insert(*key, now).unwrap_or(Seen {
+            path: "none",
+            ..Seen::default()
+        });
         // shortcut: two handshakes within one tick log once, initiator wins; counters are exact.
         let initiated = c.handshakes_initiated != b.counters.handshakes_initiated;
         if initiated || c.handshakes_responded != b.counters.handshakes_responded {
@@ -264,16 +280,18 @@ fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
         {
             info!(event = "direct-path-failed", peer = %peer.name, reason = f.as_str());
         }
-        if current != b.current {
-            let (from, to, reason) = if current {
-                ("none", "direct", "handshake-completed")
+        if path != b.path {
+            let reason = if path == "none" {
+                "session-expired"
             } else {
-                ("direct", "none", "session-expired")
+                "handshake-completed"
             };
-            info!(event = "path-change", peer = %peer.name, from, to, reason);
+            info!(event = "path-change", peer = %peer.name, from = b.path, to = path, reason);
         }
     }
-    for (key, endpoint) in &state.lighthouses {
+    let services = (state.lighthouses.iter().map(|l| (l, true)))
+        .chain(state.relays.iter().map(|r| (r, false)));
+    for ((key, endpoint), lighthouse) in services {
         let Some(status) = state.node.status(key) else {
             continue;
         };
@@ -283,7 +301,12 @@ fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
             ..Seen::default()
         });
         if entry.state != to {
-            info!(event = "lighthouse-session-change", lighthouse = %endpoint, from = entry.state, to);
+            let from = entry.state;
+            if lighthouse {
+                info!(event = "lighthouse-session-change", lighthouse = %endpoint, from, to);
+            } else {
+                info!(event = "relay-session-change", relay = %endpoint, from, to);
+            }
             entry.state = to;
         }
     }
