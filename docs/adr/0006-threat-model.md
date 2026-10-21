@@ -28,3 +28,14 @@ Key at rest: an attacker with the disk of a host whose disk is not encrypted rea
 
 - Every protocol ADR names the attacker class it addresses.
 - The relay and lighthouse code must be structurally unable to hold session keys of a node pair; this is checked by tests and review (0014, 0020).
+
+## Amendment — 2026-10-21: identity hiding restricted after review gate 1
+
+Review gate 1 (finding C2) showed that `mac1` lets a passive observer who holds candidate
+public keys recognize the receiver of every handshake message: the responder from message
+1, as stated above, and also the **initiator from message 2**, which the decision above did
+not say. The owner accepts this property, which WireGuard has too, and keeps the protocol
+unchanged. The identity-hiding guarantee is therefore only: the initiator's static key is
+hidden from a passive observer who holds no candidate public keys. Spec §5.5 and §7.1 and
+threat model §4.1 and §5 state it; a stronger guarantee would need a separately reviewed
+change of the MAC construction.

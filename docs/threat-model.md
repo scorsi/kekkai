@@ -1,7 +1,7 @@
 # kekkai threat model
 
-Status: v0 draft for review gate 1 (ADR 0021). Scope fixed by ADR 0006. Section references
-of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
+Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021). Scope fixed by ADR
+0006. Section references of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
 
 This document is generic by policy (ADR 0025): it speaks of roles and of "a host whose
 disk is not encrypted", never of a named machine. Which hosts carry which role and which
@@ -30,7 +30,7 @@ accepted risks apply to which host live in the private deployment repository.
 | --- | --- | --- |
 | Confidentiality and integrity of tunnelled IP traffic | the wire | §7, §8 |
 | Peer authentication (only listed keys talk) | handshake | §4, §7.6 |
-| Initiator key privacy against observers | handshake | §7.1 |
+| Initiator key privacy against observers who hold no candidate public keys | handshake | §7.1, §5.5 |
 | Static private keys | host memory and secrets files | host (ADR 0017, 0018), out of the protocol |
 | Unlinkability of a node's presence to strangers (silence) | every port | §16 |
 | Availability of the mesh | lighthouse, relay, timers | partly (see §6 below) |
@@ -95,13 +95,20 @@ Guarantees:
 - **Replay**: message 1 is bound to a monotonic per-sender timestamp (§7.4); message 2 is
   bound to a one-shot in-flight handshake by `receiver_index` and the ephemeral; data
   packets carry a never-reused 64-bit counter checked by a sliding window (§8.4).
-- **Identity hiding**: a passive observer sees random-looking ephemerals, ciphertexts and
-  32-bit indices. The initiator's static key is hidden from a passive observer; the
-  initiator's address is not (the outer `type` byte is in clear, as in WireGuard), and
-  anyone who knows the responder's public key can confirm the responder's identity through
-  `mac1` (as in WireGuard). An active
-  attacker who sends a message 1 to a node learns nothing: without the node's static key it
-  cannot even form `mac1`; with it, the handshake fails at `verify` and nothing is sent.
+- **Identity hiding, restricted**: a passive observer sees random-looking ephemerals,
+  ciphertexts and 32-bit indices. The initiator's static key travels encrypted, so an
+  observer who holds **no candidate public keys** does not learn who initiated. That is
+  the whole claim. The initiator's address is visible (the outer `type` byte is in clear,
+  as in WireGuard). An observer who holds candidate public keys (a former peer, someone
+  who copied a peer list or observed a host) recognizes the **receiver of every handshake
+  message** through `mac1` (§5.5), with two BLAKE2s computations per candidate and no
+  private key: the responder from message 1 and the **initiator from message 2**, so both
+  ends of a handshake, including an initiator behind a changed address. This is the same
+  property as WireGuard's and is **accepted** (owner decision after review gate 1,
+  2026-10-21); it reveals no private key and no plaintext, and it does not let anyone
+  recover an unknown public key without candidates. An active attacker who sends a
+  message 1 to a node learns nothing: without the node's **public** key it cannot even form
+  `mac1`; with it, the handshake fails at `verify` and nothing is sent.
 - **Silence**: a kekkai port never answers a datagram that does not complete the full chain
   of §5.6 and §7.6 (§16). A scanner sees a closed-looking UDP port that never answers; a
   host without the peer's key cannot distinguish a kekkai host from a host dropping UDP.
@@ -119,9 +126,12 @@ Not guaranteed:
   type boundaries implied by sizes (a keepalive is always 33 bytes) are visible. No
   padding, no cover traffic (ADR 0009).
 - **Volumetric denial of service**, and **CPU exhaustion of a responder** by a flood of
-  message 1s from someone who knows its public key: each costs the responder two X25519
-  operations after the `mac1` check. The cookie mechanism is reserved
-  (`cookie_reply`, `mac2`, §5.3, §5.5) and not implemented in v0. `mac1` is **not**
+  message 1s from someone who knows its public key: each costs the responder three X25519
+  operations after the `mac1` check and before `verify` (the derivation of its own static
+  public key, which `snow` 0.10 recomputes when the responder state is built, then `es`
+  and `ss`), and three more when it answers a listed key (its ephemeral key, `ee`, `se`).
+  The cookie mechanism is reserved (`cookie_reply`, `mac2`, §5.3, §5.5) and not
+  implemented in v0. `mac1` is **not**
   authentication: it only prices a probe at one keyed hash and stops attackers who do not
   know the public key.
 - **Denial of service by path manipulation**: an attacker on the path can drop traffic,
@@ -213,6 +223,9 @@ public keys, endpoints and counters, never key material or payloads (§16).
 | Key at rest readable by whoever holds the disk of a host without full-disk encryption (on macOS the decrypted key is written under `/var/run`, which is on disk; on Linux `/run` is tmpfs but the sops age key is on disk) | A one-person homelab; the affected hosts are known to the operator and recorded privately | Wrap the key at rest and unwrap at start (Secure Enclave on macOS, TPM2 and `systemd-creds` on Linux), ADR 0017; the core already takes an opaque `StaticKey` |
 | Responder CPU exhaustion by handshake floods from someone who knows a public key | No public key is published; the entry point's exposure comes with gate 2 only; the `mac1` check already removes blind floods | `cookie_reply` and `mac2` are reserved (§5.3, §5.5) |
 | Replayed message 1 accepted once after a responder restart | WireGuard's accepted behaviour; the resulting session cannot be confirmed by the replayer | None planned |
+| Receiver recognition through `mac1` by an observer holding candidate public keys (initiator from message 2, responder from message 1) | Same property as WireGuard; no key or plaintext is revealed; peer lists are not published | A separately reviewed change of the MAC construction, if ever required |
+| A listed peer that sends an out-of-range or far-future timestamp locks itself out of initiating towards that responder until the responder restarts (no range check, §7.4) | Self-inflicted; as in WireGuard; no other key is affected | None planned |
+| Some handshake secrets are not erased on drop: `snow`'s chaining key and handshake hash, its stack temporaries, the `blake2` hasher state (§8.5) | Defence in depth only (section 4.5 above); the resolver erases the static and ephemeral keys and cipher keys, and the sessions erase the transport keys | A Noise implementation that erases its symmetric state (future ADR) |
 | Wall clock going backwards blocks a node's own initiations until it catches up | Hosts run NTP; the node still answers its peers; a warning is logged after `REJECT_AFTER_TIME` | None planned; a persisted timestamp would be the alternative |
 | Traffic analysis, no padding | Not a goal for v0 | Padding is a format change (wire version) |
 | A compromised node keeps its access until redeploy | Static configuration is the source of truth | Certificates with expiry and revocation in v1 (ADR 0027) |
@@ -243,7 +256,10 @@ link.
 - The deployment repository, the secrets store and the operator's workstation are not
   compromised; a compromise there is a compromise of every key.
 - Private keys are generated by `kekkai keygen` from the host's CSPRNG and never reused
-  across roles.
+  across roles. In particular no configured identity is a low-order point, since all-zero
+  DH outputs are not rejected (§7.1).
+- Key erasure is best effort at the language level and covers exactly the list of §8.5;
+  what it leaves is listed there and in section 5 above.
 
 ## 8. What reviewers should look at (gate 1)
 

@@ -24,3 +24,15 @@ After the handshake, the transport needs nonce management, replay protection, re
 
 - All constants live in one place in the spec and in the core, and the deterministic simulation (0020) drives time explicitly to exercise each of them.
 - The session store is bounded: at most two sessions per peer plus one in-flight handshake.
+
+## Amendment — 2026-10-21: two precisions after review gate 1
+
+- **Replay window boundary** (finding F4): the window is derived from Linux's
+  `counter_validate` but rejects a counter exactly `COUNTER_WINDOW_SIZE` behind the highest
+  accepted one, which Linux accepts. One packet stricter, kept; spec §8.4 says so and splits
+  the check into a read-only `check` and an `update` run only after authentication (C3).
+- **Handshake retry budget** (findings C5, F7): `MAX_TIMER_HANDSHAKES` counts the attempts
+  of one attempt sequence, and ordinary traffic never restarts a sequence that is in
+  flight (stricter than WireGuard, which resets its counter on every non-retry
+  initiation). An unreachable peer is therefore always abandoned after about 90 s, and the
+  next packet starts a new sequence at once. Spec §7.9.

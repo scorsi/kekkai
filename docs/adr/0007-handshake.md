@@ -28,3 +28,11 @@ The handshake is frozen in v0 and must carry certificates in v1 without change. 
 - A node without the lighthouse can only reach statically configured peers (acceptable: configuration is the source of truth in v0).
 - A responder performs two X25519 operations per message 1 before authenticating; accepted in v0 (0006).
 - Handshake messages are the only place where the wire version is interpreted (0009).
+
+## Amendment — 2026-10-21: responder cost of a message 1
+
+Review gate 1 (finding F5) counted the cost more precisely than "two X25519 operations"
+above: with `snow` 0.10 a message 1 that passes `mac1` costs the responder three scalar
+multiplications before `verify` (its own static public key, recomputed when the state is
+built, then `es` and `ss`), and three more to answer a listed key (ephemeral, `ee`, `se`).
+The accepted risk is unchanged; threat model §4.1 carries the count.

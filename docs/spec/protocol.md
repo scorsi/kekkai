@@ -1,6 +1,6 @@
 # kekkai protocol specification
 
-Wire version **1**. Status: v0 draft for review gate 1 (ADR 0021).
+Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021).
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
@@ -54,7 +54,8 @@ Contents
   by the 16-byte tag.
 - Time: **monotonic** time is a suspend-aware monotonic clock of the host; **wall** time is
   UTC as the host knows it. Every duration and deadline in this document is monotonic; the
-  wall clock is read for exactly one purpose, §7.4.
+  wall clock is used for exactly one purpose, §7.4 (an implementation may sample it more
+  often, but no other decision depends on its value).
 - **MUST**, **MUST NOT**, **SHOULD**, **MAY** are used in the RFC 2119 sense.
 - **Drop silently** means: the datagram or packet is discarded, nothing is sent in reaction,
   no state changes except a counter (§16).
@@ -88,7 +89,7 @@ vectors (§19), because no published analysis covers it (ADR 0021).
 | Name | Value | Where |
 | --- | --- | --- |
 | `WIRE_VERSION` | 1 | §5 |
-| `PROLOGUE` | `"kekkai" \|\| WIRE_VERSION` as one byte: `6b656b6b6169 01` | §7.1 |
+| `PROLOGUE` | `"kekkai" \|\| WIRE_VERSION` as one byte: `6b656b6b6169 01` (pinned by `handshake.json`, §7.1) | §7.1 |
 | `PSK` | 32 zero bytes | §7.1 |
 | `MAC1_LABEL` | ASCII `kekkai mac1` (11 bytes) | §5.5 |
 | `TAI64_OFFSET` | `0x400000000000000a` | §7.4 |
@@ -152,7 +153,10 @@ common header:
 type (1) | version (1) | reserved (2)
 ```
 
-`reserved` is zero on send and ignored on receipt. `version` is `WIRE_VERSION`. Four types
+`reserved` is zero on send and is never interpreted on receipt. On `data` it is not
+authenticated (§5.4) and any value is accepted. On handshake messages it is covered by
+`mac1` (§5.5) like every other header byte, so a value changed in transit is a `mac1`
+mismatch and the message is dropped (§5.6 step 5). `version` is `WIRE_VERSION`. Four types
 are assigned (§18.1).
 
 ### 5.1 `handshake_init` (type 1)
@@ -218,6 +222,14 @@ mac1     = BLAKE2s(key = mac1_key, out = 16, message[..len(message) − 32])
 - `mac1` is not authentication: anyone who knows the receiver's public key computes it. It
   only prices a probe at one keyed hash for the sender and one for the receiver (threat
   model §4.1).
+- `mac1` **identifies its receiver to anyone holding candidate public keys**. The covered
+  bytes and the tag travel in clear, so a passive observer who holds a list of candidate
+  public keys finds the receiver of every handshake message with two BLAKE2s computations
+  per candidate: the responder from message 1 and the **initiator from message 2**. No
+  private key, active probe or Noise decryption is needed. This is the same property as
+  WireGuard's `mac1` and is **accepted** (owner decision after review gate 1, 2026-10-21;
+  threat model §4.1); identity hiding (§7.1) holds only against observers without such
+  candidates. Changing it would be a separately reviewed protocol change, not a v0 fix.
 - `mac2` is 16 zero bytes on send and **not checked** on receipt in v0.
 
 `mac1_key` depends only on the receiver's static key and SHOULD be computed once.
@@ -261,6 +273,13 @@ the enclosing field. Parsing rules:
   that meets an **unknown critical** TLV rejects the whole message; an unknown non-critical
   TLV is skipped. "Unknown" is relative to the registry of the enclosing message (§18); a
   type known in one registry is unknown in another.
+- **The critical bit is part of the type.** A registry row assigns one full `type` byte.
+  That `t` (1 to 127) is known does **not** make `t | 0x80` known: `t | 0x80` is known only
+  if the registry assigns it as a row of its own, and it is then a different type from `t`
+  (it may follow `t` in the same list under the ordering rule above). In v0 no registry
+  assigns a type with the critical bit set, so every TLV of type 128 to 255 is an unknown
+  critical TLV and rejects its message: a `timestamp` sent as `0x81` rejects message 1, with
+  or without a `0x01` timestamp beside it.
 - A known TLV whose value has the wrong length for its type is a parse error.
 - A TLV type that is defined for a message but is not expected in it (for example a
   timestamp in `handshake_resp`) is treated as unknown.
@@ -286,10 +305,12 @@ Vectors: [`vectors/tlv.json`](vectors/tlv.json).
   ```
 
   The initiator MUST know the responder's static public key beforehand (it is in its
-  configuration). The initiator's static key travels encrypted in message 1: the
-  initiator's static key is hidden from a passive observer; the initiator's address is not,
-  and anyone who knows the responder's public key can confirm the responder's identity
-  through `mac1` (as in WireGuard). An active probe learns nothing from a responder that never answers it.
+  configuration). The initiator's static key travels encrypted in message 1, so a passive
+  observer who holds **no candidate public keys** cannot learn it. That is the whole of
+  kekkai's identity hiding: the initiator's address is visible, and `mac1` lets an
+  observer who holds candidate public keys recognize the receiver of each message, the
+  responder from message 1 and the initiator from message 2 (§5.5; accepted, as in
+  WireGuard). An active probe learns nothing from a responder that never answers it.
 - **Prologue**: `PROLOGUE = "kekkai" || version`, where `version` is the one byte sent in
   the outer header (`6b656b6b616901` for wire version 1). Both sides mix it as the Noise
   prologue. A header rewritten to another version fails here even if the receiver spoke
@@ -303,6 +324,17 @@ Vectors: [`vectors/tlv.json`](vectors/tlv.json).
 - After message 2 is processed on both sides, `Split()` yields two transport keys:
   `k_i2r` (first output, initiator to responder) and `k_r2i` (second output, responder to
   initiator). The Noise handshake hash is not used on the wire.
+- **All-zero DH outputs are not rejected**, unlike Linux WireGuard (`snow`'s X25519 returns
+  the scalar multiplication as is; the Noise specification allows either). Under `IK` with
+  `verify` on a static list this has no security effect: every key derivation of a
+  handshake mixes at least one DH the attacker cannot compute (`es`/`ss` for message 1
+  against an honest responder, `ee`/`se` for message 2 against an honest initiator), and a
+  listed peer that sends a low-order ephemeral only weakens the forward secrecy of its own
+  sessions. Identity keys are assumed generated by `kekkai keygen` (threat model §7); a
+  low-order configured identity is not supported.
+- `PROLOGUE` MAY be held as a literal by an implementation; it MUST then change together
+  with `WIRE_VERSION`. The `prologue` field of `handshake.json` pins the bytes, so a
+  divergence fails the vectors.
 
 With `snow`: `Builder::new(name).prologue(PROLOGUE).local_private_key(s)
 .remote_public_key(rs).psk(2, PSK)`, `build_initiator()` or `build_responder()`,
@@ -360,6 +392,14 @@ The table is bounded by the peer list (one entry per listed key) and survives se
 expiry; it is lost on restart, which only means a replayed message 1 captured before the
 restart is accepted once (WireGuard's accepted property).
 
+The receiver applies no range check to either field: the 12 bytes are an opaque sequence
+label compared with `memcmp`. A listed peer that sends a timestamp far in the future, or
+nanoseconds outside 0 to 999 999 999 (for example `ff…ff`), makes that responder's
+`last_timestamp` for its own key unreachable and locks **itself** out of initiating towards
+that responder until the responder restarts; no other key's entry is affected. This is
+WireGuard's behaviour and is accepted (self-inflicted; threat model §5). A sender builds
+`nanoseconds` from a valid clock reading (0 to 999 999 999 before alignment).
+
 A node whose wall clock steps backwards emits timestamps its peers reject until the clock
 passes the last accepted value; it still answers handshakes initiated by its peers, whose
 timestamps come from their clocks. Timers (§9) never read the wall clock, so steps do not
@@ -415,7 +455,11 @@ After §5.6:
    falls here).
 2. Run Noise `read_message` on `ephemeral || enc_payload`; parse the TLV list; apply the
    unknown-critical rule. Any failure drops silently and leaves the in-flight handshake in
-   place (the retransmission timer applies).
+   place (the retransmission timer applies). A Noise failure leaves the handshake state as
+   it was, so the genuine response can still complete it. A TLV failure **after** a
+   successful Noise read leaves a Noise state that has consumed message 2 and can no longer
+   complete; it produces no session and no output, and only the retransmission (a fresh
+   message 1, §7.9) recovers.
 3. `verify` is not called again: the responder's identity is the configured static key the
    handshake was built against and `IK` authenticates it.
 4. `Split()`; create a session in the **current** slot (the former current moves to
@@ -440,15 +484,38 @@ and a fresh handshake follows, with no packet lost, as in WireGuard.
 
 ### 7.9 Initiation and retransmission
 
-A party initiates a handshake towards a peer when §9 or §12 asks for one, unless a message
-1 was sent to that peer less than `REKEY_TIMEOUT` ago. At most **one in-flight initiator
-handshake per peer** exists; starting a new one replaces it. Every (re)transmission builds
-a **fresh message 1** (new ephemeral, new timestamp, new `sender_index`, so that a late response to an earlier copy fails §7.7 step 1); the
-message is sent to every candidate path of §12.2. If no valid response arrives within
-`REKEY_TIMEOUT` plus a random jitter of at most `REKEY_TIMEOUT_JITTER`, the message is
-rebuilt and resent; after `MAX_TIMER_HANDSHAKES` attempts (90 s) the handshake is
-abandoned, the staged packets are dropped, and the peer's path becomes `none` with the
-failure reason recorded (§12.6). The next IP packet towards the peer starts over.
+At most **one in-flight initiator handshake per peer** exists. It carries an **attempt
+count** and a **retransmit deadline**.
+
+- **Initiation triggers** are: an IP packet staged for the peer (§8.7, §11), the rekey
+  rules (§8.6), the new-handshake timer (§9), the lighthouse and relay session rule (§9),
+  a rediscovery (§12.5) and a punch (§13.3).
+- A trigger while **no** handshake is in flight starts an **attempt sequence**, unless a
+  message 1 was sent to that peer less than `REKEY_TIMEOUT` ago (then nothing happens): a
+  fresh message 1 is built with attempt count 1, sent, and the retransmit deadline is set to
+  `REKEY_TIMEOUT` plus a random jitter of at most `REKEY_TIMEOUT_JITTER`.
+- A trigger while a handshake **is** in flight leaves it unchanged: same message 1, same
+  attempt count, same deadline. A rediscovery or a punch may only widen its candidates and
+  send the existing message 1 to the new ones (§12.5, §13.3); this is not an attempt.
+- Only the **retransmit deadline** advances the sequence. When it passes and the attempt
+  count is below `MAX_TIMER_HANDSHAKES`, a **fresh message 1** is built (new ephemeral, new
+  timestamp, new `sender_index`, so that a late response to an earlier copy fails §7.7
+  step 1), the attempt count is incremented and a new deadline is set. When it passes and
+  the count has reached `MAX_TIMER_HANDSHAKES` (about 90 s after the first attempt), the
+  handshake is **abandoned**: the staged packets are dropped, a handshake timeout is
+  counted, and the peer's path becomes `none` with the reason `abandoned` (§12.6).
+- The sequence also ends, without abandonment, when a response completes it (§7.7 step 5)
+  or when a responder session of that peer is confirmed (§8.2 step 5).
+- After an abandonment the next trigger starts a new sequence at once (the last message 1
+  is at least `REKEY_TIMEOUT` old by construction).
+
+Every message 1 is sent to every candidate path of §12.2.
+
+This is stricter than WireGuard, which resets its attempt counter on every initiation that
+is not a retry: kekkai keeps the budget per sequence so that an unreachable peer always
+ends in an abandonment that §12.6 can report and trigger 2 of §12.5 can count on, while
+under steady traffic the first packet after an abandonment starts a new sequence at once,
+so the peer is retried as often as in WireGuard.
 
 ## 8. Sessions and transport
 
@@ -494,15 +561,27 @@ in the nonce; both carry the same value.
 Receiving a `data` packet:
 
 1. `receiver_index` MUST select a live session of this party; otherwise drop silently.
-2. The counter MUST pass the replay window check (§8.4) in its **pre-check** form (not
-   already seen and within the window) before decryption.
+2. The counter MUST pass `check` (§8.4), which reads the window and changes nothing.
 3. `AEAD` decrypt with the session's receiving key and `nonce(counter)`; failure drops
-   silently and does not mark the counter.
-4. Mark the counter in the window (§8.4). Update `last_received`. Apply the path and
-   endpoint rules of §12.4. Record traffic for the timers (§9).
+   silently and leaves the window exactly as it was.
+4. `update` the window with the counter (§8.4). Update `last_received`. Apply the path and
+   endpoint rules of §12.4. Record traffic for the timers (§9) and apply the responder rule
+   of §8.6.
 5. If the session was `next` and unconfirmed: it becomes `current` (`current` moves to
-   `previous`, the old `previous` is discarded) and `confirmed = true`.
+   `previous`, the old `previous` is discarded) and `confirmed = true`. If an in-flight
+   initiator handshake towards that peer exists, it is cleared as in §7.7 step 5 (its index
+   released, its retransmit deadline cancelled); this is not an abandonment, so nothing is
+   recorded for §12.6 and no handshake timeout is counted. A late response to it then fails
+   §7.7 step 1. Then the staged packets are sent on the new `current` in FIFO order (§8.7),
+   each under the ordinary sending rules (counter, `last_sent`, §8.6). No keepalive is
+   added when the queue is empty: the confirming packet already proved the session.
 6. Process `inner` (§10).
+
+Steps 4 and 5 are the transport outcome of an authenticated packet and stand whatever step
+6 decides. If `inner` is rejected (§10.1, §10.2, §11, §15), only that content is dropped
+silently: the window update, the endpoint and path update of §12.4, the traffic record,
+the confirmation, and every datagram steps 4 and 5 produced (a message 1 from the
+responder rule of §8.6, the staged packets of step 5) are kept and sent.
 
 Vectors: [`vectors/handshake.json`](vectors/handshake.json) (`data_packets`).
 
@@ -521,33 +600,107 @@ implementation (`counter_validate`, RFC 6479 style):
 
 - State: `last` (highest counter accepted, initially 0 with the bit for 0 unset) and a
   bitmap of 8192 bits in 128 words of 64 bits.
-- `check(counter)`:
+- Two separate operations. Word `w(c)` of counter `c` is `(c / 64) mod 128`; its bit is
+  `c mod 64`.
+- `check(counter)`, **read-only**, run before decryption (§8.2 step 2):
   1. If `counter ≥ REJECT_AFTER_MESSAGES`: reject.
-  2. If `counter > last`: clear the words between `last`'s word and `counter`'s word
-     (at most all 128), then `last = counter`.
-  3. Else if `last − counter ≥ COUNTER_WINDOW_SIZE`: reject (too old).
+  2. If `counter > last`: accept.
+  3. If `last − counter ≥ COUNTER_WINDOW_SIZE`: reject (too old).
   4. If the bit of `counter` is set: reject (already seen). Otherwise accept.
-- The bit is **set only after the AEAD succeeds** (§8.2 step 4); a forged packet with a
-  fresh counter does not burn that counter. Implementations run steps 1 to 4 as a
-  pre-check without setting, then set after decryption; the net effect on valid traffic is
-  the algorithm above.
+- `update(counter)`, run **only after the AEAD succeeded** (§8.2 step 4), for a counter
+  that passed `check`:
+  1. If `counter > last`: clear the words that follow `w(last)` up to and including
+     `w(counter)`, that is `min(counter / 64 − last / 64, 128)` words, wrapping around the
+     ring; then `last = counter`.
+  2. Set the bit of `counter`.
+- **No window state changes before authentication**: no word is cleared, `last` is not
+  advanced and no bit is set until the AEAD has succeeded. A packet that fails the AEAD,
+  whatever its counter, leaves `last` and all 128 words bit for bit as they were, so a
+  forged packet can neither burn a fresh counter nor slide the window.
 
-Properties: a counter is accepted at most once; any counter more than `COUNTER_WINDOW_SIZE`
-behind the highest one is rejected; reordering within the window is tolerated.
+The window is derived from Linux WireGuard's `counter_validate` (RFC 6479 style), split
+into the two operations above, with one boundary difference: Linux rejects only
+`last − counter > COUNTER_WINDOW_SIZE` and so accepts a counter exactly
+`COUNTER_WINDOW_SIZE` behind `last`; kekkai rejects it (step 3 uses `≥`). The window is one
+packet narrower than Linux's; this is stricter, safe, and pinned by `replay.json`.
+
+Properties: a counter is accepted at most once; any counter `COUNTER_WINDOW_SIZE` or more
+behind the highest accepted one is rejected; reordering within the window is tolerated; an
+unauthenticated packet never changes the window.
+
+Required regression test (review gate 1, C3), on one receiving session through the real
+decrypt path: accept counter 0; offer a packet with counter `REJECT_AFTER_MESSAGES − 1`
+and a bad tag, which is rejected; assert `last` and the bitmap are unchanged; accept
+counter 1; reject a replay of 0. Then, on a fresh session, cross the ring boundary:
+accept counter 8150 (word 127); offer a bad-tag packet with counter 8342 (word 2, which if
+applied would clear words 0 to 2 across the wrap and move `last`); assert the window is
+unchanged; accept counter 30 (8120 behind 8150, inside the window, but too old if `last`
+had moved to 8342); reject a replay of 8150.
 
 Vectors: [`vectors/replay.json`](vectors/replay.json).
 
-### 8.5 Session replacement and expiry
+### 8.5 Session replacement, expiry and key erasure
 
 - A new confirmed session becomes `current`; the old `current` becomes `previous` and the
-  old `previous` is discarded with its keys zeroized.
+  old `previous` is discarded with its keys erased (below).
 - A session is discarded when `now − created ≥ REJECT_AFTER_TIME`, or when its sending
   counter reaches `REJECT_AFTER_MESSAGES` (it then cannot send; it is still allowed to
   receive until it expires in time), or when a reload removes its peer from the list.
-- Keys of discarded sessions are zeroized.
+- Keys of discarded sessions are erased as stated below.
 - A monotonic clock that jumps forward by more than `REJECT_AFTER_TIME` in one step (a long
   suspend) expires every session on the next tick; the core then re-handshakes on demand
   (§12.5) without waiting out any timer.
+
+**Key erasure.** Erasure is defence in depth: a process with the node's privileges is out
+of scope (threat model §4.5), but what erasure removes cannot be disclosed later by a read
+of freed memory, a core dump or swap, and forward secrecy of recorded traffic depends on
+it at the implementation level. **Erased** means overwritten through `zeroize` (writes the
+compiler may not remove) before the memory is released. `kekkai-core` drives `snow` with
+its own `CryptoResolver` (ADR 0028, amendment 2026-10-21) whose X25519, ChaCha20-Poly1305
+and BLAKE2s objects erase what they hold; randomness still comes from `snow`'s default
+resolver.
+
+| Secret | Held by | Erased |
+| --- | --- | --- |
+| Static private key | `StaticKey` and each of its clones | on drop |
+| Copy of the static private key inside a handshake state | the resolver's X25519 object (`Dh::set`) | when the handshake state is dropped |
+| Ephemeral private key | the resolver's X25519 object (`Dh::generate`) | when the handshake state is dropped |
+| Static key copy used to derive a public key (`StaticKey::public`, §4) | a resolver X25519 object | before the function returns |
+| Handshake cipher keys `k` of the Noise `CipherState`, including the two cipher states `snow` fills itself when the last message is processed | the resolver's ChaCha20-Poly1305 objects | when replaced by `Cipher::set`, and when the handshake state is dropped |
+| HMAC and HKDF intermediates computed by the hash object (key-xor-pad blocks, inner digest, HKDF temporary key) | the resolver's BLAKE2s object, which overrides `Hash::hmac` and `Hash::hkdf` | before each call returns |
+| Local scratch of the resolver objects (generated bytes, DH result before it is copied out) | the resolver | before each call returns |
+| The two raw `Split()` outputs returned by `snow` | `kekkai-core` | the returned arrays right after they are copied into `SessionKeys` |
+| Transport keys | `SessionKeys` and the two transport AEAD objects of a session | when the session is discarded (above), when its peer is removed, and at shutdown |
+| Key file text and decoded bytes | `kekkai-io`'s key loader and the text decoder of `kekkai-core` (§4) | as soon as the `StaticKey` is built, and on every parse failure |
+
+A **handshake state** (an initiator's in-flight handshake, or a responder's state between
+`read_message` and `Split()`) is dropped, and erased as above, on every way out:
+completion (§7.6 step 5, §7.7 step 4, after the raw split), failure (any Noise or TLV
+failure of message 1, §7.6 steps 1 to 3; an unlisted key; a stale timestamp), replacement
+by a retransmission (§7.9), abandonment (§7.9), clearing on responder confirmation (§8.2
+step 5), and removal of the peer.
+
+**Not covered**, stated plainly. These copies stay in released memory until reused:
+
+- `snow`'s `SymmetricState`: the chaining key `ck` and the handshake hash `h` are plain
+  arrays owned by `snow` (0.10, `symmetricstate.rs`), copied by value on every checkpoint
+  of `read_message` and `write_message`. The final `ck` determines both transport keys. A
+  resolver cannot reach them.
+- `snow`'s own stack temporaries: the DH result buffer of each token
+  (`HandshakeState::dh`), the HKDF outputs and cipher-key arrays of `mix_key`,
+  `mix_key_and_hash` and `split`, and the 64-byte outputs inside
+  `dangerously_get_raw_split`.
+- The state and block buffer of the `blake2` hasher object (`blake2` 0.10 has no erasure
+  support); after an HMAC they may hold a block derived from `ck`.
+- Copies made inside `curve25519-dalek`'s scalar multiplication, which takes the scalar
+  by value.
+- Copies the compiler makes (moves, registers, stack spills) and pages the operating
+  system writes to swap or core dumps (service hardening, ADR 0018).
+
+Closing the first two needs a change to `snow` or another Noise implementation; that is a
+future decision with its own ADR, not part of v0. Erasure changes no byte on the wire: all
+vectors (§19) are unchanged by it, and `noise_ikpsk2.json` and `handshake.json` are the
+check that the kekkai resolver computes the same primitives as `snow`'s default one.
 
 ### 8.6 Rekey
 
@@ -568,9 +721,11 @@ analysis of WireGuard assumes.
 ### 8.7 Staged packets
 
 IP packets towards a peer without a usable `current` session are **staged** in a bounded
-FIFO of `MAX_STAGED_PACKETS` per peer; a full queue drops the oldest. They are sent when a
-session becomes `current` (§7.7 step 7) and dropped when the handshake is abandoned
-(§7.9). Nothing else is ever queued in the core.
+FIFO of `MAX_STAGED_PACKETS` per peer; a full queue drops the oldest. They are sent, in
+FIFO order and each exactly once, as soon as a confirmed session becomes `current`, by
+either path: initiator completion (§7.7 step 7) or responder confirmation (§8.2 step 5).
+The queue is then empty. They are dropped when the handshake is abandoned (§7.9). Nothing
+else is ever queued in the core.
 
 ## 9. Timers
 
@@ -610,7 +765,8 @@ non-keepalive packet.)
 The plaintext of every `data` packet is `inner_type (1) || body`. Inner types are
 registered in §18.2. An unassigned inner type, or a body that does not parse for its type,
 drops the packet silently after the counter was marked (the packet was authentic; only its
-content is unusable).
+content is unusable). The transport effects of §8.2 steps 4 and 5 stand, including the
+datagrams they produced and the endpoint update of §12.4.
 
 ### 10.2 Acceptance by role
 
@@ -760,9 +916,10 @@ handshake, keeping an in-flight one if it exists and merely widening its candida
 triggered by any of:
 
 1. an IP packet towards `B` while `B` has no live `current` session;
-2. a message 1 towards `B` unanswered after its first `REKEY_TIMEOUT` (one retransmission
-   has happened); this is what revives a session whose endpoint was a LAN address the node
-   has left, or whose peer moved;
+2. a message 1 towards `B` unanswered after its first `REKEY_TIMEOUT`: the retransmit
+   deadline of an attempt sequence passed once (§7.9; ordinary traffic never restarts a
+   sequence, so this always happens for an unanswered peer); this is what revives a session
+   whose endpoint was a LAN address the node has left, or whose peer moved;
 3. a change of the node's own local addresses (§13.1), detected at a persistent-keepalive
    tick: the node re-registers immediately and rediscovers **every peer with a live
    session**;
@@ -907,13 +1064,19 @@ ICMP error induced by the core, no state change other than a counter):
 - §13 and §14: query for an unlisted key answers "unknown" to a **listed** querier only;
   relay forwarding to an unlisted or absent destination.
 
+The §10 and §11 conditions (and §15) occur after a `data` packet was authenticated: "no
+state change" there concerns the rejected content only; the transport effects of §8.2
+steps 4 and 5 have already happened and stand.
+
 Each condition increments a counter exposed through the control API; none of them logs
 above `debug`, and none logs a key or payload. Rate limiting of these counters' log lines
 is the IO layer's business.
 
 Not covered by silence, by design: a listed peer learns that it is listed (its handshake
 completes), and an observer of a handshake between two listed parties sees that a
-handshake happened and the sizes of what followed (no padding, ADR 0009).
+handshake happened and the sizes of what followed (no padding, ADR 0009). An observer who
+holds candidate public keys also recognizes the receiver of each handshake message through
+`mac1` (§5.5).
 
 ## 17. Bounds
 
@@ -981,7 +1144,7 @@ No protocol-level fragmentation; TCP MSS is clamped on the interface by the IO l
 | 1 | `timestamp` | TAI64N (12) | message 1, required in v0, non-critical |
 | 2 | `certificate` | reserved for v1 | both messages, non-critical |
 | 3–127 | — | unassigned | |
-| 128–255 | critical variants of 0–127 | | |
+| 128–255 | — | unassigned critical types; none assigned in v0, so all are unknown critical (§6). `t \| 0x80` is not a variant of `t` | |
 
 ### 18.4 Lighthouse TLV types
 
@@ -992,7 +1155,7 @@ No protocol-level fragmentation; TCP MSS is clamped on the interface by the IO l
 | 3 | `last_seen` | `u32` seconds |
 | 4 | `certificate` | reserved for v1, non-critical |
 | 5–127 | — | unassigned |
-| 128–255 | critical variants of 0–127 | |
+| 128–255 | — | unassigned critical types; none assigned in v0, so all are unknown critical (§6). `t \| 0x80` is not a variant of `t` |
 
 ### 18.5 Wire versions
 
@@ -1006,8 +1169,11 @@ versions ignore each other silently (ADR 0024).
 
 ## 19. Test vectors
 
-JSON files under [`vectors/`](vectors/), byte strings as lowercase hex, integers above
-2^53 as decimal strings. Each file carries a `description` naming the section it exercises.
+JSON files under [`vectors/`](vectors/), byte strings as lowercase hex. **Exact integers**:
+a field whose type can hold a value above 2^53 − 1 (every 64-bit counter: `replay.json`
+counters, `handshake.json` `data_packets[].counter`) is a **decimal string in every entry**,
+whatever the value, so that readers that store JSON numbers as doubles stay exact; a JSON
+number is used only for fields bounded by 2^53 − 1 (indices, lengths, seconds, types). Each file carries a `description` naming the section it exercises.
 They are loaded by the Rust test suite of `kekkai-core` (all of them) and by the Go CLI's
 tests (`keygen.json`), both run by `nix flake check` (ADR 0020).
 
@@ -1036,3 +1202,34 @@ published Noise vector is never regenerated.
 
 Rejection vectors name a `reason`; implementations are free in how they report it, but the
 packet MUST produce no output (§16).
+
+**Independent reproduction.** Because the Rust suite is the generator of record, the glue
+vectors cannot by themselves detect a wrong implementation after a regeneration; the only
+permanent external anchor is `noise_ikpsk2.json`, which checks `snow` (or the kekkai
+resolver, §8.5), not the glue. At review gate 1 (2026-10-21) both reviewers recomputed the
+glue independently of the Rust code: `mac1_key` and `mac1` of both messages (Python
+`hashlib.blake2s` with `digest_size = 16`; a truncated 32-byte keyed digest does not
+match), every `tai64n.json` case and comparison, and the four `data_packets` of
+`handshake.json` with a from-scratch RFC 8439 ChaCha20-Poly1305 using the `0^32 ||
+LE64(counter)` nonce and empty associated data, which pins the nonce layout and the
+orientation of the two `Split()` outputs. All matched. A durable second implementation of
+`mac1` and of the transport nonce (for example in the Go CLI's tests over `handshake.json`)
+would keep that check alive; it is future work, not a v0 task.
+
+**Checks over existing bytes.** The **receiver recognition** check documents the accepted
+property of §5.5 using only public fields of `handshake.json`: for `message_2.datagram`
+and the candidates `{initiator.static_public, responder.static_public}`, compute
+`BLAKE2s(key = BLAKE2s(MAC1_LABEL || candidate), out = 16, datagram[..len − 32])` and
+compare it with `datagram[len − 32 .. len − 16]`. Exactly `initiator.static_public`
+matches, and its key and tag equal `message_2.mac1_key` and `message_2.mac1`. The same
+computation over `message_1.datagram` matches exactly `responder.static_public`
+(`message_1.mac1_key`, `message_1.mac1`). The check reads no private key, ephemeral or
+transport key and adds no field to the file.
+
+**Cases required by review gate 1** (to be added with the code): `tlv.json` decode cases
+against the production message 1 registry (`known_tlvs = [1]`): a timestamp as `0x01`
+accepted; the same value as `0x81` rejected as unknown critical; `0x01` followed by `0x81`
+rejected as unknown critical (§6). `handshake.json` `data_packets[].counter` as decimal
+strings, with a format check that no vector file carries a JSON number above 2^53 − 1;
+integers, datagrams and ciphertexts unchanged. The replay regression of §8.4 is a unit
+test through the session's decrypt path, not a vector.

@@ -24,3 +24,52 @@ The cryptographic core is written by an AI assistant under the author's directio
 
 - v0.3 cannot be deployed between real hosts before gate 1; v0.6 cannot start before gate 2.
 - The spec and threat model must be complete enough at v0.1 to be reviewable on their own.
+
+## Amendment — 2026-10-21: review gate 1, first round
+
+Reviewed commit `51b6e08` (diff `af458a7..51b6e08`), with the spec, the threat model and the
+vectors, by two independent reviewers:
+
+- **Codex**: verdict **FAIL** (C1 to C4 must fix, C5 to C7 should fix).
+- **Fable**: verdict **PASS** (no must fix; F1 to F3 should fix, F4 to F12 notes).
+
+Owner decisions (2026-10-21):
+
+- **C1 / F2** (`snow` erases none of its secrets): kekkai supplies its own `snow`
+  `CryptoResolver` whose X25519, ChaCha20-Poly1305 and BLAKE2s objects erase what they hold
+  (ADR 0028, amendment 2026-10-21); spec §8.5 states the erasure lifecycle and what stays
+  uncovered.
+- **C2** (`mac1` of message 2 identifies the initiator to an observer holding candidate
+  public keys): **accepted and documented**, as in WireGuard; no protocol change (ADR 0006,
+  amendment 2026-10-21).
+
+Following this ADR's order (spec, then code, then vectors), the specification side is
+done in the commit that adds this section; the code and vector tasks are pending.
+
+| Finding | Severity | Resolution | Status |
+| --- | --- | --- | --- |
+| C1 | must fix | Spec §8.5 key erasure; ADR 0028 amendment; threat model §5, §7. Code: kekkai resolver, raw-split arrays and key-loader text erased | spec done, code pending |
+| C2 | must fix | Accepted. Spec §5.5, §7.1, §16; threat model §2, §4.1, §5; ADR 0006 amendment. Receiver recognition check over existing `handshake.json` bytes (§19) | spec done, test pending |
+| C3 | must fix | Spec §8.4: read-only `check`, `update` only after the AEAD, no window change before authentication; §8.2 steps 2 to 4. Regression test specified in §8.4 | spec done, test pending (code already conforms) |
+| C4 | must fix | Spec §8.2 step 5, §8.7: staged packets flushed on responder confirmation; an in-flight handshake is cleared then (not an abandonment) | spec done, code pending |
+| C5 | should fix | Spec §7.9: attempt sequences, ordinary triggers never reset a sequence in flight (stricter than WireGuard); §12.5 trigger 2; ADR 0008 amendment | spec done, code pending |
+| C6 | should fix | Spec §6, §18.3, §18.4: the critical bit is part of the type; `t \| 0x80` is not known because `t` is; no critical type assigned in v0. Matches the code | spec done, vectors pending |
+| C7 | should fix | Spec §19: 64-bit counter fields are decimal strings in every entry | spec done, vector file and loader pending |
+| F1 | should fix | Spec §8.2 (closing paragraph), §10.1, §16: transport effects and produced datagrams stand when `inner` is rejected; endpoint updated (§12.4) | spec done, code pending |
+| F2 | should fix | Same as C1 (includes `load_key` temporaries) | spec done, code pending |
+| F3 | should fix | Same as C6 | spec done, vectors pending |
+| F4 | note | Spec §8.4 and ADR 0008 amendment: one packet stricter than Linux, kept | done |
+| F5 | note | Threat model §4.1: three X25519 operations before `verify`, three to answer; "public key" wording; ADR 0007 amendment | done |
+| F6 | note | Spec §5: `reserved` is covered by `mac1` on handshake messages | done |
+| F7 | note | Same as C5 | spec done, code pending |
+| F8 | note | Spec §7.1: all-zero DH outputs not rejected, harmless under `IK` with the peer list; threat model §7 | done |
+| F9 | note | Spec §7.4: no range check on the timestamp; self-lockout until the responder restarts; threat model §5 | done |
+| F10 | note | Spec §19: both reviewers' independent reproduction recorded; a durable second implementation is future work, not a task | done |
+| F11 | note | Spec §1: the wall clock is used, not necessarily read, for one purpose only | done |
+| F12 | note | Spec §3, §7.1: the `PROLOGUE` literal must change with `WIRE_VERSION`; pinned by `handshake.json` | done |
+
+Also clarified from the reviews' "checked" sections: spec §7.7 step 2, a TLV failure after
+a successful Noise read of message 2 leaves a flight that only its retransmission recovers.
+
+**Gate 1 status: closed (not passed).** It passes when the pending code, test and vector
+tasks above have landed and the reviewers have re-checked the must-fix items C1 to C4.

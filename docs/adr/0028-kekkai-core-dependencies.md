@@ -41,3 +41,32 @@ dependency is an ADR, not a `cargo add` (ADR 0002, 0003).
   `handshake.json` (`data_packets`, `rejected`).
 - The test tools named in ADR 0020 (`proptest`, cargo-fuzz / `libfuzzer-sys` in the `fuzz`
   crate) are covered by ADR 0020 and need no new ADR.
+
+## Amendment — 2026-10-21: kekkai's own `snow` resolver, for key erasure
+
+Review gate 1 (ADR 0021) found that `snow` 0.10 erases none of its secrets: its default
+resolver keeps the static and ephemeral private keys and the cipher keys in plain arrays
+that are freed without being overwritten (findings C1, F2). The owner decided to fix what
+can be fixed from outside `snow`:
+
+- `kekkai-core` supplies its own `snow::resolvers::CryptoResolver` and builds every
+  handshake state with it (`Builder::with_resolver`). Its X25519 (`Dh`), ChaCha20-Poly1305
+  (`Cipher`) and BLAKE2s (`Hash`) objects erase what they hold on drop and their scratch
+  before each call returns; the `Hash` object overrides `hmac` and `hkdf` to erase their
+  intermediates. `resolve_rng` delegates to `snow`'s default resolver, so the core keeps one
+  randomness source. The exact erasure lifecycle and what stays uncovered (`snow`'s
+  `SymmetricState` and stack temporaries, the `blake2` hasher state) are in spec §8.5.
+- Crates: **`curve25519-dalek`** (X25519 through `MontgomeryPoint::mul_base_clamped` and
+  `mul_clamped`, the same calls as `snow`'s default resolver, so the core still has one
+  X25519 implementation), **`chacha20poly1305`** (whose AEAD object already erases its key
+  on drop), **`blake2`** and **`zeroize`**. `curve25519-dalek` becomes a direct dependency;
+  it is already in the dependency set (4.1.3, pulled by `snow`) and is declared with
+  `default-features = false` as `snow` does, so `cargo tree` gains no crate.
+  `x25519-dalek` is still not used. The direct dependency list of `kekkai-core` becomes:
+  `snow`, `curve25519-dalek`, `blake2`, `chacha20poly1305`, `zeroize`, `base64`.
+- `kekkai-io` gains no dependency: its key loader hands the file text to `kekkai-core`,
+  which erases it and the decoded bytes once the `StaticKey` is built or parsing fails.
+- The bullet "X25519 public keys ... come from `snow`'s default resolver" above is
+  replaced by this amendment for X25519; random bytes still come from that resolver.
+- `noise_ikpsk2.json` and `handshake.json` must reproduce unchanged through the kekkai
+  resolver; that is its correctness check.
