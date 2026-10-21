@@ -3,6 +3,12 @@
 # the other's endpoint from configuration; they find each other through the lighthouse and
 # hold a direct path that survives the lighthouse's stop. An unlisted key gets no answer
 # from the lighthouse. Logs and metrics pass nisshi's and masu's validators (ADR 0019).
+#
+# Five VMs, not six, for a small builder: the stranger is a kekkai-node on router A, on the
+# public network, configured with the lighthouse but not listed by it. Its datagrams leave
+# from 192.0.2.1 like A's masqueraded ones, so the silence check tells them apart by its
+# own listen port. Masquerade leaves the router's own datagrams as they are (their source
+# already is the public address), and A's NAT rule and mapping are unchanged.
 {
   pkgs,
   nodeModule,
@@ -13,16 +19,27 @@
 let
   common = import ./nat-common.nix { inherit pkgs nodeModule lighthouseModule; };
   inherit (common) keys overlay4;
+  # Not A's 4802, so that the stranger's datagrams are told apart from A's masqueraded ones.
+  strangerPort = 4809;
 in
 pkgs.testers.nixosTest {
   name = "kekkai-nat-direct";
 
   nodes = {
     lighthouse = common.lighthouse;
-    routera = common.router {
-      public = "192.0.2.1";
-      lan = 2;
-      inside = "10.1.0.1";
+    routera = {
+      imports = [
+        (common.router {
+          public = "192.0.2.1";
+          lan = 2;
+          inside = "10.1.0.1";
+        })
+        (common.kekkaiNode {
+          name = "stranger";
+          peers = [ "b" ];
+          port = strangerPort;
+        })
+      ];
     };
     routerb = common.router {
       public = "192.0.2.2";
@@ -43,14 +60,6 @@ pkgs.testers.nixosTest {
       gateway = "10.2.0.1";
       peers = [ "a" ];
     };
-    # On the public network, configured with the lighthouse, but not listed by it.
-    stranger = common.node {
-      name = "stranger";
-      vlans = [ 1 ];
-      ifs.eth1 = "192.0.2.20";
-      gateway = "192.0.2.1";
-      peers = [ "b" ];
-    };
   };
 
   testScript = ''
@@ -58,7 +67,7 @@ pkgs.testers.nixosTest {
 
     start_all()
     lighthouse.wait_for_unit("kekkai-lighthouse.service")
-    for m in (a, b, stranger):
+    for m in (a, b, routera):
         m.wait_for_unit("kekkai-node.service")
 
     with subtest("config check accepts the lighthouse module's file"):
@@ -99,26 +108,28 @@ pkgs.testers.nixosTest {
             assert p["endpoint"].startswith(nat), p
 
     with subtest("silence: an unlisted key gets nothing from the lighthouse"):
-        stranger.succeed(
+        routera.succeed(
             "tcpdump -Z root -n -U -i eth1 -w /tmp/silence.pcap udp port 4800"
             " >/tmp/tcpdump.log 2>&1 &"
         )
-        stranger.wait_until_succeeds("grep -q listening /tmp/tcpdump.log")
+        routera.wait_until_succeeds("grep -q listening /tmp/tcpdump.log")
         # Past REKEY_TIMEOUT: message 1 went out at least twice.
-        stranger.succeed("sleep 12")
-        stranger.succeed("pkill -INT tcpdump")
-        stranger.wait_until_fails("pgrep tcpdump")
-        sent = stranger.succeed(
+        routera.succeed("sleep 12")
+        routera.succeed("pkill -INT tcpdump")
+        routera.wait_until_fails("pgrep tcpdump")
+        sent = routera.succeed(
             "tcpdump -n -r /tmp/silence.pcap"
-            " 'src host 192.0.2.20 and dst host ${common.lighthouseIp}' 2>/dev/null"
+            " 'src host 192.0.2.1 and src port ${toString strangerPort}"
+            " and dst host ${common.lighthouseIp}' 2>/dev/null"
         )
         assert len(sent.strip().splitlines()) >= 2, sent
-        replies = stranger.succeed(
+        replies = routera.succeed(
             "tcpdump -n -r /tmp/silence.pcap"
-            " 'src host ${common.lighthouseIp} and dst host 192.0.2.20' 2>/dev/null"
+            " 'src host ${common.lighthouseIp} and dst host 192.0.2.1"
+            " and dst port ${toString strangerPort}' 2>/dev/null"
         )
         assert replies.strip() == "", replies
-        state = status(stranger)["lighthouses"][0]["state"]
+        state = status(routera)["lighthouses"][0]["state"]
         assert state != "SESSION_STATE_CONNECTED", state
 
     with subtest("logs pass nisshi's schema v1, metrics pass masu's convention"):

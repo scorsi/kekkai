@@ -55,6 +55,16 @@ rec {
     }) ifs;
   };
 
+  # The builder runs every VM of a test at once on 8 GiB shared with other services: size
+  # each one (384 MiB was the qemu-vm default for years) and keep the closure lean.
+  size = memorySize: {
+    virtualisation = {
+      inherit memorySize;
+      cores = 1;
+    };
+    documentation.enable = false;
+  };
+
   # eth1 on the public vlan 1, eth2 on `lan`: masquerade out of eth1.
   router =
     {
@@ -64,6 +74,7 @@ rec {
     }:
     {
       imports = [
+        (size 384)
         (interfaces {
           eth1 = public;
           eth2 = inside;
@@ -92,6 +103,7 @@ rec {
   lighthouse = {
     imports = [
       lighthouseModule
+      (size 384)
       (interfaces { eth1 = lighthouseIp; })
     ];
     nixpkgs.pkgs = pkgs;
@@ -124,27 +136,17 @@ rec {
     };
   };
 
-  # A node with no static endpoint: everything comes from the lighthouse.
-  node =
+  # The kekkai-node service with no static endpoint: everything comes from the lighthouse.
+  # Without network settings, so that a router can also run one (the nat-direct stranger).
+  kekkaiNode =
     {
       name,
-      vlans,
-      ifs,
-      gateway,
       peers,
       port ? 4802,
     }:
     {
-      imports = [
-        nodeModule
-        (interfaces ifs)
-      ];
+      imports = [ nodeModule ];
       nixpkgs.pkgs = pkgs;
-      virtualisation.vlans = vlans;
-      networking.defaultGateway = {
-        address = gateway;
-        interface = "eth1";
-      };
       networking.firewall.allowedUDPPorts = [ port ];
       environment.systemPackages = [
         pkgs.jq
@@ -179,6 +181,29 @@ rec {
           }
         ];
         metrics.listen = "127.0.0.1:9480";
+      };
+    };
+
+  # A node VM on its own LAN.
+  node =
+    {
+      name,
+      vlans,
+      ifs,
+      gateway,
+      peers,
+      port ? 4802,
+    }:
+    {
+      imports = [
+        (kekkaiNode { inherit name peers port; })
+        (size 512)
+        (interfaces ifs)
+      ];
+      virtualisation.vlans = vlans;
+      networking.defaultGateway = {
+        address = gateway;
+        interface = "eth1";
       };
     };
 
