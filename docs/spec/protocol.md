@@ -497,7 +497,10 @@ count** and a **retransmit deadline**.
 - A trigger while **no** handshake is in flight starts an **attempt sequence**, unless a
   message 1 was sent to that peer less than `REKEY_TIMEOUT` ago (then nothing happens): a
   fresh message 1 is built with attempt count 1, sent, and the retransmit deadline is set to
-  `REKEY_TIMEOUT` plus a random jitter of at most `REKEY_TIMEOUT_JITTER`.
+  `REKEY_TIMEOUT` plus a random jitter of at most `REKEY_TIMEOUT_JITTER`. A rediscovery
+  (§12.5) or a punch (§13.3) refused that way is **deferred**, not lost: the sequence
+  starts `REKEY_TIMEOUT` after that message 1 (one pending deferral per peer), unless a
+  handshake with the peer completed or a sequence started meanwhile.
 - A trigger while a handshake **is** in flight leaves it unchanged: same message 1, same
   attempt count, same deadline. A rediscovery or a punch may only widen its candidates and
   send the existing message 1 to the new ones (§12.5, §13.3); this is not an attempt.
@@ -900,7 +903,10 @@ the set holds at most 32 entries (§17). An endpoint received when the set is fu
 admitted** and nothing is evicted; it is forgotten. The same set serves the immediate
 sends of §12.2 and §13.3 and every retransmission: a received endpoint that was not
 admitted is never sent to, and an admitted one is sent to by every later retransmission
-of the sequence.
+of the sequence. Admitted learnt endpoints keep their place when the static endpoints are
+replaced (§13.1): the statics and the last known endpoint fill the room the learnt ones
+leave, so a refresh may drop a static or the last known endpoint, never an admitted
+learnt one.
 
 ### 12.3 Relay fallback and direct retry (v0.5)
 
@@ -960,7 +966,12 @@ triggered by any of:
 A rediscovery **runs** from its trigger until a handshake with `B` completes or
 `DIRECT_PATH_TIMEOUT` elapses (§12.6). A trigger that fires while a rediscovery of `B` runs
 joins it: no new query, the in-flight handshake is kept or started as above. This bounds
-the queries of trigger 1 to one per `DIRECT_PATH_TIMEOUT` whatever the traffic.
+the queries of trigger 1 to one per `DIRECT_PATH_TIMEOUT` whatever the traffic. A
+handshake that the `REKEY_TIMEOUT` pacing of §7.9 refuses (a message 1 went out less than
+`REKEY_TIMEOUT` ago, typically the handshake that just completed) is deferred to the end
+of that pacing (§7.9); if it is unanswered, its first retransmit deadline is trigger 2. So
+a move that lands just after a handshake still leads, without traffic, to an attempt
+within `REKEY_TIMEOUT` of the trigger and to a fresh query `REKEY_TIMEOUT` later.
 
 v0 does not listen to OS network-change events.
 
@@ -1005,7 +1016,8 @@ from `REKEY_TIMEOUT` to 5 minutes) while it is unresolved or while no authentica
 has arrived from the lighthouse for `KEEPALIVE_FAILURES_BEFORE_REREGISTER` ×
 `PERSISTENT_KEEPALIVE` with a handshake in flight or a session up; a peer's DNS endpoints
 follow the same rule (ADR 0016). New addresses replace the static candidates without
-restarting an in-flight attempt sequence.
+restarting an in-flight attempt sequence or displacing an admitted learnt candidate
+(§12.2).
 
 ### 13.2 Lighthouse state and answers
 
