@@ -80,4 +80,7 @@ message PeerStatus {
   repeated string allow_inbound = 13;
   // Packets from this peer refused by the inbound firewall (spec section 15).
   uint64 firewall_drops = 14;
+  // The name this node's configuration gives the peer; a local label, never sent over the
+  // overlay (identity is the public key until v1 certificates, 0027).
+  string name = 15;
 }

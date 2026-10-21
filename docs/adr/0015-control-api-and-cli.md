@@ -23,3 +23,7 @@ The Go CLI needs to read the node's state; later it will drive reloads and more.
 
 - The CLI contains no hand-written protocol types.
 - `nixosTest`s assert on `status --json`, not on `ping` alone.
+
+## Amendment — 2026-10-21: peer name in status
+
+Owner decision: `PeerStatus` carries `name`, the name this node's own configuration gives the peer (0016), matched by public key; a local label, never sent over the overlay nor learned from peers.

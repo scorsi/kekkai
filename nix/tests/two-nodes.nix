@@ -126,15 +126,16 @@ pkgs.testers.nixosTest {
             out = m.succeed(f"ping -c 3 -W 2 {target}")
             assert " 0% packet loss" in out, out
 
-    with subtest("status --json shows a direct path, a recent handshake and counters"):
-        for m, key, endpoint in (
-            (a, "${keys.b.public}", "${underlay "b"}:4802"),
-            (b, "${keys.a.public}", "${underlay "a"}:4802"),
+    with subtest("status --json shows the name, a direct path, a recent handshake and counters"):
+        for m, key, name, endpoint in (
+            (a, "${keys.b.public}", "b", "${underlay "b"}:4802"),
+            (b, "${keys.a.public}", "a", "${underlay "a"}:4802"),
         ):
             out = m.succeed("kekkai status --json")
             peers = [p for p in json.loads(out)["peers"] if p["public_key"] == key]
             assert len(peers) == 1, out
             p = peers[0]
+            assert p["name"] == name, out
             assert p["path"] == "PATH_DIRECT", out
             assert p["endpoint"] == endpoint, out
             for counter in ("rx_bytes", "tx_bytes", "rx_packets", "tx_packets"):

@@ -400,6 +400,9 @@ type PeerStatus struct {
 	AllowInbound []string `protobuf:"bytes,13,rep,name=allow_inbound,json=allowInbound,proto3" json:"allow_inbound,omitempty"`
 	// Packets from this peer refused by the inbound firewall (spec section 15).
 	FirewallDrops uint64 `protobuf:"varint,14,opt,name=firewall_drops,json=firewallDrops,proto3" json:"firewall_drops,omitempty"`
+	// The name this node's configuration gives the peer; a local label, never sent over the
+	// overlay (identity is the public key until v1 certificates, 0027).
+	Name          string `protobuf:"bytes,15,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -532,6 +535,13 @@ func (x *PeerStatus) GetFirewallDrops() uint64 {
 	return 0
 }
 
+func (x *PeerStatus) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
@@ -555,7 +565,7 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\fwire_version\x18\x04 \x01(\rR\vwireVersion\x121\n" +
 	"\x06uptime\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x06uptime\x12\x1f\n" +
 	"\vlisten_port\x18\x06 \x01(\rR\n" +
-	"listenPort\"\xcb\x04\n" +
+	"listenPort\"\xdf\x04\n" +
 	"\n" +
 	"PeerStatus\x12\x1d\n" +
 	"\n" +
@@ -575,7 +585,8 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\x11replay_rejections\x18\v \x01(\x04R\x10replayRejections\x12]\n" +
 	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure\x12#\n" +
 	"\rallow_inbound\x18\r \x03(\tR\fallowInbound\x12%\n" +
-	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops*N\n" +
+	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops\x12\x12\n" +
+	"\x04name\x18\x0f \x01(\tR\x04name*N\n" +
 	"\x04Path\x12\x14\n" +
 	"\x10PATH_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tPATH_NONE\x10\x01\x12\x0f\n" +

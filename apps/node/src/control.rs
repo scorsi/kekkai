@@ -72,9 +72,11 @@ impl Control {
                     .node
                     .status(key)
                     .expect("configured peers are in the node");
-                let endpoint = state.peers.get(key).and_then(|p| p.endpoint);
+                let info = state.peers.get(key);
                 PeerStatus {
                     public_key: public_key_to_text(key),
+                    // Same source as the metrics `peer` label (ADR 0019).
+                    name: info.map(|p| p.name.clone()).unwrap_or_default(),
                     addresses: addresses.clone(),
                     // §12.1: the current session's path; every session is direct before v0.5.
                     path: if status.current {
@@ -83,7 +85,8 @@ impl Control {
                         Path::None
                     }
                     .into(),
-                    endpoint: endpoint
+                    endpoint: info
+                        .and_then(|p| p.endpoint)
                         .map(|e| udp::canonical(e).to_string())
                         .unwrap_or_default(),
                     last_handshake: status
@@ -120,5 +123,78 @@ impl ControlService for Control {
         _: Request<GetStatusRequest>,
     ) -> Result<Response<GetStatusResponse>, Status> {
         Ok(Response::new(self.status()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use kekkai_core::keys::StaticKey;
+    use kekkai_core::node::{Node, PeerConfig};
+    use kekkai_io::PeerInfo;
+
+    use super::*;
+
+    #[test]
+    fn status_names_each_peer_from_the_configuration() {
+        let config = NodeConfig::parse(
+            r#"
+[node]
+private_key_file = "/run/secrets/kekkai-key"
+addresses = ["10.0.0.1/32"]
+
+[[peers]]
+name = "a"
+public_key = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+addresses = ["10.0.0.2/32"]
+
+[[peers]]
+name = "b"
+public_key = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08="
+addresses = ["10.0.0.3/32"]
+"#,
+        )
+        .unwrap();
+        // As `main::serve` builds them.
+        let (infos, configs) = config
+            .peers
+            .iter()
+            .map(|p| {
+                let key = p.key().unwrap();
+                let info = PeerInfo {
+                    name: p.name.clone(),
+                    ..PeerInfo::default()
+                };
+                let config = PeerConfig {
+                    public_key: key,
+                    addresses: p.host_addresses(),
+                    allow_inbound: vec![],
+                };
+                ((key, info), config)
+            })
+            .unzip::<_, _, HashMap<_, _>, Vec<_>>();
+        let node = Node::new(StaticKey::from_bytes([1; 32]).clamped(), configs);
+        let mut control = Control::new(&config, *node.public_key(), clock::monotonic());
+        control.state = Some(Arc::new(Mutex::new(State::new(node, infos))));
+        let peers: Vec<_> = control
+            .status()
+            .peers
+            .into_iter()
+            .map(|p| (p.name, p.public_key))
+            .collect();
+        assert_eq!(
+            peers,
+            [
+                (
+                    "a".into(),
+                    "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=".into()
+                ),
+                (
+                    "b".into(),
+                    "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=".into()
+                ),
+            ]
+        );
     }
 }
