@@ -1,6 +1,7 @@
 # kekkai protocol specification
 
-Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021).
+Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021) and after the
+independent review of v0.4 (2026-10-21: §9 register timer, §12.2 admission, §13.1, §13.2).
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
@@ -105,10 +106,10 @@ vectors (§19), because no published analysis covers it (ADR 0021).
 | `MAX_TIMER_HANDSHAKES` | 18 | §9 |
 | `KEEPALIVE_TIMEOUT` | 10 s | §9 |
 | `PERSISTENT_KEEPALIVE` | 25 s | §9 |
-| `DIRECT_PATH_TIMEOUT` | 3 s, configurable | §12.3 |
-| `DIRECT_RETRY_INTERVAL` | 60 s, configurable | §12.3 |
+| `DIRECT_PATH_TIMEOUT` | 3 s | §12.3, §12.5 |
+| `DIRECT_RETRY_INTERVAL` | 60 s | §12.3 |
 | `LIGHTHOUSE_ENTRY_TIMEOUT` | 75 s (3 × `PERSISTENT_KEEPALIVE`) | §13 |
-| `KEEPALIVE_FAILURES_BEFORE_REREGISTER` | 3 | §12.5 |
+| `KEEPALIVE_FAILURES_BEFORE_REREGISTER` | 3 (failed registers) | §9, §12.5 |
 | `UDP_FLOW_TIMEOUT` | 60 s | §15 |
 | `FRAGMENT_ENTRY_TIMEOUT` | 30 s | §15 |
 | `UDP_FLOWS_MAX` | 4096 entries, configurable (`firewall.udp_flows_max`) | §15 |
@@ -122,6 +123,9 @@ vectors (§19), because no published analysis covers it (ADR 0021).
 
 Timer values are WireGuard's (ADR 0008); they are copied so that WireGuard's analyses of
 their interplay apply.
+
+`DIRECT_PATH_TIMEOUT` and `DIRECT_RETRY_INTERVAL` are constants in v0, not configuration
+options (amended 2026-10-21, ADR 0013 amendment of that date).
 
 ## 4. Identity keys
 
@@ -742,7 +746,8 @@ one wake-up (ADR 0004).
 | Reject | Session age ≥ `REJECT_AFTER_TIME` | Discard the session (§8.5) |
 | New handshake | `KEEPALIVE_TIMEOUT + REKEY_TIMEOUT` (15 s) after sending a non-keepalive `data` packet without receiving any authenticated packet from that peer since | Initiate; a peer that stopped answering is detected here |
 | Passive keepalive | `KEEPALIVE_TIMEOUT` after receiving a non-keepalive `data` packet, if nothing was sent to that peer since | Send a keepalive |
-| Persistent keepalive | `PERSISTENT_KEEPALIVE` since the last packet sent on `current` | Send a keepalive; always on, towards every peer with a `current` session, every lighthouse and every relay (§12.5 also hooks here) |
+| Persistent keepalive | `PERSISTENT_KEEPALIVE` since the last packet sent on `current` | Send a keepalive; always on, towards every peer with a `current` session, every lighthouse and every relay. Towards a lighthouse the register timer sends first, so this one never fires while registers go out |
+| Register | Towards a lighthouse with a `current` session: `PERSISTENT_KEEPALIVE` after the previous register tick or the last `lighthouse_register` sent, whichever is later; other traffic on the session (queries, passive keepalives, rekeys) does not postpone it | §13.1: count a failed register, compare the local endpoints (§12.5 rule 3), send `lighthouse_register` |
 | Lighthouse session | A node has no live session with a configured lighthouse or relay | Initiate towards its configured endpoint; retry under the retransmit rules; keep trying forever at `REKEY_TIMEOUT` pace after each abandonment (the session is permanent) |
 
 Keepalives are authenticated `data` packets and **count as traffic** for `last_received`,
@@ -751,12 +756,16 @@ passive keepalive (that would ping-pong). With both sides sending persistent kee
 session never idles out; it rekeys every `REKEY_AFTER_TIME` and expires only when the peer
 is gone.
 
-A **failed keepalive** towards a peer is a persistent-keepalive tick at which no
-authenticated packet has been received from that peer since the previous keepalive was
-sent to it. `KEEPALIVE_FAILURES_BEFORE_REREGISTER` consecutive failures towards a
-lighthouse trigger §12.5. (A lighthouse always answers a `lighthouse_register` within
-`KEEPALIVE_TIMEOUT` through the passive keepalive rule, since the register is a
-non-keepalive packet.)
+A **failed register** (the "failed keepalive" of ADR 0013) is a register tick at which no
+authenticated packet has been received from that lighthouse since the previous register
+tick or the last `lighthouse_register` sent, whichever is later; a register tick at which
+`current` cannot send counts as failed too (it sends nothing and re-arms the timer).
+`KEEPALIVE_FAILURES_BEFORE_REREGISTER` consecutive failed registers trigger §12.5 rule 4
+and reset the count; a register tick that is not failed resets it too. (A lighthouse always
+answers a `lighthouse_register` within `KEEPALIVE_TIMEOUT` through the passive keepalive
+rule, since the register is a non-keepalive packet.) With no `current` session towards the
+lighthouse the register timer is not armed; the lighthouse session row applies and the
+register sent at handshake completion (§13.1) re-arms it.
 
 ## 10. Inner protocol
 
@@ -880,8 +889,18 @@ to `A` fail §7.7 step 1.
 
 The endpoints learnt from lighthouse replies and punches are kept as candidates of `B` until
 a handshake with `B` completes (in either role) or the attempt sequence is abandoned
-(§7.9); a retransmission within the sequence goes to them too. A candidate learnt while a
-message 1 is in flight receives **that** message 1 (the same bytes), not a new one.
+(§7.9); the end of a rediscovery's `DIRECT_PATH_TIMEOUT` window (§12.5) does not drop them,
+and a retransmission within the sequence goes to them too. A candidate learnt while a
+message 1 is in flight receives **that** message 1 (the same bytes), not a new one, and
+does not change the sequence's attempt count or retransmit deadline.
+
+**Admission.** The candidate set is ordered: static endpoints, then the last known
+endpoint, then the learnt endpoints in the order they arrived; duplicates are skipped and
+the set holds at most 32 entries (§17). An endpoint received when the set is full is **not
+admitted** and nothing is evicted; it is forgotten. The same set serves the immediate
+sends of §12.2 and §13.3 and every retransmission: a received endpoint that was not
+admitted is never sent to, and an admitted one is sent to by every later retransmission
+of the sequence.
 
 ### 12.3 Relay fallback and direct retry (v0.5)
 
@@ -925,10 +944,13 @@ triggered by any of:
    deadline of an attempt sequence passed once (§7.9; ordinary traffic never restarts a
    sequence, so this always happens for an unanswered peer); this is what revives a session
    whose endpoint was a LAN address the node has left, or whose peer moved;
-3. a change of the node's own local addresses (§13.1), detected at a persistent-keepalive
-   tick: the node re-registers immediately and rediscovers **every peer with a live
-   session**;
-4. `KEEPALIVE_FAILURES_BEFORE_REREGISTER` consecutive failed keepalives towards a lighthouse
+3. a change of the node's own local addresses (§13.1), detected when a
+   `lighthouse_register` carries a list that differs from the previous one: at a register
+   tick (§9), hence at most `PERSISTENT_KEEPALIVE` after the change plus one IO wake-up
+   whatever other traffic the node exchanges with the lighthouse, or earlier at the
+   register that follows a handshake with the lighthouse (§13.1): that register is the
+   re-registration, and the node rediscovers **every peer with a live session**;
+4. `KEEPALIVE_FAILURES_BEFORE_REREGISTER` consecutive failed registers towards a lighthouse
    (§9): the node re-handshakes with the lighthouse, re-registers and rediscovers every
    peer with a live session;
 5. receipt of a `lighthouse_punch` for `B` (§13.3), which starts or widens a handshake
@@ -961,14 +983,29 @@ does not clear it: it is the **last** failure, and `path` says whether a session
 ### 13.1 Registration (node side)
 
 A node keeps a **permanent session** with each configured lighthouse (§9, last row). At
-every persistent-keepalive tick towards a lighthouse, instead of a bare keepalive, the node
-sends `lighthouse_register` carrying its current local endpoints: `(address, listen_port)`
-for every unicast address of the host's interfaces, excluding loopback, link-local and the
-overlay addresses themselves, at most `MAX_LOCAL_ENDPOINTS` (the IO layer collects them;
-the core only compares the list with the previous one for trigger 3 of §12.5; the list is
-compared as a set). A node also sends a `lighthouse_register` as soon as a handshake with
-the lighthouse completed and its `current` session can send (for a responder, once that
-session is confirmed, §8.3).
+every register tick (§9), `PERSISTENT_KEEPALIVE` after the previous one whatever else the
+session carried, the node sends `lighthouse_register` carrying its current local
+endpoints: `(address, listen_port)` for every unicast address of the host's interfaces,
+excluding loopback, link-local and the overlay addresses themselves, at most
+`MAX_LOCAL_ENDPOINTS` (the IO layer collects them; the core only compares the list of
+every register sent, whatever caused it, with the previous register's for trigger 3 of
+§12.5; the list is compared as a set). A node also sends a `lighthouse_register` as soon
+as a handshake with the lighthouse completed and its `current` session can send (for a
+responder, once that session is confirmed, §8.3); that register arms the register timer.
+
+Bounds that follow, with no loss: while the session lives, an entry is refreshed at least
+every `PERSISTENT_KEEPALIVE`, well within `LIGHTHOUSE_ENTRY_TIMEOUT`; a change of local
+addresses is acted upon (rule 3 of §12.5) at most `PERSISTENT_KEEPALIVE` after it, plus one
+IO wake-up; the re-registration and the query of that rediscovery leave at once, so a peer
+reachable through the lighthouse's answer or punch is reached about one round trip later.
+
+The IO layer resolves a lighthouse endpoint written as a DNS name at start, keeps every
+address returned as a static candidate (§12.2), and resolves it again (exponential backoff
+from `REKEY_TIMEOUT` to 5 minutes) while it is unresolved or while no authenticated packet
+has arrived from the lighthouse for `KEEPALIVE_FAILURES_BEFORE_REREGISTER` ×
+`PERSISTENT_KEEPALIVE` with a handshake in flight or a session up; a peer's DNS endpoints
+follow the same rule (ADR 0016). New addresses replace the static candidates without
+restarting an in-flight attempt sequence.
 
 ### 13.2 Lighthouse state and answers
 
@@ -991,6 +1028,13 @@ On `lighthouse_query { K' }` from key `K` (source address `S`):
 
 Any authenticated node may query any listed key in v0 (ADR 0012). Queries from keys that
 are not in the peer list never reach this step: they have no session.
+
+Open point (to settle before review gate 2): the lighthouse answers every authenticated
+query and may punch for each, with no per-sender budget. A compromised listed node can
+therefore make the lighthouse send a punch per query to a target, and the target resend its
+in-flight message 1 to the given endpoints per punch (§13.3): an amplification bounded by
+the listed keys' sessions, not an unauthenticated leak. A per-sender query and punch rate
+limit is the candidate answer.
 
 ### 13.3 Punch (node side)
 
@@ -1114,7 +1158,7 @@ Everything the core allocates is bounded by configuration (ADR 0027):
 | Replay window | 8192 bits per receiving session |
 | `last_timestamp` table | one entry per listed key |
 | Endpoints in a TLV | `MAX_ENDPOINTS` = 16; local endpoints sent: `MAX_LOCAL_ENDPOINTS` = 8 |
-| Candidates per in-flight handshake | static endpoints + 1 last known + `MAX_ENDPOINTS` from each lighthouse reply or punch, deduplicated, at most 32 |
+| Candidates per in-flight handshake | static endpoints + 1 last known + `MAX_ENDPOINTS` from each lighthouse reply or punch, deduplicated, at most 32; admission rule in §12.2 |
 | Firewall table | `UDP_FLOWS_MAX` = 4096 entries (about 256 KB) |
 | Lighthouse registrations | one per listed key |
 

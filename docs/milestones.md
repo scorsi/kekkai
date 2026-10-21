@@ -126,6 +126,8 @@ Nothing external blocks v0.1.
 - Two nodes on the same LAN as the lighthouse-registered local endpoints connect through their local addresses (asserted on the endpoint in `status`).
 - Manual, once the public VPS exists: lighthouse deployed on it; the Mac and the VM discover each other through it with no static endpoints.
 
+**Note (2026-10-21, owner decision)**: the manual criterion above is postponed until review gate 2 has passed (end of v0.5), since ADR 0021 allows Internet exposure only from gate 2 on. Until then v0.4 is validated by the simulation and the `nixosTest`s `nat-direct` and `roaming`; the manual run is recorded when it happens.
+
 **Dependencies**: v0.3. The public VPS with native IPv6 for the manual criterion only.
 
 **Excluded**: relay, multi-lighthouse union, symmetric-NAT tricks, OS network-change events, certificates in lighthouse replies.

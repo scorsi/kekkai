@@ -26,3 +26,14 @@ Hosts sit behind consumer NATs, CGNAT and hypervisor NATs, on Wi-Fi, and move. D
 
 - No RTT measurement, no candidate priority: the simplest rule that gives a direct path when one exists.
 - The deterministic simulation (0020) covers cone and symmetric NATs before any `nixosTest` does.
+
+## Amendment — 2026-10-21
+
+- The 3 s direct-path timeout and the 60 s direct retry interval are **constants** in v0,
+  not configuration options: no deployment needs another value yet, and a constant keeps
+  the specification (§3) and the code identical. An option can be added later with the
+  ADR 0016 format, defaults unchanged.
+- "Polled at every keepalive tick" means the **register tick** of the specification (§9,
+  §13.1): `lighthouse_register` goes out every 25 s on a deadline of its own, which other
+  traffic towards the lighthouse does not postpone, as ADR 0012 states ("sent on every
+  keepalive (25 s)"). A "failed keepalive" towards a lighthouse is a failed register.

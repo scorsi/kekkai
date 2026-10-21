@@ -1,6 +1,6 @@
 # ADR 0030 — Lighthouse status, logs and metrics
 
-Status: Proposed — 2026-10-21
+Status: Accepted — 2026-10-21
 
 ## Context
 
