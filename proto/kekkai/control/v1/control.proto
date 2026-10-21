@@ -7,19 +7,54 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1";
 
-// Control API served by the node over a Unix socket (0015).
+// Control API served by the node, and by the lighthouse, over a Unix socket (0015, 0030).
 service ControlService {
-  // The node's state; `kekkai status --json` prints the reply in protojson form.
+  // The daemon's state; `kekkai status --json` prints the reply in protojson form.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
 message GetStatusRequest {}
 
-// Lighthouse and relay sections (v0.4, v0.5) are added with their milestones.
+// A node fills node, peers, firewall and lighthouses; a lighthouse fills node (its own
+// key, version and port) and registrations. Relay sections (v0.5) come with their milestone.
 message GetStatusResponse {
   NodeStatus node = 1;
   repeated PeerStatus peers = 2;
   FirewallStatus firewall = 3;
+  repeated LighthouseStatus lighthouses = 4;
+  repeated Registration registrations = 5;
+}
+
+// State of a session with a lighthouse or relay (0015).
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_CONNECTED = 1;
+  SESSION_STATE_HANDSHAKING = 2;
+  SESSION_STATE_DOWN = 3;
+}
+
+// The node's view of one configured lighthouse (spec section 13.1).
+message LighthouseStatus {
+  string public_key = 1;
+  // The configured endpoint, as written.
+  string endpoint = 2;
+  SessionState state = 3;
+  // Unset until a handshake completed.
+  google.protobuf.Timestamp last_handshake = 4;
+  // Last authenticated packet (keepalive or answer) from the lighthouse.
+  google.protobuf.Timestamp last_received = 5;
+}
+
+// One unexpired registration held by a lighthouse (spec section 13.2).
+message Registration {
+  string public_key = 1;
+  // The name the lighthouse's configuration gives the key.
+  string name = 2;
+  // Source of the last register (`host:port`).
+  string observed_endpoint = 3;
+  repeated string local_endpoints = 4;
+  // Time since the last register.
+  google.protobuf.Duration last_seen = 5;
 }
 
 // The inbound firewall's table of UDP flows and fragments (0011, spec section 15).

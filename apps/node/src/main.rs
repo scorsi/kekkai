@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use kekkai_core::node::{Node, PeerConfig};
+use kekkai_core::inner::Endpoint;
+use kekkai_core::node::{LighthouseConfig, Node, PeerConfig};
 use kekkai_io::config::{DEFAULT_PATH, NodeConfig};
-use kekkai_io::{PeerInfo, State, clock, systemd, udp};
+use kekkai_io::{Locals, PeerInfo, State, clock, systemd, udp};
 use tracing::{info, warn};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
@@ -106,36 +107,37 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
     for peer in &config.peers {
         let public_key = peer.key()?;
         let addresses = peer.host_addresses();
-        let mut statics = Vec::new();
+        let mut endpoints = Vec::new();
         for endpoint in &peer.endpoints {
-            match tokio::net::lookup_host(endpoint.as_str()).await {
-                Ok(found) => statics.extend(found.map(udp::to_socket)),
-                Err(e) => warn!(
-                    event = "endpoint-unresolved",
-                    peer = %peer.name,
-                    endpoint = %endpoint,
-                    err = %e
-                ),
-            }
+            endpoints.extend(resolve(&peer.name, endpoint).await);
         }
         routes.extend(&addresses);
         let name = peer.name.clone();
-        peers.insert(
-            public_key,
-            PeerInfo {
-                name,
-                statics,
-                endpoint: None,
-            },
-        );
+        peers.insert(public_key, PeerInfo { name });
         peer_configs.push(PeerConfig {
             public_key,
             addresses,
             allow_inbound: peer.rules()?,
+            endpoints,
         });
     }
     let mut node = Node::new(key, peer_configs);
     node.set_udp_flows_max(config.firewall.udp_flows_max);
+    let mut lighthouses = Vec::new();
+    let mut lighthouse_configs = Vec::new();
+    for l in &config.lighthouses {
+        let public_key = l.key()?;
+        lighthouses.push((public_key, l.endpoint.clone()));
+        // shortcut: the first resolved address only; DNS is re-resolved on restart (ADR 0016
+        // also asks for keepalive failures, open in the napkin).
+        if let Some(endpoint) = resolve("lighthouse", &l.endpoint).await.first() {
+            lighthouse_configs.push(LighthouseConfig {
+                public_key,
+                endpoint: *endpoint,
+            });
+        }
+    }
+    node.set_lighthouses(lighthouse_configs);
     let control = control::Control::new(&config, *node.public_key(), clock::monotonic());
     let mtu = config.node.mtu;
     let (tunnel, interface) =
@@ -144,12 +146,20 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         .map_err(|e| format!("udp port {}: {e}", config.node.listen_port))?;
     let listener = systemd::control_listener(Path::new(CONTROL_SOCKET), "kekkai")
         .map_err(|e| format!("{CONTROL_SOCKET}: {e}"))?;
-    let state = Arc::new(Mutex::new(State::new(node, peers)));
+    let mut state = State::new(node, peers);
+    if !lighthouses.is_empty() {
+        state.locals = Some(Locals {
+            listen_port: config.node.listen_port,
+            overlay: config.addresses(),
+        });
+    }
+    state.lighthouses = lighthouses;
+    let state = Arc::new(Mutex::new(state));
     if let Some(m) = &config.metrics {
         let listener = std::net::TcpListener::bind(m.listen)
             .map_err(|e| format!("metrics.listen {}: {e}", m.listen))?;
         let state = state.clone();
-        std::thread::spawn(move || metrics::serve(listener, state));
+        std::thread::spawn(move || kekkai_io::metrics::serve(listener, &state, metrics::render));
     }
     // ADR 0018: READY=1 once the interface exists and the socket is bound.
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
@@ -163,6 +173,17 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{interface}: {e}")),
         r = control.serve(state, listener) => r.map_err(|e| format!("control socket: {e}")),
         () = terminate() => Ok(()),
+    }
+}
+
+/// A `host:port` from the file, resolved now (ADR 0016); a failure is logged, not fatal.
+async fn resolve(owner: &str, endpoint: &str) -> Vec<Endpoint> {
+    match tokio::net::lookup_host(endpoint).await {
+        Ok(found) => found.map(Endpoint::from).collect(),
+        Err(e) => {
+            warn!(event = "endpoint-unresolved", peer = %owner, endpoint = %endpoint, err = %e);
+            Vec::new()
+        }
     }
 }
 

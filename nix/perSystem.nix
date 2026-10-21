@@ -54,7 +54,7 @@
         ];
         text = ''
           if [ "$#" -ne 2 ]; then
-            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message|node_config|firewall> <seconds>" >&2
+            echo "usage: nix run .#fuzz -- <outer_header|tlv_list|inner_message|node_config|lighthouse_config|firewall> <seconds>" >&2
             exit 2
           fi
           exec cargo fuzz run --sanitizer none "$1" -- -max_total_time="$2"
@@ -94,10 +94,47 @@
             "udp/53"
           ];
         };
+        lighthouses = [
+          {
+            publicKey = "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=";
+            endpoint = "lighthouse.example.org:4800";
+          }
+        ];
         firewall.udpFlowsMax = 1024;
         metrics.listen = "127.0.0.1:9480";
         operators = [ "alice" ];
       };
+      lighthouseSettings = {
+        enable = true;
+        privateKeyFile = "/run/secrets/kekkai-lighthouse-key";
+        peers.a.publicKey = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=";
+        peers.b.publicKey = "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=";
+        metrics.listen = "127.0.0.1:9481";
+        operators = [ "alice" ];
+      };
+      # The lighthouse module against stubs of the NixOS options it sets, on this system, so
+      # that `modules-eval` can run `config check` on its file with this system's binary.
+      lighthouseFile =
+        let
+          stub = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
+        in
+        (lib.evalModules {
+          modules = [
+            inputs.self.nixosModules.lighthouse
+            {
+              config._module.args.pkgs = pkgs;
+              options = {
+                environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+                environment.etc = stub;
+                users.users = stub;
+                users.groups = stub;
+                systemd.sockets = stub;
+                systemd.services = stub;
+              };
+              config.services.kekkai-lighthouse = lighthouseSettings;
+            }
+          ];
+        }).config.services.kekkai-lighthouse.configFile;
       # The darwin node module against stubs of the nix-darwin options it sets (0018: it is
       # tested by evaluation only); `modules-eval` runs `config check` on its node file.
       darwinEval =
@@ -137,6 +174,26 @@
             system.stateVersion = "26.05";
             users.users.alice.isNormalUser = true;
             services.kekkai-node = nodeSettings;
+          }
+        ];
+      };
+      # Same for the lighthouse module, with the node on the same host (0005).
+      lighthouseEval = inputs.nixpkgs.lib.nixosSystem {
+        modules = [
+          inputs.self.nixosModules.node
+          inputs.self.nixosModules.lighthouse
+          {
+            nixpkgs.hostPlatform = if pkgs.stdenv.hostPlatform.isLinux then system else "aarch64-linux";
+            nixpkgs.overlays = [ inputs.self.overlays.default ];
+            boot.loader.grub.enable = false;
+            fileSystems."/" = {
+              device = "none";
+              fsType = "tmpfs";
+            };
+            system.stateVersion = "26.05";
+            users.users.alice.isNormalUser = true;
+            services.kekkai-node = nodeSettings;
+            services.kekkai-lighthouse = lighthouseSettings;
           }
         ];
       };
@@ -253,8 +310,10 @@
             grep -q 'allow_inbound = \["tcp/22", "udp/53"\]' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'udp_flows_max = 1024' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'listen = "127.0.0.1:9480"' ${darwinEval.services.kekkai-node.configFile}
+            grep -q 'endpoint = "lighthouse.example.org:4800"' ${darwinEval.services.kekkai-node.configFile}
+            ${lib.getExe pkgs.kekkai-lighthouse} config check --config ${lighthouseFile}
             echo ${builtins.unsafeDiscardStringContext nodeEval.config.system.build.toplevel.drvPath} \
-                 ${evalModule "kekkai-lighthouse" inputs.self.nixosModules.lighthouse} \
+                 ${builtins.unsafeDiscardStringContext lighthouseEval.config.system.build.toplevel.drvPath} \
                  ${evalModule "kekkai-relay" inputs.self.nixosModules.relay} \
                  ${lib.concatMapStrings (p: p.name) darwinEval.environment.systemPackages} > $out
           '';
@@ -273,6 +332,18 @@
         firewall = import ./tests/firewall.nix {
           inherit pkgs;
           module = inputs.self.nixosModules.node;
+        };
+        nat-direct = import ./tests/nat-direct.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          lighthouseModule = inputs.self.nixosModules.lighthouse;
+          validateLogs = inputs.nisshi.lib.validateLogs.${system};
+          validateMetrics = inputs.masu.lib.validateMetrics.${system};
+        };
+        roaming = import ./tests/roaming.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          lighthouseModule = inputs.self.nixosModules.lighthouse;
         };
       };
 

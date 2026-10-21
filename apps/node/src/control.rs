@@ -5,11 +5,13 @@ use std::time::{Duration, SystemTime};
 
 use kekkai_control::v1::control_service_server::{ControlService, ControlServiceServer};
 use kekkai_control::v1::{
-    FirewallStatus, GetStatusRequest, GetStatusResponse, NodeStatus, Path, PeerStatus,
+    DirectPathFailure, FirewallStatus, GetStatusRequest, GetStatusResponse, LighthouseStatus,
+    NodeStatus, Path, PeerStatus, SessionState,
 };
 use kekkai_core::keys::{PublicKey, public_key_to_text};
+use kekkai_core::node::PathFailure;
 use kekkai_io::config::NodeConfig;
-use kekkai_io::{State, clock, udp};
+use kekkai_io::{State, clock};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 
@@ -64,6 +66,7 @@ impl Control {
         let state = state.lock().expect("no panic while holding the state");
         let mut node = self.node.clone();
         node.uptime = prost_types::Duration::try_from(now.saturating_sub(self.started)).ok();
+        let at = |t: Duration| -> prost_types::Timestamp { (wall - now.saturating_sub(t)).into() };
         let peers = self
             .peers
             .iter()
@@ -85,13 +88,15 @@ impl Control {
                         Path::None
                     }
                     .into(),
-                    endpoint: info
-                        .and_then(|p| p.endpoint)
-                        .map(|e| udp::canonical(e).to_string())
+                    endpoint: status
+                        .endpoint
+                        .map(|e| e.display().to_string())
                         .unwrap_or_default(),
-                    last_handshake: status
-                        .last_handshake
-                        .map(|at| (wall - now.saturating_sub(at)).into()),
+                    last_handshake: status.last_handshake.map(at),
+                    last_direct_path_failure: status
+                        .last_direct_path_failure
+                        .map_or(DirectPathFailure::Unspecified, failure)
+                        .into(),
                     rx_bytes: status.counters.rx_bytes,
                     tx_bytes: status.counters.tx_bytes,
                     rx_packets: status.counters.rx_packets,
@@ -103,6 +108,25 @@ impl Control {
                 }
             })
             .collect();
+        let lighthouses = state
+            .lighthouses
+            .iter()
+            .filter_map(|(key, endpoint)| {
+                let status = state.node.status(key)?;
+                let session = match kekkai_io::session_state(&status) {
+                    "connected" => SessionState::Connected,
+                    "handshaking" => SessionState::Handshaking,
+                    _ => SessionState::Down,
+                };
+                Some(LighthouseStatus {
+                    public_key: public_key_to_text(key),
+                    endpoint: endpoint.clone(),
+                    state: session.into(),
+                    last_handshake: status.last_handshake.map(at),
+                    last_received: status.last_received.map(at),
+                })
+            })
+            .collect();
         let firewall = state.node.firewall_status();
         GetStatusResponse {
             node: Some(node),
@@ -112,7 +136,18 @@ impl Control {
                 udp_flows_max: firewall.max as u64,
                 evictions: firewall.evictions,
             }),
+            lighthouses,
+            registrations: Vec::new(),
         }
+    }
+}
+
+fn failure(f: PathFailure) -> DirectPathFailure {
+    match f {
+        PathFailure::NoCandidates => DirectPathFailure::NoCandidates,
+        PathFailure::Timeout => DirectPathFailure::Timeout,
+        PathFailure::Abandoned => DirectPathFailure::Abandoned,
+        PathFailure::LighthouseUnknown => DirectPathFailure::LighthouseUnknown,
     }
 }
 
@@ -164,12 +199,11 @@ addresses = ["10.0.0.3/32"]
                 let key = p.key().unwrap();
                 let info = PeerInfo {
                     name: p.name.clone(),
-                    ..PeerInfo::default()
                 };
                 let config = PeerConfig {
                     public_key: key,
                     addresses: p.host_addresses(),
-                    allow_inbound: vec![],
+                    ..PeerConfig::default()
                 };
                 ((key, info), config)
             })

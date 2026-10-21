@@ -162,6 +162,34 @@ impl Peer {
         self.staged.len()
     }
 
+    /// Message 1 copies sent so far in the in-flight attempt sequence (§7.9), if any.
+    pub fn in_flight_attempts(&self) -> Option<u32> {
+        self.in_flight.as_ref().map(|f| f.attempts)
+    }
+
+    /// When the last message 1 went out (§7.9 pace).
+    pub fn last_init_sent(&self) -> Option<Duration> {
+        self.last_init_sent
+    }
+
+    /// `current` exists and may send (§8.5): the peer has a live session.
+    pub fn can_send(&self, now: Duration) -> bool {
+        self.current.as_ref().is_some_and(|s| s.can_send(now))
+    }
+
+    /// A rediscovery trigger (§12.5): starts an attempt sequence under the rules of §7.9.
+    pub fn start_handshake(&mut self, ctx: &mut Ctx<'_>) -> Option<Vec<u8>> {
+        self.expire(ctx);
+        self.initiate(ctx)
+    }
+
+    /// Seals a non-keepalive inner message (§10.5) on `current`, as [`Peer::send_ip`] does
+    /// for an `ip_packet` but never staged: nothing when no session can send.
+    pub fn send_inner(&mut self, ctx: &mut Ctx<'_>, inner: &[u8]) -> Vec<Vec<u8>> {
+        self.expire(ctx);
+        self.seal_on_current(ctx, inner, false)
+    }
+
     /// §11 outbound: sends `packet` as `ip_packet` on `current`, or stages it and initiates
     /// (§8.7). Applies the initiator rekey rule (§8.6). Returns the datagrams to send.
     pub fn send_ip(&mut self, ctx: &mut Ctx<'_>, packet: &[u8]) -> Vec<Vec<u8>> {
@@ -332,7 +360,9 @@ impl Peer {
         .min()
     }
 
-    fn persistent_keepalive_at(&self) -> Option<Duration> {
+    /// The persistent-keepalive deadline (§9); towards a lighthouse the party sends a
+    /// `lighthouse_register` at that instant instead (§13.1).
+    pub fn persistent_keepalive_at(&self) -> Option<Duration> {
         self.current
             .as_ref()
             .filter(|s| s.confirmed && s.sending_counter() < REJECT_AFTER_MESSAGES)

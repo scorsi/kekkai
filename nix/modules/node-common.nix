@@ -28,6 +28,12 @@ let
       // lib.optionalAttrs (peer.allowInbound != [ ]) { allow_inbound = peer.allowInbound; }
     ) cfg.peers;
   }
+  // lib.optionalAttrs (cfg.lighthouses != [ ]) {
+    lighthouses = map (l: {
+      public_key = l.publicKey;
+      inherit (l) endpoint;
+    }) cfg.lighthouses;
+  }
   // lib.optionalAttrs (cfg.firewall.udpFlowsMax != 4096) {
     firewall.udp_flows_max = cfg.firewall.udpFlowsMax;
   }
@@ -61,6 +67,19 @@ let
           `udp/PORT`, `tcp/*`, `udp/*` or `any`. Default deny: with an empty list the peer
           only gets ICMP and the replies to flows this node opened.
         '';
+      };
+    };
+  };
+  lighthouseType = types.submodule {
+    options = {
+      publicKey = mkOption {
+        type = types.str;
+        description = "The lighthouse's public key, standard base64.";
+      };
+      endpoint = mkOption {
+        type = types.str;
+        example = "lighthouse.example.org:4800";
+        description = "`host:port` of the lighthouse; a DNS name is resolved at start.";
       };
     };
   };
@@ -102,6 +121,17 @@ in
       type = types.attrsOf peerType;
       default = { };
       description = "Peers by name; only listed keys complete a handshake.";
+    };
+    lighthouses = mkOption {
+      # A list from the start, one element supported in v0 (0005, 0012).
+      type = types.addCheck (types.listOf lighthouseType) (l: builtins.length l <= 1) // {
+        description = "list of at most one lighthouse";
+      };
+      default = [ ];
+      description = ''
+        Lighthouses this node registers with and queries to find peers without static
+        endpoints (0012, 0013). v0 supports one.
+      '';
     };
     firewall.udpFlowsMax = mkOption {
       type = types.ints.positive;

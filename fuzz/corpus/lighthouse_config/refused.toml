@@ -1,0 +1,6 @@
+[service]
+private_key_file = "/k"
+[[peers]]
+name = "a"
+public_key = "AAAA"
+addresses = []

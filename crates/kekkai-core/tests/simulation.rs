@@ -1,17 +1,18 @@
 //! Deterministic simulation (ADR 0020 tier 2): several `Node`s through an in-memory network
 //! with seeded loss, duplication and delay (hence reordering), per-host clock drift,
-//! wall-clock steps and suspend. The network decisions derive from the seed and a per-link
+//! wall-clock steps, suspend and NAT emulated by address rewriting (cone and symmetric). The network decisions derive from the seed and a per-link
 //! datagram counter, so they do not depend on the core's own randomness (indices,
 //! ephemerals, retransmit jitter), which still comes from the OS.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use kekkai_core::firewall::Rule;
+use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::{PublicKey, StaticKey};
-use kekkai_core::node::{Node, Output, PeerConfig};
+use kekkai_core::node::{LighthouseConfig, Node, Output, PathFailure, PeerConfig};
 use kekkai_core::tai64n::Tai64n;
 use kekkai_core::wire::{self, DropReason};
 use kekkai_core::{MTU, PERSISTENT_KEEPALIVE, REJECT_AFTER_TIME, REKEY_AFTER_TIME};
@@ -59,6 +60,11 @@ const LOSSY: Link = Link {
 struct Host {
     node: Node,
     key: PublicKey,
+    /// The host's own underlay socket address.
+    addr: Endpoint,
+    /// The NAT the host sits behind; hosts behind the same NAT share a LAN, hosts behind
+    /// none are on the public network.
+    nat: Option<usize>,
     /// Monotonic clock rate offset in parts per million (ADR 0004: timers follow this one).
     drift_ppm: i64,
     /// Wall clock minus monotonic clock, in seconds; stepped by the scenarios.
@@ -99,7 +105,48 @@ struct Event {
     at: Duration,
     seq: u64,
     to: usize,
+    /// The datagram's source as the receiver sees it (after NAT).
+    source: Endpoint,
     datagram: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NatKind {
+    /// Endpoint-independent mapping, address-and-port-dependent filtering (Linux
+    /// `masquerade` with its port kept).
+    Cone,
+    /// A new public port per destination (`masquerade fully-random`).
+    Symmetric,
+}
+
+struct Nat {
+    public: Ipv4Addr,
+    kind: NatKind,
+    next_port: u16,
+    /// `(inside, destination if symmetric)` → public port.
+    out: HashMap<(Endpoint, Option<Endpoint>), u16>,
+    /// Public port → inside endpoint and the remotes it sent to (conntrack filtering).
+    back: HashMap<u16, (Endpoint, HashSet<Endpoint>)>,
+}
+
+impl Nat {
+    fn translate(&mut self, inside: Endpoint, to: Endpoint) -> Endpoint {
+        let key = (inside, (self.kind == NatKind::Symmetric).then_some(to));
+        let next = &mut self.next_port;
+        let port = *self.out.entry(key).or_insert_with(|| {
+            *next += 1;
+            *next
+        });
+        let entry = self.back.entry(port).or_insert((inside, HashSet::new()));
+        entry.1.insert(to);
+        Endpoint::new(IpAddr::V4(self.public), port)
+    }
+
+    /// The inside endpoint a datagram from `from` to public `port` reaches, if filtering lets it.
+    fn admit(&self, port: u16, from: Endpoint) -> Option<Endpoint> {
+        let (inside, allowed) = self.back.get(&port)?;
+        allowed.contains(&from).then_some(*inside)
+    }
 }
 
 /// One emitted datagram: `(sim time, from, to, outer type)`.
@@ -111,6 +158,7 @@ struct Sim {
     seq: u64,
     link: Link,
     hosts: Vec<Host>,
+    nats: Vec<Nat>,
     queue: BinaryHeap<Reverse<Event>>,
     /// Links cut by a scenario: `(from, to)`.
     partitions: HashSet<(usize, usize)>,
@@ -121,6 +169,16 @@ struct Sim {
 
 fn address(host: usize) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, host as u8 + 1))
+}
+
+/// Underlay endpoint `a.b.c.d:port`.
+fn ep(a: u8, b: u8, c: u8, d: u8, port: u16) -> Endpoint {
+    Endpoint::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port)
+}
+
+/// Default public underlay endpoint of host `i`.
+fn public_addr(host: usize) -> Endpoint {
+    ep(192, 0, 2, host as u8 + 1, 4802)
 }
 
 /// An IPv4/UDP packet from `src` to `dst` whose payload is the sequence number.
@@ -157,11 +215,14 @@ impl Sim {
                         public_key: publics[j],
                         addresses: vec![address(j)],
                         allow_inbound: vec![Rule::Any],
+                        endpoints: vec![public_addr(j)],
                     })
                     .collect();
                 Host {
                     node: Node::new(key, peers),
                     key: publics[i],
+                    addr: public_addr(i),
+                    nat: None,
                     drift_ppm: 0,
                     wall_offset: 0,
                     asleep_until: None,
@@ -177,6 +238,7 @@ impl Sim {
             seq: 0,
             link,
             hosts,
+            nats: Vec::new(),
             queue: BinaryHeap::new(),
             partitions: HashSet::new(),
             emitted: Vec::new(),
@@ -184,11 +246,8 @@ impl Sim {
         }
     }
 
-    fn host_of(&self, key: &PublicKey) -> usize {
-        self.hosts
-            .iter()
-            .position(|h| h.key == *key)
-            .expect("datagrams go to configured peers")
+    fn addr(&self, host: usize) -> Endpoint {
+        self.hosts[host].addr
     }
 
     fn peer_config(&self, j: usize) -> PeerConfig {
@@ -196,7 +255,111 @@ impl Sim {
             public_key: self.hosts[j].key,
             addresses: vec![address(j)],
             allow_inbound: vec![Rule::Any],
+            endpoints: vec![self.hosts[j].addr],
         }
+    }
+
+    /// `n` nodes that know no endpoint of each other and one public lighthouse (the last
+    /// host, at `203.0.113.1:4800`) listing them all (§13).
+    fn discovery(seed: u64, n: usize) -> Self {
+        let mut sim = Sim::new(seed, n, PERFECT);
+        let key = StaticKey::generate();
+        let lighthouse = LighthouseConfig {
+            public_key: key.public(),
+            endpoint: ep(203, 0, 113, 1, 4800),
+        };
+        let keys: Vec<PublicKey> = sim.hosts.iter().map(|h| h.key).collect();
+        for i in 0..n {
+            let peers = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| PeerConfig {
+                    endpoints: Vec::new(),
+                    ..sim.peer_config(j)
+                })
+                .collect();
+            sim.hosts[i].node.set_peers(peers);
+            sim.hosts[i].node.set_lighthouses(vec![lighthouse]);
+            let addr = sim.hosts[i].addr;
+            sim.hosts[i].node.set_local_endpoints(vec![addr]);
+        }
+        sim.hosts.push(Host {
+            node: Node::lighthouse(key, keys),
+            key: lighthouse.public_key,
+            addr: lighthouse.endpoint,
+            nat: None,
+            drift_ppm: 0,
+            wall_offset: 0,
+            asleep_until: None,
+            next_seq: 0,
+            received: Vec::new(),
+            drops: Vec::new(),
+        });
+        sim.link_counts = vec![0; (n + 1) * (n + 1)];
+        sim
+    }
+
+    fn add_nat(&mut self, public: Ipv4Addr, kind: NatKind) -> usize {
+        self.nats.push(Nat {
+            public,
+            kind,
+            next_port: 40000,
+            out: HashMap::new(),
+            back: HashMap::new(),
+        });
+        self.nats.len() - 1
+    }
+
+    /// Moves `host` to `addr` behind `nat`; its node learns its new local endpoint (§13.1).
+    fn place(&mut self, host: usize, addr: Endpoint, nat: Option<usize>) {
+        let h = &mut self.hosts[host];
+        h.addr = addr;
+        h.nat = nat;
+        h.node.set_local_endpoints(vec![addr]);
+    }
+
+    fn lighthouse(&self) -> usize {
+        self.hosts.len() - 1
+    }
+
+    /// Where a datagram from `from` to `dst` lands, and its source as seen there: hosts on
+    /// the public network or on the same LAN reach each other's address; a NAT translates on
+    /// the way out and filters on the way in; no hairpinning.
+    fn resolve(&mut self, from: usize, dst: Endpoint) -> Option<(usize, Endpoint)> {
+        let (src, lan) = (self.hosts[from].addr, self.hosts[from].nat);
+        let outside = |nats: &mut Vec<Nat>| match lan {
+            Some(n) => nats[n].translate(src, dst),
+            None => src,
+        };
+        if let Some(j) = self.hosts.iter().position(|h| h.addr == dst) {
+            if self.hosts[j].nat == lan {
+                return Some((j, src));
+            }
+            if self.hosts[j].nat.is_some() {
+                return None;
+            }
+            return Some((j, outside(&mut self.nats)));
+        }
+        let n = self
+            .nats
+            .iter()
+            .position(|n| Endpoint::new(IpAddr::V4(n.public), dst.port).address == dst.address)?;
+        if lan == Some(n) {
+            return None;
+        }
+        let source = outside(&mut self.nats);
+        let inside = self.nats[n].admit(dst.port, source)?;
+        let j = self
+            .hosts
+            .iter()
+            .position(|h| h.addr == inside && h.nat == Some(n))?;
+        Some((j, source))
+    }
+
+    fn status(&self, host: usize, peer: usize) -> kekkai_core::node::PeerStatus {
+        self.hosts[host]
+            .node
+            .status(&self.hosts[peer].key)
+            .expect("configured")
     }
 
     /// Host `from` hands its next scripted tunnel packet towards host `to` to its node.
@@ -228,8 +391,11 @@ impl Sim {
             let (sender, seq) = origin_of(&packet);
             self.hosts[from].received.push((self.now, sender, seq));
         }
-        for (key, datagram) in out.datagrams {
-            let to = self.host_of(&key);
+        for (dst, datagram) in out.datagrams {
+            let Some((to, source)) = self.resolve(from, dst) else {
+                self.emitted.push((self.now, from, usize::MAX, datagram[0]));
+                continue;
+            };
             self.emitted.push((self.now, from, to, datagram[0]));
             let n = self.hosts.len();
             let count = &mut self.link_counts[from * n + to];
@@ -247,16 +413,17 @@ impl Sim {
                     at: self.now + delay,
                     seq: self.seq,
                     to,
+                    source,
                     datagram: datagram.clone(),
                 }));
             }
         }
     }
 
-    fn deliver(&mut self, to: usize, datagram: &[u8]) -> Result<(), DropReason> {
+    fn deliver(&mut self, to: usize, source: Endpoint, datagram: &[u8]) -> Result<(), DropReason> {
         let host = &mut self.hosts[to];
         let (mono, wall) = (host.mono(self.now), host.wall(self.now));
-        match host.node.handle_datagram(mono, wall, datagram) {
+        match host.node.handle_datagram(mono, wall, source, datagram) {
             Ok(out) => {
                 let dropped = out.dropped;
                 if let Some(reason) = dropped {
@@ -296,7 +463,7 @@ impl Sim {
             while self.queue.peek().is_some_and(|Reverse(e)| e.at <= self.now) {
                 let Reverse(e) = self.queue.pop().expect("peeked");
                 if !self.hosts[e.to].asleep(self.now) {
-                    let _ = self.deliver(e.to, &e.datagram);
+                    let _ = self.deliver(e.to, e.source, &e.datagram);
                 }
             }
             for i in 0..self.hosts.len() {
@@ -528,21 +695,27 @@ fn junk_and_replays_are_silent() {
         (&data_unknown_index, DropReason::UnknownIndex),
     ];
     for (datagram, reason) in cases {
-        assert_eq!(sim.deliver(1, datagram), Err(reason));
+        assert_eq!(sim.deliver(1, sim.addr(0), datagram), Err(reason));
     }
     assert_eq!(sim.emitted.len(), emitted, "no datagram in reaction");
     // The genuine copy still completes; its replay is silent (§7.4).
-    assert!(sim.deliver(1, &msg1).is_ok());
+    assert!(sim.deliver(1, sim.addr(0), &msg1).is_ok());
     sim.run_until(secs(2));
     assert_eq!(sim.received(1, 0, secs(1)), [1]);
-    assert_eq!(sim.deliver(1, &msg1), Err(DropReason::TimestampNotNewer));
+    assert_eq!(
+        sim.deliver(1, sim.addr(0), &msg1),
+        Err(DropReason::TimestampNotNewer)
+    );
     // A replayed data packet is rejected by the window (§8.4), its payload delivered once.
     let emitted = sim.emitted.len();
     sim.send_ip(0, 1).unwrap();
     let data = sim.queue.pop().expect("data queued").0.datagram;
     assert_eq!(data[0], wire::TYPE_DATA);
-    assert!(sim.deliver(1, &data).is_ok());
-    assert_eq!(sim.deliver(1, &data), Err(DropReason::CounterRejected));
+    assert!(sim.deliver(1, sim.addr(0), &data).is_ok());
+    assert_eq!(
+        sim.deliver(1, sim.addr(0), &data),
+        Err(DropReason::CounterRejected)
+    );
     assert_eq!(sim.emitted.len(), emitted + 1, "only the original send");
     assert_eq!(sim.received(1, 0, secs(1)), [1, 2]);
     // §12.6 reporting: the replay is counted, junk from nobody is not.
@@ -847,14 +1020,17 @@ fn rejected_inner_keeps_the_transport_effects() {
     };
     let msg1_1 = pop(&mut sim, 0);
     let msg1_0 = pop(&mut sim, 1);
-    sim.deliver(0, &msg1_1).unwrap();
-    sim.deliver(1, &msg1_0).unwrap();
+    sim.deliver(0, sim.addr(1), &msg1_1).unwrap();
+    sim.deliver(1, sim.addr(0), &msg1_0).unwrap();
     let lost_msg2 = pop(&mut sim, 0);
     assert_eq!(lost_msg2[0], wire::TYPE_HANDSHAKE_RESP);
     let msg2_0 = pop(&mut sim, 1);
-    sim.deliver(1, &msg2_0).unwrap();
+    sim.deliver(1, sim.addr(0), &msg2_0).unwrap();
     let data = pop(&mut sim, 0);
-    assert_eq!(sim.deliver(0, &data), Err(DropReason::SourceNotPeer));
+    assert_eq!(
+        sim.deliver(0, sim.addr(1), &data),
+        Err(DropReason::SourceNotPeer)
+    );
     let status = sim.hosts[0].node.status(&sim.hosts[1].key).unwrap();
     assert!(status.current && !status.handshake_in_flight);
     assert_eq!(status.staged_packets, 0);
@@ -869,4 +1045,209 @@ fn rejected_inner_keeps_the_transport_effects() {
         "the staged packet went out"
     );
     assert!(sim.received(0, 1, secs(0)).is_empty());
+}
+
+// v0.4: lighthouse, NAT traversal and roaming (§12, §13).
+
+/// Hosts 0 and 1 behind their own NAT of `kind`; the lighthouse is public. Both nodes are
+/// registered after the first second.
+fn behind_nats(seed: u64, kind: NatKind) -> Sim {
+    let mut sim = Sim::discovery(seed, 2);
+    let a = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), kind);
+    let b = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), kind);
+    sim.place(0, ep(192, 168, 1, 2, 4802), Some(a));
+    sim.place(1, ep(192, 168, 2, 2, 4802), Some(b));
+    sim.run_until(secs(1));
+    let lh = sim.lighthouse();
+    assert_eq!(sim.hosts[lh].node.registrations(sim.now).len(), 2);
+    sim
+}
+
+fn public_ip(sim: &Sim, nat: usize) -> IpAddr {
+    IpAddr::V4(sim.nats[nat].public)
+}
+
+#[test]
+fn cone_nats_on_both_sides_give_a_direct_path() {
+    let mut sim = behind_nats(20, NatKind::Cone);
+    sim.stream(0, 1, secs(1), secs(5));
+    sim.stream(1, 0, secs(1), secs(6));
+    assert!(!sim.received(1, 0, secs(0)).is_empty());
+    assert!(!sim.received(0, 1, secs(0)).is_empty());
+    for (host, peer, nat) in [(0, 1, 1), (1, 0, 0)] {
+        let s = sim.status(host, peer);
+        assert!(s.current, "{host} -> {peer}");
+        let endpoint = s.endpoint.expect("learnt");
+        assert_eq!(
+            endpoint.display().ip(),
+            public_ip(&sim, nat),
+            "the other's NAT"
+        );
+        assert_eq!(s.last_direct_path_failure, None);
+    }
+    let lh = sim.lighthouse();
+    let counters = sim.hosts[lh].node.lighthouse_counters();
+    assert!(counters.queries_known >= 1 && counters.punches >= 1);
+    // Stopping the lighthouse does not break the established session, rekeys included.
+    sim.hosts[lh].asleep_until = Some(secs(100_000));
+    let since = sim.now;
+    sim.stream(0, 1, secs(1), since + secs(300));
+    let late = sim.received(1, 0, since + secs(290));
+    assert!(late.len() >= 9, "{late:?}");
+    assert!(sim.status(0, 1).current);
+}
+
+#[test]
+fn symmetric_nats_on_both_sides_report_none_after_3_s() {
+    let mut sim = behind_nats(21, NatKind::Symmetric);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + ms(2900));
+    assert_eq!(sim.status(0, 1).last_direct_path_failure, None);
+    sim.run_until(start + ms(3100));
+    let s = sim.status(0, 1);
+    assert!(!s.current, "path = none");
+    assert_eq!(s.last_direct_path_failure, Some(PathFailure::Timeout));
+    assert!(sim.received(1, 0, secs(0)).is_empty());
+}
+
+#[test]
+fn same_lan_peers_connect_through_their_local_endpoints() {
+    let mut sim = Sim::discovery(22, 2);
+    let nat = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+    sim.place(0, ep(192, 168, 1, 2, 4802), Some(nat));
+    sim.place(1, ep(192, 168, 1, 3, 4802), Some(nat));
+    sim.run_until(secs(1));
+    sim.stream(0, 1, secs(1), secs(5));
+    assert!(!sim.received(1, 0, secs(0)).is_empty());
+    assert_eq!(sim.status(0, 1).endpoint, Some(sim.addr(1)));
+    assert_eq!(sim.status(1, 0).endpoint, Some(sim.addr(0)));
+}
+
+/// §12.5 rule 3: host 0 leaves the LAN it shared with host 1 for another network behind
+/// another NAT; its local addresses change and it recovers through the lighthouse.
+#[test]
+fn a_node_that_moves_rediscovers_through_the_lighthouse() {
+    let mut sim = Sim::discovery(23, 2);
+    let home = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+    let away = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), NatKind::Cone);
+    sim.place(0, ep(192, 168, 1, 2, 4802), Some(home));
+    sim.place(1, ep(192, 168, 1, 3, 4802), Some(home));
+    sim.run_until(secs(1));
+    sim.stream(0, 1, secs(1), secs(40));
+    assert_eq!(
+        sim.status(0, 1).endpoint,
+        Some(sim.addr(1)),
+        "LAN path first"
+    );
+    let moved = sim.now;
+    sim.place(0, ep(192, 168, 7, 2, 4802), Some(away));
+    sim.stream(0, 1, secs(1), moved + secs(60));
+    let back = sim.received(1, 0, moved);
+    let first = sim.hosts[1]
+        .received
+        .iter()
+        .find(|(t, p, _)| *t > moved && *p == 0)
+        .map(|(t, ..)| *t - moved)
+        .expect("traffic resumed");
+    assert!(first < secs(35), "recovered after {first:?}");
+    assert!(back.len() >= 20, "{back:?}");
+    let to_b = sim.status(0, 1).endpoint.unwrap();
+    assert_eq!(
+        to_b.display().ip(),
+        public_ip(&sim, home),
+        "B's observed endpoint"
+    );
+    let to_a = sim.status(1, 0).endpoint.unwrap();
+    assert_eq!(to_a.display().ip(), public_ip(&sim, away));
+}
+
+/// §12.5 rule 2: host 1 moves behind another NAT with the same local address, so only
+/// host 0's unanswered handshake can trigger the query.
+#[test]
+fn a_peer_that_moves_is_found_after_an_unanswered_handshake() {
+    let mut sim = behind_nats(24, NatKind::Cone);
+    sim.stream(0, 1, secs(1), secs(10));
+    assert!(sim.status(0, 1).current);
+    let lh = sim.lighthouse();
+    let queries = sim.hosts[lh].node.lighthouse_counters().queries_known;
+    let elsewhere = sim.add_nat(Ipv4Addr::new(198, 51, 100, 3), NatKind::Cone);
+    let moved = sim.now;
+    let addr = sim.addr(1);
+    sim.place(1, addr, Some(elsewhere));
+    sim.stream(0, 1, secs(1), moved + secs(60));
+    let first = sim.hosts[1]
+        .received
+        .iter()
+        .find(|(t, p, _)| *t > moved && *p == 0)
+        .map(|(t, ..)| *t - moved)
+        .expect("traffic resumed");
+    // New handshake at 15 s, unanswered until 20 s, then the query and the punch.
+    assert!(
+        first > secs(15) && first < secs(30),
+        "recovered after {first:?}"
+    );
+    assert!(sim.hosts[lh].node.lighthouse_counters().queries_known > queries);
+    let to_b = sim.status(0, 1).endpoint.unwrap();
+    assert_eq!(to_b.display().ip(), public_ip(&sim, elsewhere));
+}
+
+/// Silence (§13.2, §16): an unlisted key never gets an answer from the lighthouse, and a
+/// listed but unregistered peer is reported as `lighthouse_unknown`.
+#[test]
+fn lighthouse_silence_and_unknown_peers() {
+    let mut sim = Sim::discovery(25, 3);
+    let lh = sim.lighthouse();
+    let listed = vec![sim.hosts[0].key, sim.hosts[1].key];
+    sim.hosts[lh].node.set_lighthouse_peers(listed);
+    sim.run_until(secs(20));
+    let answered = sim
+        .emitted
+        .iter()
+        .filter(|(_, f, t, _)| *f == lh && *t == 2)
+        .count();
+    assert_eq!(answered, 0, "the stranger got no datagram");
+    assert!(!sim.drops(lh, DropReason::IdentityRejected).is_empty());
+    assert!(!sim.status(2, lh).current);
+    // Host 1 is listed but asleep from now on: its registration expires after 75 s.
+    sim.hosts[1].asleep_until = Some(secs(100_000));
+    sim.run_until(secs(120));
+    assert_eq!(sim.hosts[lh].node.registrations(sim.now).len(), 1);
+    let start = sim.now;
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(start + secs(4));
+    let s = sim.status(0, 1);
+    assert_eq!(
+        s.last_direct_path_failure,
+        Some(PathFailure::LighthouseUnknown)
+    );
+}
+
+/// ADR 0013 "symmetric NAT: nothing special", against address-and-port-dependent filtering:
+/// only cone on both sides gives a direct path; otherwise `none` with `timeout` after 3 s.
+#[test]
+fn every_nat_combination_gives_direct_or_a_timeout() {
+    use NatKind::{Cone, Symmetric};
+    for (seed, (a, b)) in [
+        (Cone, Cone),
+        (Cone, Symmetric),
+        (Symmetric, Cone),
+        (Symmetric, Symmetric),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut sim = Sim::discovery(30 + seed as u64, 2);
+        let na = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), a);
+        let nb = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), b);
+        sim.place(0, ep(192, 168, 1, 2, 4802), Some(na));
+        sim.place(1, ep(192, 168, 2, 2, 4802), Some(nb));
+        sim.run_until(secs(1));
+        sim.stream(0, 1, ms(500), secs(5));
+        let s = sim.status(0, 1);
+        let direct = a == Cone && b == Cone;
+        assert_eq!(s.current, direct, "seed {seed}");
+        let failure = (!direct).then_some(PathFailure::Timeout);
+        assert_eq!(s.last_direct_path_failure, failure, "seed {seed}");
+    }
 }

@@ -14,6 +14,7 @@ pub mod firewall;
 pub mod handshake;
 pub mod inner;
 pub mod keys;
+pub mod lighthouse;
 pub mod mac1;
 pub mod node;
 pub mod peer;
@@ -62,6 +63,18 @@ pub const PERSISTENT_KEEPALIVE: Duration = Duration::from_secs(25);
 pub const RESPONDER_REKEY_AFTER_TIME: Duration = Duration::from_secs(165);
 /// `KEEPALIVE_TIMEOUT + REKEY_TIMEOUT`: data sent without any answer triggers a handshake (§9).
 pub const NEW_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A rediscovery that completes no handshake within this delay records a direct-path
+/// failure (§12.6); the relay fallback starts there in v0.5 (§12.3).
+pub const DIRECT_PATH_TIMEOUT: Duration = Duration::from_secs(3);
+/// While relayed, a direct path is retried this often (§12.3, v0.5).
+pub const DIRECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// A lighthouse registration expires this long after its last refresh (§13.2).
+pub const LIGHTHOUSE_ENTRY_TIMEOUT: Duration = Duration::from_secs(75);
+/// Consecutive failed keepalives towards a lighthouse that trigger §12.5 rule 4.
+pub const KEEPALIVE_FAILURES_BEFORE_REREGISTER: u32 = 3;
+/// Most candidate endpoints of one in-flight handshake (§17).
+pub const MAX_CANDIDATES: usize = 32;
 
 /// Overlay MTU; configurable downwards only (§17).
 pub const MTU: usize = 1280;

@@ -51,19 +51,18 @@ async fn two_loops_carry_a_packet_each_way() {
     for (i, socket) in sockets.into_iter().enumerate() {
         let other = 1 - i;
         let peer_key = keys[other].public();
+        let endpoint: SocketAddr = format!("127.0.0.1:{}", ports[other]).parse().unwrap();
         let node = Node::new(
             keys[i].clone(),
             vec![PeerConfig {
                 public_key: peer_key,
                 addresses: vec![addrs[other]],
                 allow_inbound: vec![kekkai_core::firewall::Rule::Any],
+                endpoints: vec![endpoint.into()],
             }],
         );
-        let endpoint: SocketAddr = format!("127.0.0.1:{}", ports[other]).parse().unwrap();
         let info = PeerInfo {
             name: format!("host{other}"),
-            statics: vec![udp::to_socket(endpoint)],
-            endpoint: None,
         };
         let state = Arc::new(Mutex::new(State::new(
             node,
@@ -99,7 +98,97 @@ async fn two_loops_carry_a_packet_each_way() {
         let status = state.node.status(&peer).unwrap();
         assert!(status.current && status.last_handshake.is_some());
         assert!(status.counters.rx_packets > 0 && status.counters.tx_packets > 0);
-        let endpoint = state.peers[&peer].endpoint.expect("learnt from the peer");
-        assert_eq!(udp::canonical(endpoint).port(), ports[1 - i]);
+        let endpoint = status.endpoint.expect("learnt from the peer");
+        assert_eq!(endpoint.display().port(), ports[1 - i]);
     }
+}
+
+/// Two node loops that know no endpoint of each other find each other through a lighthouse
+/// loop (spec §13), all on loopback, and carry a packet.
+#[tokio::test(flavor = "current_thread")]
+async fn discovery_through_a_lighthouse_loop() {
+    use kekkai_core::node::LighthouseConfig;
+    let keys = [key(1), key(2)];
+    let lighthouse_key = key(3);
+    let addrs: [IpAddr; 2] = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
+    let lh_socket = udp::bind(0).unwrap();
+    let lh_port = lh_socket.local_addr().unwrap().port();
+    let lh_node = Node::lighthouse(
+        lighthouse_key.clone(),
+        keys.iter().map(StaticKey::public).collect(),
+    );
+    let lh_state = Arc::new(Mutex::new(State::new(lh_node, HashMap::new())));
+    tokio::spawn(crate::run(
+        lh_state.clone(),
+        lh_socket,
+        crate::NoTunnel,
+        1280,
+    ));
+    let lighthouse = LighthouseConfig {
+        public_key: lighthouse_key.public(),
+        endpoint: format!("127.0.0.1:{lh_port}")
+            .parse::<SocketAddr>()
+            .unwrap()
+            .into(),
+    };
+    let mut outsides = Vec::new();
+    let mut states = Vec::new();
+    for i in 0..2 {
+        let other = 1 - i;
+        let mut node = Node::new(
+            keys[i].clone(),
+            vec![PeerConfig {
+                public_key: keys[other].public(),
+                addresses: vec![addrs[other]],
+                allow_inbound: vec![kekkai_core::firewall::Rule::Any],
+                endpoints: vec![],
+            }],
+        );
+        node.set_lighthouses(vec![lighthouse]);
+        let state = Arc::new(Mutex::new(State::new(node, HashMap::new())));
+        let (inside, outside) = UnixDatagram::pair().unwrap();
+        tokio::spawn(crate::run(
+            state.clone(),
+            udp::bind(0).unwrap(),
+            inside,
+            1280,
+        ));
+        outsides.push(outside);
+        states.push(state);
+    }
+    // Both registered.
+    for _ in 0..50 {
+        if lh_state
+            .lock()
+            .unwrap()
+            .node
+            .registrations(crate::clock::monotonic())
+            .len()
+            == 2
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let packet = ipv4(
+        [10, 0, 0, 1],
+        [10, 0, 0, 2],
+        b"found through the lighthouse",
+    );
+    outsides[0].send(&packet).await.unwrap();
+    let mut buf = [0u8; 2048];
+    let n = tokio::time::timeout(Duration::from_secs(5), outsides[1].recv(&mut buf))
+        .await
+        .expect("packet delivered within 5 s")
+        .unwrap();
+    assert_eq!(&buf[..n], &packet[..]);
+    let status = states[0]
+        .lock()
+        .unwrap()
+        .node
+        .status(&keys[1].public())
+        .unwrap();
+    assert!(status.current && status.endpoint.is_some());
+    let counters = lh_state.lock().unwrap().node.lighthouse_counters();
+    assert!(counters.queries_known >= 1 && counters.punches >= 1);
 }

@@ -23,6 +23,59 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// State of a session with a lighthouse or relay (0015).
+type SessionState int32
+
+const (
+	SessionState_SESSION_STATE_UNSPECIFIED SessionState = 0
+	SessionState_SESSION_STATE_CONNECTED   SessionState = 1
+	SessionState_SESSION_STATE_HANDSHAKING SessionState = 2
+	SessionState_SESSION_STATE_DOWN        SessionState = 3
+)
+
+// Enum value maps for SessionState.
+var (
+	SessionState_name = map[int32]string{
+		0: "SESSION_STATE_UNSPECIFIED",
+		1: "SESSION_STATE_CONNECTED",
+		2: "SESSION_STATE_HANDSHAKING",
+		3: "SESSION_STATE_DOWN",
+	}
+	SessionState_value = map[string]int32{
+		"SESSION_STATE_UNSPECIFIED": 0,
+		"SESSION_STATE_CONNECTED":   1,
+		"SESSION_STATE_HANDSHAKING": 2,
+		"SESSION_STATE_DOWN":        3,
+	}
+)
+
+func (x SessionState) Enum() *SessionState {
+	p := new(SessionState)
+	*p = x
+	return p
+}
+
+func (x SessionState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SessionState) Descriptor() protoreflect.EnumDescriptor {
+	return file_kekkai_control_v1_control_proto_enumTypes[0].Descriptor()
+}
+
+func (SessionState) Type() protoreflect.EnumType {
+	return &file_kekkai_control_v1_control_proto_enumTypes[0]
+}
+
+func (x SessionState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SessionState.Descriptor instead.
+func (SessionState) EnumDescriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
+}
+
 // How a peer is reached (0013, spec section 12.1).
 type Path int32
 
@@ -61,11 +114,11 @@ func (x Path) String() string {
 }
 
 func (Path) Descriptor() protoreflect.EnumDescriptor {
-	return file_kekkai_control_v1_control_proto_enumTypes[0].Descriptor()
+	return file_kekkai_control_v1_control_proto_enumTypes[1].Descriptor()
 }
 
 func (Path) Type() protoreflect.EnumType {
-	return &file_kekkai_control_v1_control_proto_enumTypes[0]
+	return &file_kekkai_control_v1_control_proto_enumTypes[1]
 }
 
 func (x Path) Number() protoreflect.EnumNumber {
@@ -74,7 +127,7 @@ func (x Path) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Path.Descriptor instead.
 func (Path) EnumDescriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{1}
 }
 
 // Reason of the last direct-path failure (spec section 12.6).
@@ -117,11 +170,11 @@ func (x DirectPathFailure) String() string {
 }
 
 func (DirectPathFailure) Descriptor() protoreflect.EnumDescriptor {
-	return file_kekkai_control_v1_control_proto_enumTypes[1].Descriptor()
+	return file_kekkai_control_v1_control_proto_enumTypes[2].Descriptor()
 }
 
 func (DirectPathFailure) Type() protoreflect.EnumType {
-	return &file_kekkai_control_v1_control_proto_enumTypes[1]
+	return &file_kekkai_control_v1_control_proto_enumTypes[2]
 }
 
 func (x DirectPathFailure) Number() protoreflect.EnumNumber {
@@ -130,7 +183,7 @@ func (x DirectPathFailure) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DirectPathFailure.Descriptor instead.
 func (DirectPathFailure) EnumDescriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{1}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
 }
 
 type GetStatusRequest struct {
@@ -169,12 +222,15 @@ func (*GetStatusRequest) Descriptor() ([]byte, []int) {
 	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{0}
 }
 
-// Lighthouse and relay sections (v0.4, v0.5) are added with their milestones.
+// A node fills node, peers, firewall and lighthouses; a lighthouse fills node (its own
+// key, version and port) and registrations. Relay sections (v0.5) come with their milestone.
 type GetStatusResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Node          *NodeStatus            `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
 	Peers         []*PeerStatus          `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
 	Firewall      *FirewallStatus        `protobuf:"bytes,3,opt,name=firewall,proto3" json:"firewall,omitempty"`
+	Lighthouses   []*LighthouseStatus    `protobuf:"bytes,4,rep,name=lighthouses,proto3" json:"lighthouses,omitempty"`
+	Registrations []*Registration        `protobuf:"bytes,5,rep,name=registrations,proto3" json:"registrations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -230,6 +286,180 @@ func (x *GetStatusResponse) GetFirewall() *FirewallStatus {
 	return nil
 }
 
+func (x *GetStatusResponse) GetLighthouses() []*LighthouseStatus {
+	if x != nil {
+		return x.Lighthouses
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetRegistrations() []*Registration {
+	if x != nil {
+		return x.Registrations
+	}
+	return nil
+}
+
+// The node's view of one configured lighthouse (spec section 13.1).
+type LighthouseStatus struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// The configured endpoint, as written.
+	Endpoint string       `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	State    SessionState `protobuf:"varint,3,opt,name=state,proto3,enum=kekkai.control.v1.SessionState" json:"state,omitempty"`
+	// Unset until a handshake completed.
+	LastHandshake *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_handshake,json=lastHandshake,proto3" json:"last_handshake,omitempty"`
+	// Last authenticated packet (keepalive or answer) from the lighthouse.
+	LastReceived  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_received,json=lastReceived,proto3" json:"last_received,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LighthouseStatus) Reset() {
+	*x = LighthouseStatus{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LighthouseStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LighthouseStatus) ProtoMessage() {}
+
+func (x *LighthouseStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LighthouseStatus.ProtoReflect.Descriptor instead.
+func (*LighthouseStatus) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LighthouseStatus) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *LighthouseStatus) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *LighthouseStatus) GetState() SessionState {
+	if x != nil {
+		return x.State
+	}
+	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *LighthouseStatus) GetLastHandshake() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastHandshake
+	}
+	return nil
+}
+
+func (x *LighthouseStatus) GetLastReceived() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastReceived
+	}
+	return nil
+}
+
+// One unexpired registration held by a lighthouse (spec section 13.2).
+type Registration struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	// The name the lighthouse's configuration gives the key.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// Source of the last register (`host:port`).
+	ObservedEndpoint string   `protobuf:"bytes,3,opt,name=observed_endpoint,json=observedEndpoint,proto3" json:"observed_endpoint,omitempty"`
+	LocalEndpoints   []string `protobuf:"bytes,4,rep,name=local_endpoints,json=localEndpoints,proto3" json:"local_endpoints,omitempty"`
+	// Time since the last register.
+	LastSeen      *durationpb.Duration `protobuf:"bytes,5,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Registration) Reset() {
+	*x = Registration{}
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Registration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Registration) ProtoMessage() {}
+
+func (x *Registration) ProtoReflect() protoreflect.Message {
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Registration.ProtoReflect.Descriptor instead.
+func (*Registration) Descriptor() ([]byte, []int) {
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Registration) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+func (x *Registration) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Registration) GetObservedEndpoint() string {
+	if x != nil {
+		return x.ObservedEndpoint
+	}
+	return ""
+}
+
+func (x *Registration) GetLocalEndpoints() []string {
+	if x != nil {
+		return x.LocalEndpoints
+	}
+	return nil
+}
+
+func (x *Registration) GetLastSeen() *durationpb.Duration {
+	if x != nil {
+		return x.LastSeen
+	}
+	return nil
+}
+
 // The inbound firewall's table of UDP flows and fragments (0011, spec section 15).
 type FirewallStatus struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
@@ -243,7 +473,7 @@ type FirewallStatus struct {
 
 func (x *FirewallStatus) Reset() {
 	*x = FirewallStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -255,7 +485,7 @@ func (x *FirewallStatus) String() string {
 func (*FirewallStatus) ProtoMessage() {}
 
 func (x *FirewallStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[2]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -268,7 +498,7 @@ func (x *FirewallStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FirewallStatus.ProtoReflect.Descriptor instead.
 func (*FirewallStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{2}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FirewallStatus) GetUdpFlows() uint64 {
@@ -308,7 +538,7 @@ type NodeStatus struct {
 
 func (x *NodeStatus) Reset() {
 	*x = NodeStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -320,7 +550,7 @@ func (x *NodeStatus) String() string {
 func (*NodeStatus) ProtoMessage() {}
 
 func (x *NodeStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[3]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -333,7 +563,7 @@ func (x *NodeStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeStatus.ProtoReflect.Descriptor instead.
 func (*NodeStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{3}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *NodeStatus) GetPublicKey() string {
@@ -409,7 +639,7 @@ type PeerStatus struct {
 
 func (x *PeerStatus) Reset() {
 	*x = PeerStatus{}
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +651,7 @@ func (x *PeerStatus) String() string {
 func (*PeerStatus) ProtoMessage() {}
 
 func (x *PeerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_kekkai_control_v1_control_proto_msgTypes[4]
+	mi := &file_kekkai_control_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +664,7 @@ func (x *PeerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
 func (*PeerStatus) Descriptor() ([]byte, []int) {
-	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_kekkai_control_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *PeerStatus) GetPublicKey() string {
@@ -547,11 +777,27 @@ var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"\x1fkekkai/control/v1/control.proto\x12\x11kekkai.control.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x12\n" +
-	"\x10GetStatusRequest\"\xba\x01\n" +
+	"\x10GetStatusRequest\"\xc8\x02\n" +
 	"\x11GetStatusResponse\x121\n" +
 	"\x04node\x18\x01 \x01(\v2\x1d.kekkai.control.v1.NodeStatusR\x04node\x123\n" +
 	"\x05peers\x18\x02 \x03(\v2\x1d.kekkai.control.v1.PeerStatusR\x05peers\x12=\n" +
-	"\bfirewall\x18\x03 \x01(\v2!.kekkai.control.v1.FirewallStatusR\bfirewall\"o\n" +
+	"\bfirewall\x18\x03 \x01(\v2!.kekkai.control.v1.FirewallStatusR\bfirewall\x12E\n" +
+	"\vlighthouses\x18\x04 \x03(\v2#.kekkai.control.v1.LighthouseStatusR\vlighthouses\x12E\n" +
+	"\rregistrations\x18\x05 \x03(\v2\x1f.kekkai.control.v1.RegistrationR\rregistrations\"\x88\x02\n" +
+	"\x10LighthouseStatus\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x1a\n" +
+	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x125\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1f.kekkai.control.v1.SessionStateR\x05state\x12A\n" +
+	"\x0elast_handshake\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\rlastHandshake\x12?\n" +
+	"\rlast_received\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\flastReceived\"\xcf\x01\n" +
+	"\fRegistration\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12+\n" +
+	"\x11observed_endpoint\x18\x03 \x01(\tR\x10observedEndpoint\x12'\n" +
+	"\x0flocal_endpoints\x18\x04 \x03(\tR\x0elocalEndpoints\x126\n" +
+	"\tlast_seen\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\blastSeen\"o\n" +
 	"\x0eFirewallStatus\x12\x1b\n" +
 	"\tudp_flows\x18\x01 \x01(\x04R\budpFlows\x12\"\n" +
 	"\rudp_flows_max\x18\x02 \x01(\x04R\vudpFlowsMax\x12\x1c\n" +
@@ -586,7 +832,12 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure\x12#\n" +
 	"\rallow_inbound\x18\r \x03(\tR\fallowInbound\x12%\n" +
 	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops\x12\x12\n" +
-	"\x04name\x18\x0f \x01(\tR\x04name*N\n" +
+	"\x04name\x18\x0f \x01(\tR\x04name*\x81\x01\n" +
+	"\fSessionState\x12\x1d\n" +
+	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17SESSION_STATE_CONNECTED\x10\x01\x12\x1d\n" +
+	"\x19SESSION_STATE_HANDSHAKING\x10\x02\x12\x16\n" +
+	"\x12SESSION_STATE_DOWN\x10\x03*N\n" +
 	"\x04Path\x12\x14\n" +
 	"\x10PATH_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tPATH_NONE\x10\x01\x12\x0f\n" +
@@ -613,34 +864,43 @@ func file_kekkai_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_kekkai_control_v1_control_proto_rawDescData
 }
 
-var file_kekkai_control_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_kekkai_control_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_kekkai_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_kekkai_control_v1_control_proto_goTypes = []any{
-	(Path)(0),                     // 0: kekkai.control.v1.Path
-	(DirectPathFailure)(0),        // 1: kekkai.control.v1.DirectPathFailure
-	(*GetStatusRequest)(nil),      // 2: kekkai.control.v1.GetStatusRequest
-	(*GetStatusResponse)(nil),     // 3: kekkai.control.v1.GetStatusResponse
-	(*FirewallStatus)(nil),        // 4: kekkai.control.v1.FirewallStatus
-	(*NodeStatus)(nil),            // 5: kekkai.control.v1.NodeStatus
-	(*PeerStatus)(nil),            // 6: kekkai.control.v1.PeerStatus
-	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(SessionState)(0),             // 0: kekkai.control.v1.SessionState
+	(Path)(0),                     // 1: kekkai.control.v1.Path
+	(DirectPathFailure)(0),        // 2: kekkai.control.v1.DirectPathFailure
+	(*GetStatusRequest)(nil),      // 3: kekkai.control.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),     // 4: kekkai.control.v1.GetStatusResponse
+	(*LighthouseStatus)(nil),      // 5: kekkai.control.v1.LighthouseStatus
+	(*Registration)(nil),          // 6: kekkai.control.v1.Registration
+	(*FirewallStatus)(nil),        // 7: kekkai.control.v1.FirewallStatus
+	(*NodeStatus)(nil),            // 8: kekkai.control.v1.NodeStatus
+	(*PeerStatus)(nil),            // 9: kekkai.control.v1.PeerStatus
+	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 11: google.protobuf.Duration
 }
 var file_kekkai_control_v1_control_proto_depIdxs = []int32{
-	5, // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
-	6, // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
-	4, // 2: kekkai.control.v1.GetStatusResponse.firewall:type_name -> kekkai.control.v1.FirewallStatus
-	7, // 3: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
-	0, // 4: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
-	8, // 5: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
-	1, // 6: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
-	2, // 7: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
-	3, // 8: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
-	8, // [8:9] is the sub-list for method output_type
-	7, // [7:8] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	8,  // 0: kekkai.control.v1.GetStatusResponse.node:type_name -> kekkai.control.v1.NodeStatus
+	9,  // 1: kekkai.control.v1.GetStatusResponse.peers:type_name -> kekkai.control.v1.PeerStatus
+	7,  // 2: kekkai.control.v1.GetStatusResponse.firewall:type_name -> kekkai.control.v1.FirewallStatus
+	5,  // 3: kekkai.control.v1.GetStatusResponse.lighthouses:type_name -> kekkai.control.v1.LighthouseStatus
+	6,  // 4: kekkai.control.v1.GetStatusResponse.registrations:type_name -> kekkai.control.v1.Registration
+	0,  // 5: kekkai.control.v1.LighthouseStatus.state:type_name -> kekkai.control.v1.SessionState
+	10, // 6: kekkai.control.v1.LighthouseStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	10, // 7: kekkai.control.v1.LighthouseStatus.last_received:type_name -> google.protobuf.Timestamp
+	11, // 8: kekkai.control.v1.Registration.last_seen:type_name -> google.protobuf.Duration
+	11, // 9: kekkai.control.v1.NodeStatus.uptime:type_name -> google.protobuf.Duration
+	1,  // 10: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
+	10, // 11: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
+	2,  // 12: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
+	3,  // 13: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
+	4,  // 14: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
+	14, // [14:15] is the sub-list for method output_type
+	13, // [13:14] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_kekkai_control_v1_control_proto_init() }
@@ -653,8 +913,8 @@ func file_kekkai_control_v1_control_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kekkai_control_v1_control_proto_rawDesc), len(file_kekkai_control_v1_control_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   5,
+			NumEnums:      3,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

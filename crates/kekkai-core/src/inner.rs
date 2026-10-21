@@ -1,6 +1,6 @@
 //! Inner protocol (§10): the plaintext of every `data` packet, `inner_type (1) || body`.
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use crate::keys::PublicKey;
 use crate::tlv::{self, Tlv};
@@ -26,10 +26,16 @@ const LIGHTHOUSE_KNOWN_TLVS: &[u8] = &[TLV_PUBKEY, TLV_ENDPOINTS, TLV_LAST_SEEN]
 pub const ENDPOINT_LEN: usize = 18;
 
 /// `address (16) || port (2)`: an IPv6 address, IPv4 written in its IPv4-mapped form (§10.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Endpoint {
     pub address: Ipv6Addr,
     pub port: u16,
+}
+
+impl From<SocketAddr> for Endpoint {
+    fn from(addr: SocketAddr) -> Self {
+        Self::new(addr.ip(), addr.port())
+    }
 }
 
 impl Endpoint {
@@ -39,6 +45,16 @@ impl Endpoint {
             IpAddr::V6(v6) => v6,
         };
         Self { address, port }
+    }
+
+    /// The dual-stack socket form (ADR 0010): IPv4 stays IPv4-mapped.
+    pub fn socket_addr(&self) -> SocketAddr {
+        SocketAddr::V6(SocketAddrV6::new(self.address, self.port, 0, 0))
+    }
+
+    /// The form shown to people: an IPv4-mapped address as IPv4.
+    pub fn display(&self) -> SocketAddr {
+        SocketAddr::new(self.address.to_canonical(), self.port)
     }
 
     pub fn encode(&self) -> [u8; ENDPOINT_LEN] {

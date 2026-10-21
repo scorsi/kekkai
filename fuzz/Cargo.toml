@@ -48,3 +48,10 @@ path = "fuzz_targets/firewall.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lighthouse_config"
+path = "fuzz_targets/lighthouse_config.rs"
+test = false
+doc = false
+bench = false

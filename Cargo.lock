@@ -766,6 +766,17 @@ dependencies = [
 [[package]]
 name = "kekkai-lighthouse"
 version = "0.0.0"
+dependencies = [
+ "kekkai-control",
+ "kekkai-core",
+ "kekkai-io",
+ "prost-types",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "kekkai-node"

@@ -4,6 +4,8 @@
 
 pub mod clock;
 pub mod config;
+pub mod ifaddrs;
+pub mod metrics;
 pub mod mss;
 pub mod systemd;
 #[cfg(all(feature = "tun", target_os = "linux"))]
@@ -14,13 +16,14 @@ pub mod utun;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::{PublicKey, StaticKey};
-use kekkai_core::node::{Node, Output};
+use kekkai_core::node::{Node, PathFailure, PeerStatus};
 use kekkai_core::peer::Counters;
 use kekkai_core::wire::DropReason;
 use tracing::{debug, info, trace};
@@ -29,36 +32,31 @@ use tracing::{debug, info, trace};
 /// second of resuming and every deadline that passed meanwhile runs at once.
 pub const MAX_SLEEP: Duration = Duration::from_secs(1);
 
-/// Where the IO layer sends a peer's datagrams (spec §12.2, §12.4), and its name for logs.
+/// The IO layer's name for a peer, for logs, metrics and status (ADR 0019).
 #[derive(Clone, Debug, Default)]
 pub struct PeerInfo {
     pub name: String,
-    /// Static endpoints from the configuration, resolved at start, in socket form.
-    pub statics: Vec<SocketAddr>,
-    /// Source of the last authenticated datagram from the peer, in socket form.
-    pub endpoint: Option<SocketAddr>,
 }
 
-impl PeerInfo {
-    /// Message 1 goes to every candidate (§12.2): the static endpoints and the last known
-    /// one. Everything else goes to the current endpoint, or the static ones before any.
-    fn targets(&self, datagram: &[u8]) -> Vec<SocketAddr> {
-        let init = datagram.first() == Some(&kekkai_core::wire::TYPE_HANDSHAKE_INIT);
-        match self.endpoint {
-            Some(current) if !init => vec![current],
-            current => {
-                let mut all = self.statics.clone();
-                all.extend(current.filter(|c| !self.statics.contains(c)));
-                all
-            }
-        }
-    }
+/// What the node collects for `lighthouse_register` (spec §13.1).
+#[derive(Clone, Debug)]
+pub struct Locals {
+    pub listen_port: u16,
+    /// The overlay addresses, never registered.
+    pub overlay: Vec<IpAddr>,
 }
 
 /// What the loop, the control server and the metrics endpoint share.
 pub struct State {
     pub node: Node,
     pub peers: HashMap<PublicKey, PeerInfo>,
+    /// Configured lighthouses and their endpoint as written, for logs and status.
+    pub lighthouses: Vec<(PublicKey, String)>,
+    /// Local endpoints to collect at every tick, when a lighthouse is configured.
+    pub locals: Option<Locals>,
+    /// `false` on a lighthouse: it logs aggregate counters only, never per-peer events
+    /// (ADR 0012, 0019).
+    pub log_peers: bool,
     /// Datagrams and tunnel packets the core dropped, by `DropReason` name (ADR 0019).
     pub drops: BTreeMap<&'static str, u64>,
 }
@@ -68,6 +66,9 @@ impl State {
         Self {
             node,
             peers,
+            lighthouses: Vec::new(),
+            locals: None,
+            log_peers: true,
             drops: BTreeMap::new(),
         }
     }
@@ -77,11 +78,45 @@ impl State {
     }
 }
 
+/// The session state of a lighthouse or relay as `status` reports it (ADR 0015).
+pub fn session_state(status: &PeerStatus) -> &'static str {
+    if status.current {
+        "connected"
+    } else if status.handshake_in_flight {
+        "handshaking"
+    } else {
+        "down"
+    }
+}
+
 /// The overlay interface as the loop sees it: one IP packet per call.
 #[allow(async_fn_in_trait)] // only used through generics on a current-thread runtime
 pub trait Tunnel {
     async fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
     async fn send(&self, packet: &[u8]) -> io::Result<()>;
+}
+
+/// No interface: the lighthouse routes no IP packet (spec §10.2).
+pub struct NoTunnel;
+
+impl Tunnel for NoTunnel {
+    async fn recv(&self, _: &mut [u8]) -> io::Result<usize> {
+        std::future::pending().await
+    }
+
+    async fn send(&self, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `log_events` remembers of a peer between two ticks.
+#[derive(Default)]
+struct Seen {
+    current: bool,
+    counters: Counters,
+    endpoint: Option<Endpoint>,
+    failure: Option<PathFailure>,
+    state: &'static str,
 }
 
 /// Drives the core (ADR 0004): datagrams from `socket`, packets from `tunnel`, and the
@@ -94,14 +129,14 @@ pub async fn run(
 ) -> io::Result<()> {
     let mut udp_buf = vec![0u8; 1 << 16];
     let mut tun_buf = vec![0u8; 1 << 16];
-    let mut seen: HashMap<PublicKey, (bool, Counters)> = HashMap::new();
+    let mut seen: HashMap<PublicKey, Seen> = HashMap::new();
     let lock = || state.lock().expect("no panic while holding the state");
     loop {
         let next = lock().node.next_deadline();
         let wake = next
             .map_or(MAX_SLEEP, |d| d.saturating_sub(clock::monotonic()))
             .min(MAX_SLEEP);
-        let (output, source) = tokio::select! {
+        let output = tokio::select! {
             received = socket.recv_from(&mut udp_buf) => {
                 let (n, source) = match received {
                     Ok(r) => r,
@@ -111,9 +146,12 @@ pub async fn run(
                     }
                 };
                 let mut guard = lock();
-                let result = guard
-                    .node
-                    .handle_datagram(clock::monotonic(), clock::wall(), &udp_buf[..n]);
+                let result = guard.node.handle_datagram(
+                    clock::monotonic(),
+                    clock::wall(),
+                    Endpoint::from(source),
+                    &udp_buf[..n],
+                );
                 match result {
                     Ok(output) => {
                         // Rejected inner content: the transport effects still go out (§8.2).
@@ -121,7 +159,7 @@ pub async fn run(
                             guard.count_drop(reason);
                             trace!(event = "datagram-dropped", reason = reason.as_str());
                         }
-                        (output, Some(source))
+                        output
                     }
                     Err(reason) => {
                         guard.count_drop(reason);
@@ -138,7 +176,7 @@ pub async fn run(
                     .node
                     .send_packet(clock::monotonic(), clock::wall(), packet);
                 match result {
-                    Ok(output) => (output, None),
+                    Ok(output) => output,
                     Err(reason) => {
                         guard.count_drop(reason);
                         trace!(event = "tunnel-packet-dropped", reason = reason.as_str());
@@ -148,16 +186,22 @@ pub async fn run(
             }
             () = tokio::time::sleep(wake) => {
                 let mut guard = lock();
+                if let Some(locals) = guard.locals.clone() {
+                    // §13.1: polled at every tick, compared by the core at keepalive ticks.
+                    match ifaddrs::local_endpoints(locals.listen_port, &locals.overlay) {
+                        Ok(found) => guard.node.set_local_endpoints(found),
+                        Err(e) => debug!(event = "local-addresses-failed", error = %e),
+                    }
+                }
                 let output = guard.node.tick(clock::monotonic(), clock::wall());
                 log_events(&guard, &mut seen);
                 drop(guard);
-                (output, None)
+                output
             }
         };
-        let sends = route(&mut lock(), &output, source);
-        for (to, datagram) in sends {
-            if let Err(e) = socket.send_to(&datagram, to).await {
-                debug!(event = "udp-send-failed", error = %e, to = %udp::canonical(to));
+        for (to, datagram) in output.datagrams {
+            if let Err(e) = socket.send_to(&datagram, to.socket_addr()).await {
+                debug!(event = "udp-send-failed", error = %e, to = %to.display());
             }
         }
         for mut packet in output.packets {
@@ -169,61 +213,65 @@ pub async fn run(
     }
 }
 
-/// Applies §12.4 for the authenticated sender and maps each datagram to its targets.
-fn route(
-    state: &mut State,
-    output: &Output,
-    source: Option<SocketAddr>,
-) -> Vec<(SocketAddr, Vec<u8>)> {
-    if let (Some(key), Some(source)) = (output.from, source) {
-        if let Some(peer) = state.peers.get_mut(&key) {
-            if peer.endpoint != Some(source) {
-                info!(
-                    event = "endpoint-change",
-                    peer = %peer.name,
-                    endpoint = %udp::canonical(source)
-                );
-                peer.endpoint = Some(source);
-            }
-        }
-    }
-    let mut sends = Vec::new();
-    for (key, datagram) in &output.datagrams {
-        if let Some(peer) = state.peers.get(key) {
-            for to in peer.targets(datagram) {
-                sends.push((to, datagram.clone()));
-            }
-        }
-    }
-    sends
-}
-
 /// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
-/// completed, path change and session expiry.
-fn log_events(state: &State, seen: &mut HashMap<PublicKey, (bool, Counters)>) {
+/// completed, path change, endpoint change, direct-path failure, lighthouse session state.
+fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
+    if !state.log_peers {
+        return;
+    }
     for (key, peer) in &state.peers {
         let Some(status) = state.node.status(key) else {
             continue;
         };
         let (current, c) = (status.current, status.counters);
-        let (was_current, b) = seen.insert(*key, (current, c)).unwrap_or_default();
+        let now = Seen {
+            current,
+            counters: c,
+            endpoint: status.endpoint,
+            failure: status.last_direct_path_failure,
+            state: "",
+        };
+        let b = seen.insert(*key, now).unwrap_or_default();
         // shortcut: two handshakes within one tick log once, initiator wins; counters are exact.
-        let initiated = c.handshakes_initiated != b.handshakes_initiated;
-        if initiated || c.handshakes_responded != b.handshakes_responded {
+        let initiated = c.handshakes_initiated != b.counters.handshakes_initiated;
+        if initiated || c.handshakes_responded != b.counters.handshakes_responded {
             info!(
                 event = "handshake-completed",
                 peer = %peer.name,
-                endpoint = peer.endpoint.map(|e| display(udp::canonical(e))),
+                endpoint = status.endpoint.map(|e| display(e.display())),
                 initiator = initiated
             );
         }
-        if current != was_current {
+        if let Some(e) = status.endpoint.filter(|e| Some(*e) != b.endpoint) {
+            info!(event = "endpoint-change", peer = %peer.name, endpoint = %e.display());
+        }
+        if let Some(f) = status
+            .last_direct_path_failure
+            .filter(|f| Some(*f) != b.failure)
+        {
+            info!(event = "direct-path-failed", peer = %peer.name, reason = f.as_str());
+        }
+        if current != b.current {
             let (from, to, reason) = if current {
                 ("none", "direct", "handshake-completed")
             } else {
                 ("direct", "none", "session-expired")
             };
             info!(event = "path-change", peer = %peer.name, from, to, reason);
+        }
+    }
+    for (key, endpoint) in &state.lighthouses {
+        let Some(status) = state.node.status(key) else {
+            continue;
+        };
+        let to = session_state(&status);
+        let entry = seen.entry(*key).or_insert_with(|| Seen {
+            state: "down",
+            ..Seen::default()
+        });
+        if entry.state != to {
+            info!(event = "lighthouse-session-change", lighthouse = %endpoint, from = entry.state, to);
+            entry.state = to;
         }
     }
 }

@@ -1,6 +1,6 @@
 # Deployment-agnostic modules (0022). The node modules are nix/modules/node.nix (NixOS, v0.2)
-# and nix/modules/darwin-node.nix (nix-darwin, v0.3); the others are options only until their
-# daemon lands.
+# and nix/modules/darwin-node.nix (nix-darwin, v0.3), the lighthouse is
+# nix/modules/lighthouse.nix (v0.4); the relay is options only until its daemon lands.
 { lib, ... }:
 let
   mk =
@@ -26,8 +26,9 @@ in
   flake = {
     nixosModules = {
       node = ./modules/node.nix;
-    }
-    // lib.genAttrs [ "lighthouse" "relay" ] (n: mk "kekkai-${n}");
+      lighthouse = ./modules/lighthouse.nix;
+      relay = mk "kekkai-relay";
+    };
     darwinModules.node = ./modules/darwin-node.nix;
   };
 }

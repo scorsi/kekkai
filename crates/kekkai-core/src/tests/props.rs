@@ -380,6 +380,11 @@ fn wall(now: Duration) -> Tai64n {
     Tai64n::from_unix(1_767_225_600 + now.as_secs(), now.subsec_nanos())
 }
 
+/// Underlay endpoint of host `n` (1 or 2).
+fn underlay(n: u8) -> Endpoint {
+    Endpoint::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, n)), 4802)
+}
+
 fn ipv4(src: u8, dst: u8) -> Vec<u8> {
     let mut p = vec![
         0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, src, 10, 0, 0, dst,
@@ -395,12 +400,12 @@ fn check(
     keys: &[PublicKey; 2],
     queues: &mut [VecDeque<Vec<u8>>; 2],
     last_message_1: &mut [Option<Duration>; 2],
-    out: Vec<(PublicKey, Vec<u8>)>,
+    out: Vec<(Endpoint, Vec<u8>)>,
     from: usize,
     now: Duration,
 ) -> Result<(), TestCaseError> {
     for (to, d) in out {
-        prop_assert_eq!(to, keys[1 - from]);
+        prop_assert_eq!(to, underlay(2 - from as u8));
         if d[0] == wire::TYPE_HANDSHAKE_INIT {
             if let Some(t) = last_message_1[from] {
                 prop_assert!(
@@ -429,7 +434,7 @@ proptest! {
     fn timer_invariants(ops in ops()) {
         let (ka, kb) = (StaticKey::generate(), StaticKey::generate());
         let (pa, pb) = (ka.public(), kb.public());
-        let config = |k: PublicKey, host: u8| PeerConfig { public_key: k, addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))], allow_inbound: vec![crate::firewall::Rule::Any] };
+        let config = |k: PublicKey, host: u8| PeerConfig { public_key: k, addresses: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, host))], allow_inbound: vec![crate::firewall::Rule::Any], endpoints: vec![underlay(host)] };
         let mut nodes = [Node::new(ka, vec![config(pb, 2)]), Node::new(kb, vec![config(pa, 1)])];
         let keys = [pa, pb];
         let mut queues: [VecDeque<Vec<u8>>; 2] = Default::default();
@@ -449,7 +454,7 @@ proptest! {
                 }
                 Op::Deliver(i) => {
                     if let Some(d) = queues[i].pop_front() {
-                        if let Ok(out) = nodes[i].handle_datagram(now, wall(now), &d) {
+                        if let Ok(out) = nodes[i].handle_datagram(now, wall(now), underlay(2 - i as u8), &d) {
                             check(&nodes, &keys, &mut queues, &mut last_message_1, out.datagrams, i, now)?;
                         }
                     }
@@ -460,5 +465,26 @@ proptest! {
                 Op::Advance(ms) => now += Duration::from_millis(ms),
             }
         }
+    }
+}
+
+proptest! {
+    /// §13.2: a reply lists the observed endpoint first, never twice, and always fits the
+    /// `endpoints` TLV bound; it survives the codec.
+    #[test]
+    fn registration_reply_endpoints(observed in endpoint(), locals in prop::collection::vec(endpoint(), 0..=crate::MAX_LOCAL_ENDPOINTS), with_observed in any::<bool>(), last_seen in any::<u32>(), key in any::<[u8; 32]>()) {
+        let mut locals = locals;
+        if with_observed {
+            locals.push(observed);
+        }
+        let r = crate::lighthouse::Registration { observed, locals, refreshed: Duration::ZERO };
+        let endpoints = r.endpoints();
+        prop_assert_eq!(endpoints[0], observed);
+        prop_assert_eq!(endpoints.iter().filter(|e| **e == observed).count(), 1);
+        prop_assert!(endpoints.len() <= 1 + crate::MAX_LOCAL_ENDPOINTS);
+        prop_assert!(endpoints.len() <= crate::MAX_ENDPOINTS);
+        let reply = Inner::LighthouseQueryReply { pubkey: key, endpoints, last_seen: Some(last_seen) };
+        let bytes = reply.encode();
+        prop_assert_eq!(Inner::decode(&bytes), Ok(reply));
     }
 }

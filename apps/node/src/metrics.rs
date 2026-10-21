@@ -1,49 +1,10 @@
-//! `GET /metrics` on a loopback listener (ADR 0019, amended 2026-10-20), hand-written
-//! Prometheus text exposition per masu's metric convention. A plain thread with blocking
-//! IO: one local scraper, no HTTP crate (ADR 0029).
+//! The node's `/metrics` exposition (ADR 0019, amended 2026-10-20), served by
+//! `kekkai_io::metrics::serve`, following masu's metric convention.
 
 use std::fmt::Write as _;
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use kekkai_io::State;
-
-/// Serves forever; a failed connection only loses that scrape.
-pub fn serve(listener: TcpListener, state: Arc<Mutex<State>>) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        if let Err(e) = answer(stream, &state) {
-            tracing::debug!(event = "metrics-scrape-failed", error = %e);
-        }
-    }
-}
-
-fn answer(mut stream: TcpStream, state: &Mutex<State>) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut buf = [0u8; 4096];
-    let mut n = 0;
-    while n < buf.len() && !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-        match stream.read(&mut buf[n..])? {
-            0 => break,
-            r => n += r,
-        }
-    }
-    let (status, body) = if buf[..n].starts_with(b"GET /metrics ") {
-        let body = render(&state.lock().expect("no panic while holding the state"));
-        ("200 OK", body)
-    } else {
-        ("404 Not Found", String::new())
-    };
-    write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
+use kekkai_io::metrics::{drops, family, label};
 
 /// The exposition. Series: 1 + 5 per peer + one per drop reason seen (at most 23).
 pub fn render(state: &State) -> String {
@@ -120,33 +81,8 @@ pub fn render(state: &State) -> String {
             s.counters.tx_bytes
         );
     }
-    if !state.drops.is_empty() {
-        family(
-            &mut out,
-            "kekkai_dropped_packets_total",
-            "counter",
-            "Datagrams and tunnel packets dropped, by kekkai-core DropReason.",
-        );
-        for (reason, n) in &state.drops {
-            let _ = writeln!(
-                out,
-                "kekkai_dropped_packets_total{{reason=\"{reason}\"}} {n}"
-            );
-        }
-    }
+    drops(&mut out, state);
     out
-}
-
-fn family(out: &mut String, name: &str, kind: &str, help: &str) {
-    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
-}
-
-/// A label value: `\`, `"` and newline escaped (a configured name may hold them).
-fn label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
 }
 
 #[cfg(test)]
@@ -156,6 +92,10 @@ mod tests {
     use kekkai_core::keys::StaticKey;
     use kekkai_core::node::{Node, PeerConfig};
     use kekkai_core::wire::DropReason;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
     use kekkai_io::PeerInfo;
 
     use super::*;
@@ -165,12 +105,11 @@ mod tests {
         let config = PeerConfig {
             public_key: peer,
             addresses: vec!["10.0.0.2".parse().unwrap()],
-            allow_inbound: vec![],
+            ..PeerConfig::default()
         };
         let node = Node::new(StaticKey::from_bytes([1; 32]).clamped(), vec![config]);
         let info = PeerInfo {
             name: "node-\"b\"".into(),
-            ..PeerInfo::default()
         };
         let mut state = State::new(node, HashMap::from([(peer, info)]));
         state.drops.insert(DropReason::Firewall.as_str(), 77);
@@ -210,7 +149,8 @@ kekkai_dropped_packets_total{{reason=\"firewall\"}} 77
     fn http() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || serve(listener, Arc::new(Mutex::new(state()))));
+        let state = Arc::new(Mutex::new(state()));
+        std::thread::spawn(move || kekkai_io::metrics::serve(listener, &state, render));
         let get = |request: &str| {
             let mut s = TcpStream::connect(addr).unwrap();
             s.write_all(request.as_bytes()).unwrap();

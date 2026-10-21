@@ -3,7 +3,6 @@
 
 use std::io;
 use std::mem::size_of;
-use std::net::{SocketAddr, SocketAddrV6};
 use std::os::fd::FromRawFd;
 
 /// Binds `[::]:port` with `IPV6_V6ONLY` off.
@@ -42,19 +41,4 @@ pub fn bind(port: u16) -> io::Result<tokio::net::UdpSocket> {
     }
     socket.set_nonblocking(true)?;
     tokio::net::UdpSocket::from_std(socket)
-}
-
-/// The form the IPv6 socket sends to: IPv4 addresses become IPv4-mapped.
-pub fn to_socket(addr: SocketAddr) -> SocketAddr {
-    match addr {
-        SocketAddr::V4(v4) => {
-            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
-        }
-        v6 => v6,
-    }
-}
-
-/// The form shown to people: IPv4-mapped addresses become IPv4 again.
-pub fn canonical(addr: SocketAddr) -> SocketAddr {
-    SocketAddr::new(addr.ip().to_canonical(), addr.port())
 }

@@ -7,3 +7,15 @@ license.workspace = true
 [[bin]]
 name = "kekkai-lighthouse"
 path = "src/main.rs"
+
+# Dependency policy: ADR 0029 (the same crates as kekkai-node, ADR 0030).
+[dependencies]
+kekkai-control = { path = "../../crates/kekkai-control" }
+kekkai-core = { path = "../../crates/kekkai-core" }
+kekkai-io = { path = "../../crates/kekkai-io" }
+prost-types.workspace = true
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

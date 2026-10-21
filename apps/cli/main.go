@@ -22,7 +22,9 @@ import (
 const usage = `usage:
   kekkai keygen [FILE]   write a new private key to stdout, or to FILE in mode 0400
   kekkai pubkey          read a private key on stdin, print its public key
-  kekkai status --json   print the node's status (protojson)
+  kekkai status --json [--socket PATH]
+                         print the node's status (protojson); --socket reads another
+                         daemon's control socket, e.g. /run/kekkai-lighthouse/control.sock
   kekkai --version`
 
 // controlSocket is the node's control socket (ADR 0015).
@@ -53,7 +55,9 @@ func run(args []string) error {
 	case args[0] == "pubkey" && len(args) == 1:
 		return pubkey()
 	case args[0] == "status" && len(args) == 2 && args[1] == "--json":
-		return status()
+		return status(controlSocket())
+	case args[0] == "status" && len(args) == 4 && args[1] == "--json" && args[2] == "--socket":
+		return status(args[3])
 	}
 	return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 }
@@ -97,8 +101,8 @@ func pubkey() error {
 	return nil
 }
 
-func status() error {
-	conn, err := grpc.NewClient("unix://"+controlSocket(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+func status(socket string) error {
+	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return err
 	}
