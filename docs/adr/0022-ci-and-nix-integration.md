@@ -15,7 +15,7 @@ The deployment repository consumes the author's applications as pinned flake inp
 
 - **Flake outputs**: `packages.{kekkai-node,kekkai-lighthouse,kekkai-relay,kekkai}`, `nixosModules.{node,lighthouse,relay}`, `darwinModules.node`, `overlays.default`, `devShells.default` (stable Rust, Go, buf, protoc plugins, cargo-fuzz, nushell), `checks`, `formatter` (treefmt: rustfmt, gofmt, nixfmt). flake-parts, crane for Rust, `buildGoModule` for the CLI, same base as kajiba.
 - The modules are **agnostic of any deployment**: no DNS suffix, no host name, no address range. The deployment repository owns a single shared peer attrset and generates, for every host, its node configuration, annai's zone data (0010) and SSH aliases.
-- **Workflow** `.forgejo/workflows/check.yml`: job `linux` on `runs-on: linux` running `nix fmt -- --ci`, `buf lint` and `nix flake check -L`; job `macos` building the Darwin packages and evaluating `darwinModules.node`. No x86_64 job until an x86_64 runner exists.
+- **Workflow** `.forgejo/workflows/check.yml`: job `linux` on `runs-on: linux` running `nix fmt -- --ci`, `buf lint` and a `nix build -L` of every `checks.aarch64-linux` attribute, one nix process per check to bound evaluator memory (a single `nix flake check` evaluating all `nixosTest`s exceeds the runner's memory); job `macos` building the Darwin packages and evaluating `darwinModules.node`. No x86_64 job until an x86_64 runner exists.
 - Hosted on Forgejo, mirrored to GitHub; inputs in the deployment point at Forgejo, GitHub is the recovery path, as for the author's other flakes.
 
 ## Consequences
