@@ -47,10 +47,20 @@ in
       # `command`, not ProgramArguments: nix-darwin wraps it in `wait4path /nix/store`. launchd
       # starts boot jobs before the Nix volume is mounted, and a missing program exits 78
       # (EX_CONFIG) and is never retried, KeepAlive or not.
+      # The key file appears later (sops-nix installs it during boot activation): the job
+      # polls for it rather than letting the node exit on a missing file (v0.6 finding 2).
+      # Not `wait4path`, which re-checks only on mount events, not on file creation. After
+      # 60 s it starts the node anyway, so a key that never comes shows in the log.
       command = lib.escapeShellArgs [
-        (lib.getExe cfg.package)
-        "--config"
-        configPath
+        "/bin/sh"
+        "-c"
+        "for i in $(seq 60); do [ -e ${lib.escapeShellArg cfg.privateKeyFile} ] && break; sleep 1; done; exec ${
+          lib.escapeShellArgs [
+            (lib.getExe cfg.package)
+            "--config"
+            configPath
+          ]
+        }"
       ];
       serviceConfig = {
         Label = label;

@@ -323,7 +323,7 @@
             group = darwinEval.users.groups.kekkai;
           in
           assert
-            command == "${lib.getExe pkgs.kekkai-node} --config /etc/kekkai/node.toml"
+            lib.hasSuffix "exec ${lib.getExe pkgs.kekkai-node} --config /etc/kekkai/node.toml'" command
             && !(daemon ? ProgramArguments);
           assert daemon.KeepAlive && daemon.RunAtLoad;
           # 0026, spec §4.1: a peer change reloads, a restart-only section restarts.
@@ -411,6 +411,23 @@
             rm $MARKERS/kekkai-node.restart
             run ${activation darwinEval}
             [ "$(tail -n 1 $CALLS)" = "kickstart -k system/org.nixos.kekkai-node" ]
+            # v0.6 finding 2: at boot the launchd job waits for the key file instead of starting
+            # the node, which would exit on the missing file; it starts the node once it exists.
+            printf '#!${pkgs.runtimeShell}\necho "$*" > %s\n' $TMPDIR/started > bin/kekkai-node
+            chmod +x bin/kekkai-node
+            sh -c ${
+              lib.escapeShellArg (
+                builtins.replaceStrings
+                  [ (lib.getExe pkgs.kekkai-node) darwinEval.services.kekkai-node.privateKeyFile ]
+                  [ "kekkai-node" "$TMPDIR/key" ]
+                  darwinEval.launchd.daemons.kekkai-node.command
+              )
+            } &
+            sleep 3
+            [ ! -e $TMPDIR/started ]
+            touch $TMPDIR/key
+            wait $!
+            [ "$(cat $TMPDIR/started)" = "--config /etc/kekkai/node.toml" ]
             ${lib.getExe pkgs.kekkai-node} config check --config ${
               darwinEval.environment.etc."kekkai/node.toml".source
             }

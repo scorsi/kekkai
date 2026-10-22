@@ -189,7 +189,7 @@ no `kekkai-node` in the relay's `cargo tree`). What review gate 2 receives is li
 Findings, none blocking, each to become a simulation or `nixosTest` case before a fix (0020):
 
 1. After a restart of the public entry point's node, its path to a NATed peer was once relayed for about 60 s (until the direct retry) instead of direct; not reproduced on a second run.
-2. darwin: at boot the node starts before the deployment installs its key file and exits twice (`No such file or directory`), recovering through `KeepAlive` about 20 s later; the module waits for the store, not for the key.
+2. darwin: at boot the node starts before the deployment installs its key file and exits twice (`No such file or directory`), recovering through `KeepAlive` about 20 s later; the module waits for the store, not for the key. Fixed by `fix(nix): wait for the key file before starting the darwin node`: the launchd job polls for the key file for up to 60 s before starting the node (not `wait4path`, which re-checks only on mount events); verified by `modules-eval`, which runs the generated launchd command and fails before the fix (the node starts while the key is missing). A reboot of the macOS node, with the node starting once without a `No such file or directory` exit, is still to be confirmed.
 3. Log events are emitted when the IO loop polls the core state, up to about 10 s after the fact (all handshakes of a restart carry one timestamp).
 4. After a change of local network on the receiving side, recovery waits for the next packet from that side (TCP retransmission or keepalive): a keepalive to every peer on a local address change would shorten the 8.2 s case.
 
