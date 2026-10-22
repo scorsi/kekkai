@@ -1,3 +1,4 @@
+mod claims;
 mod firewall;
 mod paths;
 mod peer;

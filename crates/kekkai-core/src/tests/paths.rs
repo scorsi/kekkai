@@ -16,7 +16,7 @@ fn ms(ms: u64) -> Duration {
 }
 
 /// An IPv4/UDP packet from overlay `10.0.0.src` to `10.0.0.dst`.
-fn ip_packet(src: u8, dst: u8) -> Vec<u8> {
+pub(super) fn ip_packet(src: u8, dst: u8) -> Vec<u8> {
     let mut p = vec![
         0x45, 0, 0, 32, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, src, 10, 0, 0, dst,
     ];
