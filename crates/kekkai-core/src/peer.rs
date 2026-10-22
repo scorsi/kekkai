@@ -479,7 +479,8 @@ impl Peer {
             .collect()
     }
 
-    fn send_keepalive(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {
+    /// A keepalive on `current`, also outside the timers (§12.4): nothing when it cannot send.
+    pub fn send_keepalive(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {
         self.seal_on_current(ctx, &Inner::Keepalive.encode(), true)
     }
 

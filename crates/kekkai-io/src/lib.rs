@@ -42,7 +42,8 @@ pub struct PeerInfo {
     pub allow_inbound: Vec<String>,
 }
 
-/// What the node collects for `lighthouse_register` (spec §13.1).
+/// What the node collects for `lighthouse_register` (spec §13.1) and its keepalives on a
+/// change of local addresses (§12.4).
 #[derive(Clone, Debug)]
 pub struct Locals {
     pub listen_port: u16,
@@ -58,7 +59,8 @@ pub struct State {
     pub lighthouses: Vec<(PublicKey, String)>,
     /// Configured relays and their endpoint as written, for logs and status.
     pub relays: Vec<(PublicKey, String)>,
-    /// Local endpoints to collect at every tick, when a lighthouse is configured.
+    /// Local endpoints to collect at every tick: always on a node, never on a lighthouse or
+    /// a relay.
     pub locals: Option<Locals>,
     /// `false` on a lighthouse: it logs aggregate counters only, never per-peer events
     /// (ADR 0012, 0019).
@@ -247,7 +249,8 @@ pub async fn run(
             () = tokio::time::sleep(wake) => {
                 let mut guard = lock();
                 if let Some(locals) = guard.locals.clone() {
-                    // §13.1: polled at every tick, compared by the core at keepalive ticks.
+                    // §12.4, §13.1: polled at every tick (at least once a second), so a change
+                    // is acted upon by the tick below; v0 listens to no OS network event.
                     match ifaddrs::local_endpoints(locals.listen_port, &locals.overlay) {
                         Ok(found) => guard.node.set_local_endpoints(found),
                         Err(e) => debug!(event = "local-addresses-failed", error = %e),

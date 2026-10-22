@@ -232,6 +232,8 @@ pub struct Node {
     firewall: Firewall,
     /// This node's local endpoints, as the IO layer last collected them (§13.1).
     locals: Vec<Endpoint>,
+    /// The local endpoints changed since the last tick: keepalives are due (§12.4).
+    locals_changed: bool,
     /// `Some` for a lighthouse (§13.2).
     registry: Option<Registry>,
     /// `Some` for a relay (§14.2).
@@ -273,6 +275,7 @@ impl Node {
             rules: HashMap::new(),
             firewall: Firewall::default(),
             locals: Vec::new(),
+            locals_changed: false,
             registry: None,
             forwarder: None,
         };
@@ -430,11 +433,13 @@ impl Node {
     }
 
     /// This host's local endpoints (§13.1), collected by the IO layer: compared at the next
-    /// lighthouse keepalive tick (§12.5 rule 3) and sent in `lighthouse_register`.
+    /// lighthouse keepalive tick (§12.5 rule 3) and sent in `lighthouse_register`. A change
+    /// makes the next tick send a keepalive on every session that can send (§12.4).
     pub fn set_local_endpoints(&mut self, mut endpoints: Vec<Endpoint>) {
         endpoints.sort();
         endpoints.dedup();
         endpoints.truncate(MAX_LOCAL_ENDPOINTS);
+        self.locals_changed |= endpoints != self.locals;
         self.locals = endpoints;
     }
 
@@ -981,6 +986,14 @@ impl Node {
         let mut sends = Vec::new();
         let mut rediscover_all = false;
         let keys: Vec<PublicKey> = self.peers.keys().copied().collect();
+        if std::mem::take(&mut self.locals_changed) {
+            // §12.4: every party learns the new source address from this keepalive.
+            for key in &keys {
+                let peer = self.peers.get_mut(key).expect("listed");
+                let out = peer.send_keepalive(&mut ctx!(self, now, wall));
+                sends.extend(out.into_iter().map(|d| (*key, None, d)));
+            }
+        }
         for key in &keys {
             let key = *key;
             let peer = self.peers.get_mut(&key).expect("listed");
@@ -1164,7 +1177,13 @@ impl Node {
 
     /// The earliest pending deadline over every peer (§9, §12.5, §13).
     pub fn next_deadline(&self) -> Option<Duration> {
-        let mut next = self.peers.values().filter_map(Peer::next_deadline).min();
+        let changed = self.locals_changed.then_some(Duration::ZERO);
+        let mut next = self
+            .peers
+            .values()
+            .filter_map(Peer::next_deadline)
+            .chain(changed)
+            .min();
         for (key, link) in &self.links {
             let peer = &self.peers[key];
             let discovery = link.discovery.map(|s| s + DIRECT_PATH_TIMEOUT);

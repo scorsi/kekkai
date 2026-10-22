@@ -4,7 +4,9 @@ Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, A
 independent review of v0.4 (2026-10-21: §9 register timer, §12.2 admission, §13.1, §13.2)
 and for v0.5 (2026-10-21: §12.3 relay fallback and direct retry, §12.4, §13.2 query
 budget, §14, §16, §17), the version submitted to review gate 2, and after review gate 2
-(2026-10-22, ADR 0021: §12.2 validity, §12.3, §12.5, §13.1, §13.2, §17), which it passed.
+(2026-10-22, ADR 0021: §12.2 validity, §12.3, §12.5, §13.1, §13.2, §17), which it passed,
+and for v0.6 finding 4 (2026-10-22, ADR 0032 proposed: §12.4 keepalives on a change of local
+addresses, §13.1).
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
@@ -1083,6 +1085,17 @@ Sending on a session follows its path: directly to the peer's endpoint, or wrapp
 §7.7 and §8.2 step 5, a keepalive) follows the path that packet set. Only the `current`
 session sends `data` (§8.2), so the reported path is the path of everything a peer sends.
 
+A node whose own addresses change must not wait for its next packet to be found: when the
+local endpoints the IO layer collects (§13.1) differ, compared as a set, from the previous
+collection, the node sends at once one keepalive on every `current` session that can send
+(peers, lighthouses and relays alike, on each session's path), and each of them moves its
+endpoint by the rule above. The IO layer collects them at every wake-up (§9), lighthouse
+configured or not, so the keepalives leave at most one wake-up after the change. This
+neither registers nor rediscovers: rule 3 of §12.5 keeps its register-tick detection, and a
+peer the keepalive cannot reach (an endpoint on a network the node has left) is found by
+the triggers of §12.5. A keepalive sent while the new address has no route yet is lost;
+the next change of the collection, or the triggers of §12.5, recover.
+
 ### 12.5 Rediscovery triggers
 
 A **rediscovery** of peer `B` is: send `lighthouse_query { B }` to every lighthouse with a
@@ -1153,7 +1166,8 @@ every register tick (§9), `PERSISTENT_KEEPALIVE` after the previous one whateve
 session carried, the node sends `lighthouse_register` carrying its current local
 endpoints: `(address, listen_port)` for every unicast address of the host's interfaces,
 excluding loopback, link-local and the overlay addresses themselves, at most
-`MAX_LOCAL_ENDPOINTS` (the IO layer collects them; the core only compares the list of
+`MAX_LOCAL_ENDPOINTS` (the IO layer collects them at every wake-up, which also drives the
+keepalives of §12.4 on a change; the core only compares the list of
 every register sent, whatever caused it, with the previous register's for trigger 3 of
 §12.5; the list is compared as a set). A node also sends a `lighthouse_register` as soon
 as a handshake with the lighthouse completed and its `current` session can send (for a

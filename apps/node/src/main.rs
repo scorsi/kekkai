@@ -230,7 +230,7 @@ impl Lists {
             self.lighthouses.clone(),
             self.relays.clone(),
         );
-        state.locals = (!self.lighthouses.is_empty()).then(|| Locals {
+        state.locals = Some(Locals {
             listen_port: running.node.listen_port,
             overlay: running.addresses(),
         });

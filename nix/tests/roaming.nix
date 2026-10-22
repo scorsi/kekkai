@@ -14,6 +14,9 @@
 # B's transition too: B answered A's new NAT address, which an authenticated packet from it
 # sets as B's endpoint (spec §12.4); B's status is checked right after. The command's
 # timeout is only a watchdog.
+#
+# Then (v0.6 finding 4) A changes its address on the away LAN: its keepalive on the change of
+# its local endpoints (§12.4) gives B the new NAT port within 5 s, measured on B's clock.
 {
   pkgs,
   nodeModule,
@@ -103,6 +106,34 @@ pkgs.testers.nixosTest {
                 '.path == "PATH_DIRECT" and (.endpoint | startswith("192.0.2.2:"))',
             )
         )
+        out = b.succeed("ping -c 3 -W 2 ${overlay4 "a"}")
+        assert " 0% packet loss" in out, out
+
+    with subtest("A changes its address behind the same NAT: B learns it within 5 s"):
+        # v0.6 finding 4. Masquerade gives A's new address another port, and B keeps sending
+        # to the old one. Just after A's register and a ping from B, nothing of A's own
+        # reaches B for about 15 s (A's "new handshake" timer; its register tick and
+        # persistent keepalive come later), except its keepalive on the change of its local
+        # endpoints (spec §12.4), sent at the next tick after the change.
+        old = peer(b, "${keys.a.public}")["endpoint"]
+        lighthouse.wait_until_succeeds(
+            f"kekkai status --json --socket {LIGHTHOUSE_SOCKET} | jq -e"
+            " '.registrations[] | select(.name == \"a\") | .last_seen | rtrimstr(\"s\") | tonumber < 1'",
+            timeout=60,
+        )
+        b.succeed("ping -c 1 -W 1 ${overlay4 "a"}")
+        start = float(b.succeed("date +%s.%N"))
+        a.succeed(
+            "ip addr del 10.1.0.2/24 dev eth2 && ip addr add 10.1.0.3/24 dev eth2"
+            " && ip route replace default via 10.1.0.1 dev eth2"
+        )
+        b_sees_a = jq_peer(
+            "${keys.a.public}",
+            f'.path == "PATH_DIRECT" and .endpoint != "{old}" and (.endpoint | startswith("192.0.2.2:"))',
+        )
+        out = b.succeed(f"until {b_sees_a} >/dev/null; do sleep 0.1; done; date +%s.%N", timeout=60)
+        took = float(out) - start
+        assert 0 < took < 5, f"B learnt A's new endpoint after {took:.1f} s"
         out = b.succeed("ping -c 3 -W 2 ${overlay4 "a"}")
         assert " 0% packet loss" in out, out
   '';

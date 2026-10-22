@@ -1780,6 +1780,37 @@ fn a_peer_rediscovering_a_moved_node_learns_its_current_endpoint() {
     }
 }
 
+/// v0.6 finding 4: host 1 (public) streams to host 0 (behind a NAT), which sends nothing
+/// back, then host 0 changes network. Its keepalive on the change of its local endpoints
+/// (§12.4) gives host 1 the new endpoint at once, at every phase of host 0's passive
+/// keepalive (10 s), which alone bounded the recovery before.
+#[test]
+fn a_receiving_node_that_changes_network_is_reached_within_a_round_trip() {
+    let period = ms(200);
+    for phase in 0..10 {
+        let mut sim = Sim::discovery(90 + phase, 2);
+        let home = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+        let away = sim.add_nat(Ipv4Addr::new(198, 51, 100, 2), NatKind::Cone);
+        sim.place(0, ep(192, 168, 1, 2, 4802), Some(home));
+        sim.run_until(secs(1));
+        sim.stream(1, 0, period, secs(30 + phase));
+        let ip = |sim: &Sim| sim.status(1, 0).endpoint.map(|e| e.display().ip());
+        assert_eq!(ip(&sim), Some(public_ip(&sim, home)), "phase {phase} s");
+        let moved = sim.now;
+        sim.place(0, ep(192, 168, 7, 2, 4802), Some(away));
+        sim.stream(1, 0, period, moved + secs(30));
+        let first = sim.hosts[0]
+            .received
+            .iter()
+            .find(|(t, p, _)| *t > moved && *p == 1)
+            .map(|(t, ..)| *t - moved)
+            .expect("traffic resumed");
+        // Host 1's next packet after the keepalive arrived (10 ms each way).
+        assert!(first < period + ms(50), "phase {phase} s: after {first:?}");
+        assert_eq!(ip(&sim), Some(public_ip(&sim, away)), "phase {phase} s");
+    }
+}
+
 // v0.5: relay (§12.3, §14).
 
 /// Hosts 0 and 1 behind symmetric NATs, the lighthouse and a relay listing both on the
