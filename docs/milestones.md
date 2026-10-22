@@ -174,6 +174,25 @@ no `kekkai-node` in the relay's `cargo tree`). What review gate 2 receives is li
 - Manual scenarios passed and recorded: reboot of the public entry point, of the VM host and of the hypervisor host; laptop sleep and wake; Wi-Fi change and change of location; restart of `kekkai-node` during an SSH session with recovery under 10 s; a deployment over kekkai that upgrades the binary (detached activation, 0026).
 - A breakage seen on the real network becomes a simulation or `nixosTest` case before it is fixed (0020).
 
+**Status 2026-10-22: passed** on v0.5 (644aad2): three hosts (public entry point, VM host, hypervisor host), all pairs direct. Manual scenarios, worst observed interruption of an SSH session streaming every 200 ms over kekkai:
+
+| Scenario | Result |
+| --- | --- |
+| Restart of `kekkai-node` during an SSH session | 0.24 s (VM host), 1.1 to 3.6 s (hypervisor host, three runs) |
+| Laptop sleep and wake | 8 min sleep: sessions expired, lighthouse and relay sessions back within 1 s of wake |
+| Wi-Fi change and change of location | phone tethering behind a commercial VPN, then back to Wi-Fi: 1.4 s and 8.2 s; direct through the VPN's symmetric NAT (the peer is public) |
+| Reboot of the public entry point | 22 s of public service; paths direct at once, relay session back about 26 s later (persistent keepalive) |
+| Reboot of the VM host | services back after 80 s (VM boot included) |
+| Reboot of the hypervisor host | node ready 27 s after boot (see finding 2) |
+| Deployment over kekkai that restarts `kekkai-node` (detached activation) | 4.1 s and 1.1 s; the activation finished, the client kept its session |
+
+Findings, none blocking, each to become a simulation or `nixosTest` case before a fix (0020):
+
+1. After a restart of the public entry point's node, its path to a NATed peer was once relayed for about 60 s (until the direct retry) instead of direct; not reproduced on a second run.
+2. darwin: at boot the node starts before the deployment installs its key file and exits twice (`No such file or directory`), recovering through `KeepAlive` about 20 s later; the module waits for the store, not for the key.
+3. Log events are emitted when the IO loop polls the core state, up to about 10 s after the fact (all handshakes of a restart carry one timestamp).
+4. After a change of local network on the receiving side, recovery waits for the next packet from that side (TCP retransmission or keepalive): a keepalive to every peer on a local address change would shorten the 8.2 s case.
+
 **Dependencies**: v0.5 and review gate 2; the public VPS; the laptop for the roaming scenarios.
 
 ---
