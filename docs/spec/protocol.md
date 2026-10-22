@@ -916,6 +916,17 @@ replaced (§13.1): the statics and the last known endpoint fill the room the lea
 leave, so a refresh may drop a static or the last known endpoint, never an admitted
 learnt one.
 
+**Validity.** Before admission, a learnt endpoint that no datagram should go to is dropped
+silently and not counted: an unspecified address (`0.0.0.0`, `::`), a multicast address,
+the IPv4 limited broadcast `255.255.255.255`, port 0, or one of this node's own local
+endpoints (the list of §13.1 its IO layer last collected: `(address, listen_port)` for each
+registrable interface address; the node does not know the address its NAT maps it to, so
+that one is not filtered). An IPv4-mapped address is checked as IPv4. The core knows no
+prefix length, so a subnet broadcast address is not recognised. The rest of the reply or
+punch is processed as if the dropped endpoints were absent; a reply whose endpoints are
+all dropped still counts as an answer, not as "unknown" (§12.6). Static endpoints come from
+configuration and are not checked.
+
 ### 12.3 Relay fallback and direct retry (v0.5)
 
 **Fallback.** When a running rediscovery (§12.5) reaches `DIRECT_PATH_TIMEOUT` without a
@@ -1061,6 +1072,13 @@ every register sent, whatever caused it, with the previous register's for trigge
 as a handshake with the lighthouse completed and its `current` session can send (for a
 responder, once that session is confirmed, §8.3); that register arms the register timer.
 
+The lighthouse applies the validity rule of §12.2 to the endpoints of every
+`lighthouse_register` before storing them (§13.2): an unspecified, multicast or
+limited-broadcast address, port 0, or one of the lighthouse's own local endpoints (as its
+IO layer last set them; a lighthouse daemon registers with no one and sets none in v0) is
+removed silently, without a counter, and the remaining endpoints are registered; the
+register itself is not dropped.
+
 Bounds that follow, with no loss: while the session lives, an entry is refreshed at least
 every `PERSISTENT_KEEPALIVE`, well within `LIGHTHOUSE_ENTRY_TIMEOUT`; a change of local
 addresses is acted upon (rule 3 of §12.5) at most `PERSISTENT_KEEPALIVE` after it, plus one
@@ -1115,12 +1133,19 @@ empty is **dropped silently and counted** (`queries_limited`): no reply, no punc
 that follows §12.5 queries each of its peers at most once per running rediscovery, hence
 about once per `DIRECT_PATH_TIMEOUT` per peer, and rules 3 and 4 query every live peer at
 once, one query per peer: with a lighthouse that lists the whole mesh that is at most
-`L − 1`, and the budget never refuses it. A compromised listed node is held to
-`L` punches per `DIRECT_PATH_TIMEOUT` across all targets, and each target resends at most
-one message 1 copy per punch to at most `MAX_ENDPOINTS` endpoints (§13.3): the
-amplification the open point described is now bounded by the configuration, not by the
-compromised node's sending rate. Registers and keepalives are not budgeted; they carry no
-answer beyond a passive keepalive.
+`L − 1`, and the budget never refuses it. A compromised listed node is held, across all
+targets, to a burst of `2 × L` punches (a full bucket), then `L` punches per
+`DIRECT_PATH_TIMEOUT` sustained. What a punch costs its target (§13.3) depends on the
+target's state. With a message 1 in flight towards the querier, the target resends that
+message 1 once to the punch's admitted endpoints, at most `MAX_ENDPOINTS`. Without one,
+the punch starts a new attempt sequence (§7.9): its message 1 goes to the whole candidate
+set, at most 32 endpoints (§12.2, §17), and its scheduled retransmissions (up to
+`MAX_TIMER_HANDSHAKES`, every `REKEY_TIMEOUT` plus jitter) go to that set again. Punches
+do not make the sequence itself faster: a punch that finds the §7.9 pacing closed defers
+its handshake (§12.5), and one that finds a sequence running only adds the resend above.
+The amplification the open point described is now bounded by the configuration and these
+constants, not by the compromised node's sending rate. Registers and keepalives are not
+budgeted; they carry no answer beyond a passive keepalive.
 
 ### 13.3 Punch (node side)
 
@@ -1281,6 +1306,8 @@ Everything the core allocates is bounded by configuration (ADR 0027):
 | Lighthouse query budgets | one bucket per listed key that queried |
 | Relay per-sender state | four counters and one bucket per listed key that sent |
 | Relayed sessions | the relay holds at most the three slots of §8.1 per listed key, nothing per node pair |
+| Relayed-session paths (node) | per peer, one entry per live session (at most the three slots of §8.1) naming the relay its last authenticated packet came through (§12.4) |
+| Last message 1 sent (node) | per peer, one copy of at most `MAX_DATAGRAM` bytes, resent to candidates learnt while it is in flight (§12.2) |
 
 MTU budget for a 1280-byte IP packet (ADR 0009):
 

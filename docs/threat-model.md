@@ -174,9 +174,13 @@ lighthouse can also direct a node's message 1 at an attacker-chosen address, whi
 to that address that the node exists and the size of a message 1, and nothing more. By
 withholding endpoints it can push two nodes onto the relay (§12.3); the relay still sees
 only ciphertext (section 4.3), so this is a denial of the direct path, not of
-confidentiality. It can make a node retransmit its in-flight message 1 to up to
-`MAX_ENDPOINTS` addresses per punch it sends; nothing bounds a compromised lighthouse's
-punch rate but the node's link (accepted, section 5).
+confidentiality. It can make a node resend its in-flight message 1 to up to
+`MAX_ENDPOINTS` addresses per punch it sends or, with none in flight, start an attempt
+sequence whose message 1 and retransmissions go to the whole candidate set, at most 32
+addresses (§12.2, §13.2; one new sequence at a time, paced by §7.9); nothing bounds a
+compromised lighthouse's punch rate but the node's link (accepted, section 5). Endpoints
+that no datagram should go to (unspecified, multicast, broadcast, port 0, the node's own)
+are not admitted (§12.2).
 
 In v1 the lighthouse will distribute CA-signed certificates that each node verifies itself;
 its trust level does not grow (ADR 0007, 0012).
@@ -205,8 +209,11 @@ cannot make a node use it for an unlisted peer (§14.1), nor nest relaying.
 Can: drop, delay, reorder, duplicate (absorbed by the replay window), or refuse to forward:
 denial of service of the relayed path only; the direct retry (§12.3) is unaffected because
 it does not pass through the relay. It can send a node `relay_forwarded` packets at any
-rate on its own session; each costs the node one AEAD open and, for a valid-looking
-payload, one more check, as any listed peer's traffic does (section 4.4).
+rate on its own session; each costs the node one AEAD open for the `R` session, then what
+the payload would cost if it arrived directly (section 4.1: three X25519 for a message 1
+with a valid `mac1`, since the initiator's static key, hence the claimed-sender check, is
+known only after the Noise read; one AEAD open for a `data` packet), plus the
+claimed-sender comparison, as any listed peer's traffic does (section 4.4).
 
 Structural guarantee: the relay's state holds no key material of a node pair, and
 `kekkai-relay` depends on no tunnel decryption code path; checked by a unit test, a
@@ -220,14 +227,24 @@ Can: do everything that node may do. It reaches, on every other node, exactly wh
 node's `allow_inbound` rules for the compromised peer allow, plus ICMP, plus replies to
 flows the victim node initiated towards it (§15). It can send any IP packet whose source
 is one of its own overlay addresses (§11 drops the others, so it cannot spoof another
-peer). It can query the lighthouse about any listed key and learn its endpoints (ADR
-0012 accepts this in v0), within the per-sender query budget, which also bounds the
-punches it makes the lighthouse send (§13.2). It can use the relay towards any listed
-peer, within the per-sender rate limit when one is configured (§14.2); the relay forwards
-at most one packet of the same size per packet it receives, to a listed node only, so it
-gains no amplification, and the receiving node drops what does not authenticate. Without a
-configured limit it can make the relay forward as much as the relay's link carries
-(accepted, section 5).
+peer). It can query the lighthouse about any listed key and learn its endpoints (ADR 0012
+accepts this in v0), within the per-sender query budget, which also bounds the punches it
+makes the lighthouse send: a burst of twice the listed keys, then the listed keys per
+`DIRECT_PATH_TIMEOUT` (§13.2); each punch costs its target at most one resend of an
+in-flight message 1 to 16 addresses, or one new attempt sequence to at most 32 candidates
+with its retransmissions, paced by §7.9. Its registered local endpoints are what the
+lighthouse gives every node that queries it, and each querier's attempt sequence sends
+message 1 to them at every retransmission: the lighthouse and the queriers remove
+unspecified, multicast, broadcast and port-0 entries and the querier's own endpoints
+(§12.2, §13.1), but the compromised node can still name up to `MAX_LOCAL_ENDPOINTS`
+arbitrary unicast addresses, which receive 151-byte message 1 copies they cannot answer;
+that is bounded by the §12.2 admission and the §7.9 pacing, and gains it only the
+queriers' source addresses (it could send as much itself). It can use the relay towards
+any listed peer, within the per-sender rate limit when one is configured (§14.2); the
+relay forwards at most one packet of the same size per packet it receives, to a listed
+node only, so it gains no amplification, and the receiving node drops what does not
+authenticate. Without a configured limit it can make the relay forward as much as the
+relay's link carries (accepted, section 5).
 
 Cannot: read traffic between two other nodes (no shared key); impersonate another node
 (no key); escape its overlay addresses; bypass another node's firewall except through the
@@ -260,7 +277,7 @@ public keys, endpoints and counters, never key material or payloads (§16).
 | A compromised node keeps its access until redeploy | Static configuration is the source of truth | Certificates with expiry and revocation in v1 (ADR 0027) |
 | Any listed node may learn any other listed node's endpoints through the lighthouse | Small closed membership | Mutual-listing or group policy with v1 |
 | The relay's payload size bound (1313 bytes) and per-sender counters are the only quota by default | Only listed keys can relay; abuse means a compromised node | Per-sender rate limit, configurable (§14.2, `max_bytes_per_second`) |
-| A compromised lighthouse can make a node resend its in-flight message 1 to up to 16 addresses per punch, at any rate | The lighthouse is part of the trusted entry point; each copy is a 151-byte datagram the node would send anyway; recipients stay silent | A node-side punch budget, if ever needed |
+| A compromised lighthouse can make a node resend its in-flight message 1 to up to 16 addresses per punch, at any rate, or start an attempt sequence towards up to 32 candidates (one at a time, paced by §7.9) | The lighthouse is part of the trusted entry point; each copy is a 151-byte datagram the node would send anyway; recipients stay silent | A node-side punch budget, if ever needed |
 | Two crossing handshakes may leave one side on the relay and the other direct until the next handshake (§12.3) | Both paths are authenticated and encrypted; the next direct retry settles it within 60 s | None planned |
 | A lighthouse or relay host exposes, to members of its group, where every node is (lighthouse) or which nodes use the relay and how much (relay) | Socket permissions; the group should be empty or hold the operator only on the entry point | None planned |
 | Stray non-SYN TCP segments from a peer reach the kernel and elicit a reset over the tunnel | Stateless TCP check, no connection tracking | Connection tracking later (ADR 0027) |

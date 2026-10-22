@@ -644,6 +644,11 @@ impl Node {
                 }
             }
             Inner::LighthouseRegister { endpoints } if lighthouse_role && direct.is_some() => {
+                // §13.1: invalid entries are removed silently, the register stands.
+                let endpoints = endpoints
+                    .into_iter()
+                    .filter(|e| sendable(e, &self.locals))
+                    .collect();
                 let registry = self.registry.as_mut().expect("lighthouse role");
                 let from = direct.expect("checked");
                 registry.register(key, from, endpoints, now);
@@ -794,18 +799,25 @@ impl Node {
         punch: bool,
         sends: &mut Vec<Send>,
     ) -> Result<(), DropReason> {
+        let unknown = endpoints.is_empty();
+        // §12.2 validity: dropped before admission; an answer with endpoints is not "unknown".
+        let endpoints: Vec<Endpoint> = endpoints
+            .iter()
+            .filter(|e| sendable(e, &self.locals))
+            .copied()
+            .collect();
         // A lighthouse cannot make a node talk to a key it does not list (§13.3).
         let link = self
             .links
             .get_mut(&target)
             .filter(|l| l.role == Role::Peer)
             .ok_or(DropReason::NotAccepted)?;
-        if endpoints.is_empty() {
+        if unknown {
             link.unknown = true;
             return Ok(());
         }
         let before = link.candidates();
-        let all = link.admit(endpoints);
+        let all = link.admit(&endpoints);
         // §12.2: only admitted endpoints are sent to, now as on every retransmission.
         let to: Vec<Endpoint> = endpoints
             .iter()
@@ -1163,6 +1175,15 @@ fn ip_addresses(packet: &[u8]) -> Option<(IpAddr, IpAddr)> {
         }
         _ => None,
     }
+}
+
+/// §12.2 validity: an endpoint a datagram may go to, and not one of `own`.
+fn sendable(endpoint: &Endpoint, own: &[Endpoint]) -> bool {
+    let address = endpoint.address.to_canonical();
+    endpoint.port != 0
+        && !address.is_unspecified()
+        && is_unicast(address)
+        && !own.contains(endpoint)
 }
 
 /// §11: multicast and broadcast destinations are dropped on both sides.
