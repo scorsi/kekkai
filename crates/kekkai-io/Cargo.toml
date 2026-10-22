@@ -15,6 +15,6 @@ tun = []
 kekkai-core = { path = "../kekkai-core" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "signal"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 tracing = "0.1"

@@ -831,8 +831,12 @@ type PeerStatus struct {
 	// puts in its packets to this node; unset without one. Unchanged by a reload that keeps
 	// the peer (spec section 4.1).
 	ReceiverIndex *uint32 `protobuf:"varint,16,opt,name=receiver_index,json=receiverIndex,proto3,oneof" json:"receiver_index,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// When the `current` session, the one `receiver_index` names, was created (spec section
+	// 8.1): its age drives the rekeys (section 8.6). Unset without one. `last_handshake` can
+	// be a newer, not yet confirmed session.
+	SessionCreated *timestamppb.Timestamp `protobuf:"bytes,17,opt,name=session_created,json=sessionCreated,proto3" json:"session_created,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PeerStatus) Reset() {
@@ -977,6 +981,13 @@ func (x *PeerStatus) GetReceiverIndex() uint32 {
 	return 0
 }
 
+func (x *PeerStatus) GetSessionCreated() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SessionCreated
+	}
+	return nil
+}
+
 var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
@@ -1034,7 +1045,7 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\fwire_version\x18\x04 \x01(\rR\vwireVersion\x121\n" +
 	"\x06uptime\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x06uptime\x12\x1f\n" +
 	"\vlisten_port\x18\x06 \x01(\rR\n" +
-	"listenPort\"\x9e\x05\n" +
+	"listenPort\"\xe3\x05\n" +
 	"\n" +
 	"PeerStatus\x12\x1d\n" +
 	"\n" +
@@ -1056,7 +1067,8 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\rallow_inbound\x18\r \x03(\tR\fallowInbound\x12%\n" +
 	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops\x12\x12\n" +
 	"\x04name\x18\x0f \x01(\tR\x04name\x12*\n" +
-	"\x0ereceiver_index\x18\x10 \x01(\rH\x00R\rreceiverIndex\x88\x01\x01B\x11\n" +
+	"\x0ereceiver_index\x18\x10 \x01(\rH\x00R\rreceiverIndex\x88\x01\x01\x12C\n" +
+	"\x0fsession_created\x18\x11 \x01(\v2\x1a.google.protobuf.TimestampR\x0esessionCreatedB\x11\n" +
 	"\x0f_receiver_index*\x81\x01\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
@@ -1126,13 +1138,14 @@ var file_kekkai_control_v1_control_proto_depIdxs = []int32{
 	1,  // 15: kekkai.control.v1.PeerStatus.path:type_name -> kekkai.control.v1.Path
 	12, // 16: kekkai.control.v1.PeerStatus.last_handshake:type_name -> google.protobuf.Timestamp
 	2,  // 17: kekkai.control.v1.PeerStatus.last_direct_path_failure:type_name -> kekkai.control.v1.DirectPathFailure
-	3,  // 18: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
-	4,  // 19: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
-	19, // [19:20] is the sub-list for method output_type
-	18, // [18:19] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	12, // 18: kekkai.control.v1.PeerStatus.session_created:type_name -> google.protobuf.Timestamp
+	3,  // 19: kekkai.control.v1.ControlService.GetStatus:input_type -> kekkai.control.v1.GetStatusRequest
+	4,  // 20: kekkai.control.v1.ControlService.GetStatus:output_type -> kekkai.control.v1.GetStatusResponse
+	20, // [20:21] is the sub-list for method output_type
+	19, // [19:20] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_kekkai_control_v1_control_proto_init() }

@@ -21,7 +21,7 @@ use kekkai_core::node::Node;
 use kekkai_io::config::{NamedKey, RELAY_DEFAULT_PATH, RelayConfig};
 use kekkai_io::metrics::{drops, family};
 use kekkai_io::{NoTunnel, PeerInfo, State, clock, systemd, udp};
-use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::signal::unix::Signal;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
@@ -79,7 +79,7 @@ fn load(path: &Path) -> Result<RelayConfig, String> {
 }
 
 fn run(path: &Path) -> Result<(), String> {
-    let config = load(path)?;
+    let (runtime, hangup, config) = kekkai_io::start(|| load(path))?;
     let filter = std::env::var("RUST_LOG")
         .ok()
         .and_then(|f| f.parse::<Targets>().ok())
@@ -87,16 +87,11 @@ fn run(path: &Path) -> Result<(), String> {
     tracing_subscriber::registry()
         .with(log::JsonLayer.with_filter(filter))
         .init();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    runtime.block_on(serve(path, config))
+    runtime.block_on(serve(path, config, hangup))
 }
 
-async fn serve(path: &Path, config: RelayConfig) -> Result<(), String> {
-    // ADR 0026: first, so that a SIGHUP during start-up is a pending reload, not an exit.
-    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
+/// `hangup` is the `SIGHUP` handler [`kekkai_io::start`] installed (ADR 0026).
+async fn serve(path: &Path, config: RelayConfig, hangup: Signal) -> Result<(), String> {
     let key = kekkai_io::load_key(&config.service.private_key_file).map_err(|e| e.to_string())?;
     let peers = peers(&config)?;
     let limit = config.service.max_bytes_per_second;

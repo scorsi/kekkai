@@ -97,6 +97,7 @@ impl Control {
                     allow_inbound: info.allow_inbound.clone(),
                     firewall_drops: status.counters.firewall_drops,
                     receiver_index: status.current_index,
+                    session_created: status.current_created.map(at),
                 })
             })
             .collect();

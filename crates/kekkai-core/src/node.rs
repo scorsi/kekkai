@@ -119,6 +119,8 @@ pub struct PeerStatus {
     /// The `current` session's local index (§7.5): what the peer puts in `receiver_index`.
     /// Kept across a reload that keeps the peer (§4).
     pub current_index: Option<u32>,
+    /// When the `current` session was created (§8.1): its age drives the rekeys (§8.6).
+    pub current_created: Option<Duration>,
 }
 
 /// §12 state of one configured party, beside its [`Peer`].
@@ -450,6 +452,7 @@ impl Node {
             last_direct_path_failure: link.failure,
             counters: p.counters,
             current_index: p.current().map(|s| s.local_index),
+            current_created: p.current().map(|s| s.created),
         })
     }
 

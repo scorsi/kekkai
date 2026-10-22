@@ -30,4 +30,4 @@ Owner decision: `PeerStatus` carries `name`, the name this node's own configurat
 
 ## Implementation note — 2026-10-22: receiver index in status (v0.6)
 
-`PeerStatus.receiver_index` (field 16, `optional uint32`, unset without a `current` session) is the local index of the peer's `current` session (spec §7.5); the reload test of 0026 compares it before and after a reload. Additive (0024), shown by `status --json` without CLI change.
+`PeerStatus.receiver_index` (field 16, `optional uint32`, unset without a `current` session) is the local index of the peer's `current` session (spec §7.5); the reload test of 0026 compares it before and after a reload. Additive (0024), shown by `status --json` without CLI change. `PeerStatus.session_created` (field 17, v0.7) is when that session was created: the reload test proves with it that the index it compares belongs to a young confirmed session (`last_handshake` can be a newer session not yet confirmed); additive too.

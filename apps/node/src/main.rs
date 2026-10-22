@@ -86,7 +86,7 @@ fn load(path: &Path) -> Result<NodeConfig, String> {
 }
 
 fn run(path: &Path) -> Result<(), String> {
-    let config = load(path)?;
+    let (runtime, hangup, config) = kekkai_io::start(|| load(path))?;
     // ADR 0016: RUST_LOG, when set, overrides [log] level.
     let filter = std::env::var("RUST_LOG")
         .ok()
@@ -95,17 +95,15 @@ fn run(path: &Path) -> Result<(), String> {
     tracing_subscriber::registry()
         .with(log::JsonLayer.with_filter(filter))
         .init();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?;
-    runtime.block_on(serve(path, config))
+    runtime.block_on(serve(path, config, hangup))
 }
 
-async fn serve(path: &Path, config: NodeConfig) -> Result<(), String> {
-    // ADR 0026, spec §4.1: first, so that a SIGHUP during start-up (DNS, interface) is a
-    // pending reload, applied once ready, and never the default action (exit).
-    let hangup = hangup()?;
+/// `hangup` is the `SIGHUP` handler [`kekkai_io::start`] installed (ADR 0026).
+async fn serve(
+    path: &Path,
+    config: NodeConfig,
+    hangup: tokio::signal::unix::Signal,
+) -> Result<(), String> {
     let key = kekkai_io::load_key(&config.node.private_key_file).map_err(|e| e.to_string())?;
     let lists = Lists::new(&config).await?;
     let mut node = Node::new(key, Vec::new());
@@ -262,12 +260,6 @@ struct Reload<'a> {
     routes: Vec<IpAddr>,
     running: NodeConfig,
     lists: Lists,
-}
-
-/// The `SIGHUP` handler (ADR 0026); signals received from here on are kept until read.
-fn hangup() -> Result<tokio::signal::unix::Signal, String> {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|e| format!("SIGHUP handler: {e}"))
 }
 
 /// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver; on `SIGHUP`,
@@ -607,28 +599,6 @@ mod tests {
         assert_eq!(names(&state), ["b"], "effective configuration refused");
         assert_eq!(r.routes, ["10.0.0.2".parse::<IpAddr>().unwrap()]);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// R6, ADR 0026: a SIGHUP received after the handler is installed but while start-up is
-    /// still running (here a delay) does not kill the process and is read once ready.
-    #[test]
-    fn a_hangup_during_start_up_is_a_pending_reload() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let mut hangup = hangup().unwrap();
-            let pid = std::process::id().to_string();
-            let sent = std::process::Command::new("/bin/sh")
-                .args(["-c", &format!("kill -HUP {pid}")])
-                .status()
-                .unwrap();
-            assert!(sent.success());
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let pending = tokio::time::timeout(Duration::from_secs(5), hangup.recv());
-            assert!(pending.await.is_ok(), "the reload was lost");
-        });
     }
 
     /// R4, spec §4.1: the route transaction against a model kernel with injected refusals.

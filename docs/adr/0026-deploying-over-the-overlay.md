@@ -68,5 +68,6 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
   `route-rollback-failed{route,err}` (`error`).
 - Status (0015, additive per 0024): `PeerStatus.receiver_index` (16, optional), the local
   index of the `current` session; a reload that keeps the peer keeps it.
+  `PeerStatus.session_created` (17) dates that session, for the reload test.
 - `nixosTest` `reload` switches specialisations with `switch-to-configuration test`, so
   the module triggers are tested with the daemon.

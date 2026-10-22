@@ -153,4 +153,8 @@ message PeerStatus {
   // puts in its packets to this node; unset without one. Unchanged by a reload that keeps
   // the peer (spec section 4.1).
   optional uint32 receiver_index = 16;
+  // When the `current` session, the one `receiver_index` names, was created (spec section
+  // 8.1): its age drives the rekeys (section 8.6). Unset without one. `last_handshake` can
+  // be a newer, not yet confirmed session.
+  google.protobuf.Timestamp session_created = 17;
 }

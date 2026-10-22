@@ -158,14 +158,14 @@ pkgs.testers.nixosTest {
     ''
       ${common.script}
 
-      import time
       from datetime import datetime
 
       B = "${keys.b.public}"
       C = "${keys.stranger.public}"
       # Spec §3: the initiator rekeys a session this old (§8.6), the responder later. A
-      # receiver index is compared across at most WINDOW seconds, on a session young enough
-      # that no rekey can replace it meanwhile (spec §4.1: a later rekey is not the reload).
+      # receiver index is compared across at most WINDOW seconds, snapshot and final queries
+      # included, on a `current` session young enough that no rekey can replace it meanwhile
+      # (spec §4.1: a later rekey is not the reload).
       REKEY_AFTER_TIME = 120
       WINDOW = 60
       SYSTEM = {
@@ -204,29 +204,38 @@ pkgs.testers.nixosTest {
           )
 
 
+      def clock(m):
+          """The VM's wall clock, the one status timestamps are in."""
+          return float(m.succeed("date +%s.%N"))
+
+
       def fresh_indices(m, addresses):
           """The receiver index of each key of `addresses` (key: overlay address) and the end
-          of the comparison window, once every session is younger than REKEY_AFTER_TIME -
-          WINDOW; pings the addresses until rekeys make them so."""
+          of the comparison window, once each `current` session, the confirmed one the index
+          names (`session_created`; `last_handshake` can be a newer unconfirmed `next`), is
+          younger than REKEY_AFTER_TIME - WINDOW. Pings (traffic both ways: a pending session
+          is confirmed, an old one rekeyed) until it is so. The peer's session of the same
+          handshake is younger (it initiated) or the responder's, rekeyed later (§8.6), so
+          neither side rekeys by age before the window ends."""
           for _ in range(40):
               for ip in addresses.values():
                   m.succeed(f"ping -c 3 -i 1 -W 2 {ip} >/dev/null")
-              now = float(m.succeed("date +%s.%N"))
+              start = clock(m)
               peers = {k: peer(m, k) for k in addresses}
-              made = {
-                  k: datetime.fromisoformat(p["last_handshake"].replace("Z", "+00:00"))
-                  for k, p in peers.items()
-              }
-              if all(now - t.timestamp() < REKEY_AFTER_TIME - WINDOW for t in made.values()):
+              created = [p.get("session_created") for p in peers.values()]
+              # Python >= 3.11 (the driver's) reads protojson's 9 fractional digits.
+              ages = [start - datetime.fromisoformat(t).timestamp() for t in created if t]
+              if len(ages) == len(created) and all(a < REKEY_AFTER_TIME - WINDOW for a in ages):
                   indices = {k: p["receiver_index"] for k, p in peers.items()}
-                  return indices, time.monotonic() + WINDOW
+                  return indices, start + WINDOW
           raise Exception(f"no fresh sessions: {status(m)}")
 
 
       def same_indices(m, kept):
           indices, deadline = kept
-          assert time.monotonic() < deadline, f"over {WINDOW} s: a rekey may have run"
           now = {k: peer(m, k)["receiver_index"] for k in indices}
+          # After the queries: the whole comparison ran within the window.
+          assert clock(m) < deadline, f"over {WINDOW} s: a rekey may have run"
           assert now == indices, (indices, status(m))
 
 

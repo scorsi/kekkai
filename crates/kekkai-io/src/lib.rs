@@ -372,17 +372,71 @@ pub fn load_key(path: &Path) -> std::io::Result<StaticKey> {
     })
 }
 
+/// ADR 0026, spec §4.1: a daemon's runtime and its `SIGHUP` handler, installed before
+/// `load` reads the configuration, so that a `SIGHUP` from the process start on is one
+/// pending reload, read from the returned stream once the daemon is ready, and never the
+/// default action (exit).
+pub fn start<T>(
+    load: impl FnOnce() -> Result<T, String>,
+) -> Result<(tokio::runtime::Runtime, tokio::signal::unix::Signal, T), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let hangup = {
+        let _runtime = runtime.enter();
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(|e| format!("SIGHUP handler: {e}"))?
+    };
+    let value = load()?;
+    Ok((runtime, hangup, value))
+}
+
 #[cfg(test)]
 mod loop_tests;
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use kekkai_core::keys::StaticKey;
     use kekkai_core::node::Node;
 
     use super::{PeerInfo, State};
+
+    /// R6, spec §4.1: a `SIGHUP` while the configuration is loading (here delayed) is one
+    /// reload once ready: the stream yields once, not zero times (lost, or the process
+    /// killed by the default action) and not twice. Runs in a child process of its own:
+    /// an installed handler outlives its stream, so in the test process the default action
+    /// could not show, and other tests' signals would be counted.
+    #[test]
+    fn a_hangup_while_loading_is_one_reload_once_ready() {
+        const NAME: &str = "tests::a_hangup_while_loading_is_one_reload_once_ready";
+        if std::env::var_os("KEKKAI_HANGUP_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+                .env("KEKKAI_HANGUP_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "child: {status}");
+            return;
+        }
+        let (runtime, mut hangup, ()) = super::start(|| {
+            // SAFETY: kill(2) on our own pid, no memory involved.
+            assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGHUP) }, 0);
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(())
+        })
+        .unwrap();
+        // Ready: every daemon runs one reload per item of the stream.
+        runtime.block_on(async {
+            let first = tokio::time::timeout(Duration::from_secs(5), hangup.recv()).await;
+            assert_eq!(first, Ok(Some(())), "the start-up SIGHUP was lost");
+            let second = tokio::time::timeout(Duration::from_millis(500), hangup.recv()).await;
+            assert!(second.is_err(), "the start-up SIGHUP was read twice");
+        });
+    }
 
     /// Spec §4.1 on a lighthouse: keys added, removed and renamed.
     #[test]
