@@ -201,12 +201,27 @@ Findings, none blocking, each to become a simulation or `nixosTest` case before 
 
 **Objective**: a change of the configured lists applies without restarting the daemons, so the most frequent deployment over kekkai does not cut its own session.
 
-**Deliverables**: `SIGHUP` reload of the configured lists in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary and the restart-only settings (0026; spec §4.1: a node's lighthouse and relay lists reload too, every other section restarts); `nixosTest` `reload`. Status 2026-10-22: implemented (1ed92e7), review findings closed (29b4297), re-review and `nixosTest` reruns pending.
+**Deliverables**: `SIGHUP` reload of the configured lists in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary and the restart-only settings (0026; spec §4.1: a node's lighthouse and relay lists reload too, every other section restarts); `nixosTest` `reload`. Status 2026-10-22: implemented (1ed92e7), review findings closed (29b4297, 43f0b6a), start-up guarantee narrowed to after runtime creation (da8333f).
 
 **Acceptance criteria**
 
 - `nixosTest reload`: adding a peer in the configuration and reloading makes it reachable without restarting; removing one makes its handshakes refused; an unchanged peer's session keeps its receiver index across the reload; an invalid configuration changes nothing.
 - Manual scenario passed and recorded: a deployment over kekkai that changes the peer list.
+
+**Status 2026-10-22: passed** on 43f0b6a. The 12 aarch64-linux `nixosTest`s and checks are green on the builder, `reload` included; the independent review failed on 1ed92e7 and 29b4297 and passed on 43f0b6a. Known residual: a `SIGHUP` received before the runtime exists is not covered (da8333f).
+
+Deployment: three hosts (a Linux node behind NAT that is also the deployment target, the public entry point running node, lighthouse and relay, the macOS node) moved from v0.5 to v0.7. The first switch restarted every daemon, as documented when `ExecReload` is added: the Linux node and the public entry point's three daemons came back with no further restart, the macOS node was restarted by its activation. After it, every pair is direct and the lighthouse and relay sessions are connected.
+
+Manual scenario: two deployments over kekkai (SSH through the overlay, detached activation, 0026) on the Linux node, changing only one peer's `allow_inbound` (adding an unused TCP port, then removing it):
+
+| Step | Result |
+| --- | --- |
+| Add the port | activation reloads `kekkai-node.service` (systemd "Reloading" / "Reloaded"); event `reloaded` with 2 peers, 0 added, 0 removed, 1 changed; same main PID, 0 restarts, unchanged active-enter timestamp; the deployed configuration carries the port; the deployment's own session was not interrupted |
+| Remove the port (revert) | same: `reloaded` with 1 changed, same main PID, 0 restarts, configuration back to the original store path, no failed unit |
+
+No session was created at the reload instant: handshakes with the changed peer and with the public entry point kept their normal 2-minute rekey cadence across both reloads. The receiver index itself changes at every rekey, so on the real network "an unchanged peer keeps its receiver index" was checked as "no new session at the reload instant"; the index comparison proper is the `nixosTest reload`'s.
+
+Not exercised on the real network, covered only by `nixosTest reload` or not at all: adding or removing a whole peer; reloading a node's lighthouse and relay lists; the lighthouse and relay reload; the macOS node's reload path (`SIGHUP` through launchd on a list-only change; only its first-switch restart was seen); an invalid configuration on a deployed host.
 
 **Dependencies**: v0.6.
 
