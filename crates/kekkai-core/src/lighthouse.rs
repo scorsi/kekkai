@@ -99,6 +99,12 @@ impl Registry {
             .filter(|r| now < r.refreshed + LIGHTHOUSE_ENTRY_TIMEOUT)
     }
 
+    /// A reload removed `key` from the peer list (spec §4.1).
+    pub(crate) fn forget(&mut self, key: &PublicKey) {
+        self.entries.remove(key);
+        self.budgets.remove(key);
+    }
+
     /// Drops expired entries and those of keys no longer listed.
     pub(crate) fn expire(&mut self, now: Duration, listed: impl Fn(&PublicKey) -> bool) {
         self.entries

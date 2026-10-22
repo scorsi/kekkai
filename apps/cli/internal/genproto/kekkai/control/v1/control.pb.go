@@ -826,7 +826,11 @@ type PeerStatus struct {
 	FirewallDrops uint64 `protobuf:"varint,14,opt,name=firewall_drops,json=firewallDrops,proto3" json:"firewall_drops,omitempty"`
 	// The name this node's configuration gives the peer; a local label, never sent over the
 	// overlay (identity is the public key until v1 certificates, 0027).
-	Name          string `protobuf:"bytes,15,opt,name=name,proto3" json:"name,omitempty"`
+	Name string `protobuf:"bytes,15,opt,name=name,proto3" json:"name,omitempty"`
+	// Local index of the `current` session (spec section 7.5), the `receiver_index` the peer
+	// puts in its packets to this node; unset without one. Unchanged by a reload that keeps
+	// the peer (spec section 4.1).
+	ReceiverIndex *uint32 `protobuf:"varint,16,opt,name=receiver_index,json=receiverIndex,proto3,oneof" json:"receiver_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -966,6 +970,13 @@ func (x *PeerStatus) GetName() string {
 	return ""
 }
 
+func (x *PeerStatus) GetReceiverIndex() uint32 {
+	if x != nil && x.ReceiverIndex != nil {
+		return *x.ReceiverIndex
+	}
+	return 0
+}
+
 var File_kekkai_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_kekkai_control_v1_control_proto_rawDesc = "" +
@@ -1023,7 +1034,7 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\fwire_version\x18\x04 \x01(\rR\vwireVersion\x121\n" +
 	"\x06uptime\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x06uptime\x12\x1f\n" +
 	"\vlisten_port\x18\x06 \x01(\rR\n" +
-	"listenPort\"\xdf\x04\n" +
+	"listenPort\"\x9e\x05\n" +
 	"\n" +
 	"PeerStatus\x12\x1d\n" +
 	"\n" +
@@ -1044,7 +1055,9 @@ const file_kekkai_control_v1_control_proto_rawDesc = "" +
 	"\x18last_direct_path_failure\x18\f \x01(\x0e2$.kekkai.control.v1.DirectPathFailureR\x15lastDirectPathFailure\x12#\n" +
 	"\rallow_inbound\x18\r \x03(\tR\fallowInbound\x12%\n" +
 	"\x0efirewall_drops\x18\x0e \x01(\x04R\rfirewallDrops\x12\x12\n" +
-	"\x04name\x18\x0f \x01(\tR\x04name*\x81\x01\n" +
+	"\x04name\x18\x0f \x01(\tR\x04name\x12*\n" +
+	"\x0ereceiver_index\x18\x10 \x01(\rH\x00R\rreceiverIndex\x88\x01\x01B\x11\n" +
+	"\x0f_receiver_index*\x81\x01\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17SESSION_STATE_CONNECTED\x10\x01\x12\x1d\n" +
@@ -1127,6 +1140,7 @@ func file_kekkai_control_v1_control_proto_init() {
 	if File_kekkai_control_v1_control_proto != nil {
 		return
 	}
+	file_kekkai_control_v1_control_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

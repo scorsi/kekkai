@@ -26,3 +26,29 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
 
 - The real-network milestone includes a deployment over kekkai that changes the peer list and one that upgrades the binary.
 - Reload is the first mutating operation in the daemon's life; it needs its own `nixosTest` (peer added and reachable, peer removed and refused, unchanged peer's session untouched).
+
+## Implementation notes — 2026-10-22 (v0.6)
+
+- Semantics are specified in spec §4.1: the lists (node: peers, lighthouses, relays;
+  lighthouse and relay: peers) reload as a diff by public key; every other section needs a
+  restart and a reload only warns about it (`reload-restart-required`). Lighthouse and relay
+  endpoints of a node reload in place like a peer's static endpoints, because the core
+  already replaces static candidates without touching sessions (the DNS re-resolution of
+  0016 does the same).
+- This replaces the v0 line of 0016 ("a change restarts the service at switch") for the
+  lists only. Modules: `reloadTriggers` is the generated file, `restartTriggers` the binary
+  and a hash of the restart-only sections (`restartFingerprint`), so a file change that
+  touches both restarts. `ExecReload` is `kill -HUP $MAINPID`; the daemon frames the reload
+  with `RELOADING=1` / `READY=1`. The reload is asynchronous to `systemctl reload`: wait for
+  the `reloaded` (or `reload-failed`) log event, not for the command.
+- macOS: `postActivation` keeps two markers, `/var/db/kekkai-node.restart` (the hash of the
+  restart-only sections) and `/var/db/kekkai-node.config` (the file). A changed hash runs
+  `launchctl kickstart -k`; otherwise a changed file runs `launchctl kill SIGHUP` (launchctl
+  takes the signal's full name). A binary change still changes the plist and restarts.
+- Log events (0019 schema): `reloaded{peers,added,removed,changed}` (`info`),
+  `reload-failed{err}` (`error`), `reload-restart-required{sections}` (`warn`),
+  `route-delete-failed{route,err}` (`warn`).
+- Status (0015, additive per 0024): `PeerStatus.receiver_index` (16, optional), the local
+  index of the `current` session; a reload that keeps the peer keeps it.
+- `nixosTest` `reload` switches specialisations with `switch-to-configuration test`, so
+  the module triggers are tested with the daemon.

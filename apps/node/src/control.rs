@@ -19,8 +19,6 @@ pub struct Control {
     state: Option<Arc<Mutex<State>>>,
     started: Duration,
     node: NodeStatus,
-    /// Peers in configuration order, with their addresses and rules as written.
-    peers: Vec<(PublicKey, Vec<String>, Vec<String>)>,
 }
 
 impl Control {
@@ -36,14 +34,6 @@ impl Control {
                 uptime: None,
                 listen_port: config.node.listen_port.into(),
             },
-            peers: config
-                .peers
-                .iter()
-                .map(|p| {
-                    let key = p.key().expect("validated");
-                    (key, p.addresses.clone(), p.allow_inbound.clone())
-                })
-                .collect(),
         }
     }
 
@@ -67,20 +57,18 @@ impl Control {
         let mut node = self.node.clone();
         node.uptime = prost_types::Duration::try_from(now.saturating_sub(self.started)).ok();
         let at = |t: Duration| -> prost_types::Timestamp { (wall - now.saturating_sub(t)).into() };
-        let peers = self
-            .peers
-            .iter()
-            .map(|(key, addresses, allow_inbound)| {
-                let status = state
-                    .node
-                    .status(key)
-                    .expect("configured peers are in the node");
-                let info = state.peers.get(key);
-                PeerStatus {
+        // By name: the order of the module's file (an attribute set), whatever reloads did.
+        let mut configured: Vec<_> = state.peers.iter().collect();
+        configured.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        let peers = configured
+            .into_iter()
+            .filter_map(|(key, info)| {
+                let status = state.node.status(key)?;
+                Some(PeerStatus {
                     public_key: public_key_to_text(key),
                     // Same source as the metrics `peer` label (ADR 0019).
-                    name: info.map(|p| p.name.clone()).unwrap_or_default(),
-                    addresses: addresses.clone(),
+                    name: info.name.clone(),
+                    addresses: info.addresses.clone(),
                     // §12.1: the current session's path.
                     path: match status.path {
                         Some(node::Path::Direct(_)) => Path::Direct,
@@ -106,9 +94,10 @@ impl Control {
                     rx_packets: status.counters.rx_packets,
                     tx_packets: status.counters.tx_packets,
                     replay_rejections: status.counters.replay_rejections,
-                    allow_inbound: allow_inbound.clone(),
+                    allow_inbound: info.allow_inbound.clone(),
                     firewall_drops: status.counters.firewall_drops,
-                }
+                    receiver_index: status.current_index,
+                })
             })
             .collect();
         // Lighthouses and relays share the status shape (ADR 0015, 0030).
@@ -210,6 +199,7 @@ addresses = ["10.0.0.3/32"]
                 let key = p.key().unwrap();
                 let info = PeerInfo {
                     name: p.name.clone(),
+                    ..PeerInfo::default()
                 };
                 let config = PeerConfig {
                     public_key: key,

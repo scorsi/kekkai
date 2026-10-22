@@ -4,6 +4,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
@@ -50,11 +51,17 @@ in
         "kekkai-node.socket"
       ];
       requires = [ "kekkai-node.socket" ];
-      # v0: a configuration change restarts the service at switch (0016).
-      restartTriggers = [ configFile ];
+      # 0026, spec §4.1: a change of the peer, lighthouse or relay list reloads (SIGHUP, the
+      # daemon re-reads the stable path); the binary or any other section restarts.
+      reloadTriggers = [ configFile ];
+      restartTriggers = [
+        cfg.package
+        cfg.restartFingerprint
+      ];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${lib.getExe cfg.package} --config ${configPath}";
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         User = "kekkai";
         Group = "kekkai";

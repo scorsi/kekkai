@@ -113,6 +113,7 @@ mod tests {
         let node = Node::new(StaticKey::from_bytes([1; 32]).clamped(), vec![config]);
         let info = PeerInfo {
             name: "node-\"b\"".into(),
+            ..PeerInfo::default()
         };
         let mut state = State::new(node, HashMap::from([(peer, info)]));
         state.drops.insert(DropReason::Firewall.as_str(), 77);

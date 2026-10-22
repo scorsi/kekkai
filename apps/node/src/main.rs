@@ -19,7 +19,7 @@ use kekkai_core::node::{LighthouseConfig, Node, PeerConfig, PeerStatus};
 use kekkai_core::{KEEPALIVE_FAILURES_BEFORE_REREGISTER, PERSISTENT_KEEPALIVE};
 use kekkai_io::config::{DEFAULT_PATH, NodeConfig};
 use kekkai_io::{Locals, PeerInfo, State, clock, systemd, udp};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
@@ -99,81 +99,24 @@ fn run(path: &Path) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(serve(config))
+    runtime.block_on(serve(path, config))
 }
 
-async fn serve(config: NodeConfig) -> Result<(), String> {
+async fn serve(path: &Path, config: NodeConfig) -> Result<(), String> {
     let key = kekkai_io::load_key(&config.node.private_key_file).map_err(|e| e.to_string())?;
-    let mut peers = HashMap::new();
-    let mut peer_configs = Vec::new();
-    let mut routes = Vec::new();
-    let mut named = Vec::new();
-    let start = clock::monotonic();
-    for peer in &config.peers {
-        let public_key = peer.key()?;
-        named.extend(Named::new(public_key, &peer.name, &peer.endpoints, start));
-        let addresses = peer.host_addresses();
-        let mut endpoints = Vec::new();
-        for endpoint in &peer.endpoints {
-            endpoints.extend(resolve(&peer.name, endpoint).await);
-        }
-        routes.extend(&addresses);
-        let name = peer.name.clone();
-        peers.insert(public_key, PeerInfo { name });
-        peer_configs.push(PeerConfig {
-            public_key,
-            addresses,
-            allow_inbound: peer.rules()?,
-            endpoints,
-        });
-    }
-    let mut node = Node::new(key, peer_configs.clone());
+    let lists = Lists::new(&config).await?;
+    let mut node = Node::new(key, Vec::new());
     node.set_udp_flows_max(config.firewall.udp_flows_max);
-    let mut lighthouses = Vec::new();
-    let mut lighthouse_configs = Vec::new();
-    for l in &config.lighthouses {
-        let public_key = l.key()?;
-        lighthouses.push((public_key, l.endpoint.clone()));
-        let endpoints = vec![l.endpoint.clone()];
-        named.extend(Named::new(public_key, "lighthouse", &endpoints, start));
-        // Installed even when unresolved: `status` shows it and `reresolve` retries (§13.1).
-        lighthouse_configs.push(LighthouseConfig {
-            public_key,
-            endpoints: resolve("lighthouse", &l.endpoint).await,
-        });
-    }
-    node.set_lighthouses(lighthouse_configs.clone());
-    let mut relays = Vec::new();
-    let mut relay_configs = Vec::new();
-    for r in &config.relays {
-        let public_key = r.key()?;
-        relays.push((public_key, r.endpoint.clone()));
-        let endpoints = vec![r.endpoint.clone()];
-        named.extend(Named::new(public_key, "relay", &endpoints, start));
-        relay_configs.push(LighthouseConfig {
-            public_key,
-            endpoints: resolve("relay", &r.endpoint).await,
-        });
-    }
-    node.set_relays(relay_configs.clone());
-    let configs = (peer_configs, lighthouse_configs, relay_configs);
     let control = control::Control::new(&config, *node.public_key(), clock::monotonic());
     let mtu = config.node.mtu;
-    let (tunnel, interface) =
-        open_tunnel(mtu, &config.addresses(), &routes).map_err(|e| format!("{INTERFACE}: {e}"))?;
+    let (tunnel, interface) = open_tunnel(mtu, &config.addresses(), &lists.routes())
+        .map_err(|e| format!("{INTERFACE}: {e}"))?;
     let socket = udp::bind(config.node.listen_port)
         .map_err(|e| format!("udp port {}: {e}", config.node.listen_port))?;
     let listener = systemd::control_listener(Path::new(CONTROL_SOCKET), "kekkai")
         .map_err(|e| format!("{CONTROL_SOCKET}: {e}"))?;
-    let mut state = State::new(node, peers);
-    if !lighthouses.is_empty() {
-        state.locals = Some(Locals {
-            listen_port: config.node.listen_port,
-            overlay: config.addresses(),
-        });
-    }
-    state.lighthouses = lighthouses;
-    state.relays = relays;
+    let mut state = State::new(node, HashMap::new());
+    lists.install(&mut state, &config);
     let state = Arc::new(Mutex::new(state));
     if let Some(m) = &config.metrics {
         let listener = std::net::TcpListener::bind(m.listen)
@@ -189,12 +132,214 @@ async fn serve(config: NodeConfig) -> Result<(), String> {
         port = config.node.listen_port,
         peers = config.peers.len()
     );
+    let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|e| format!("SIGHUP handler: {e}"))?;
+    let reload = Reload {
+        path,
+        interface: &interface,
+        running: config,
+        lists,
+    };
     tokio::select! {
         r = kekkai_io::run(state.clone(), socket, tunnel, mtu) => r.map_err(|e| format!("{interface}: {e}")),
         r = control.serve(state.clone(), listener) => r.map_err(|e| format!("control socket: {e}")),
-        () = reresolve(state, configs, named) => Ok(()),
+        () = maintain(state, reload, hangup) => Ok(()),
         () = terminate() => Ok(()),
     }
+}
+
+/// What the configured lists install in the core and the IO state (spec §4.1): built at
+/// start and again at every reload, endpoints resolved (ADR 0016).
+struct Lists {
+    peers: HashMap<PublicKey, PeerInfo>,
+    configs: Configs,
+    named: Vec<Named>,
+    lighthouses: Vec<(PublicKey, String)>,
+    relays: Vec<(PublicKey, String)>,
+}
+
+impl Lists {
+    async fn new(config: &NodeConfig) -> Result<Self, String> {
+        let start = clock::monotonic();
+        let mut lists = Lists {
+            peers: HashMap::new(),
+            configs: Default::default(),
+            named: Vec::new(),
+            lighthouses: Vec::new(),
+            relays: Vec::new(),
+        };
+        for peer in &config.peers {
+            let public_key = peer.key()?;
+            (lists.named).extend(Named::new(public_key, &peer.name, &peer.endpoints, start));
+            let mut endpoints = Vec::new();
+            for endpoint in &peer.endpoints {
+                endpoints.extend(resolve(&peer.name, endpoint).await);
+            }
+            let info = PeerInfo {
+                name: peer.name.clone(),
+                addresses: peer.addresses.clone(),
+                allow_inbound: peer.allow_inbound.clone(),
+            };
+            lists.peers.insert(public_key, info);
+            lists.configs.0.push(PeerConfig {
+                public_key,
+                addresses: peer.host_addresses(),
+                allow_inbound: peer.rules()?,
+                endpoints,
+            });
+        }
+        let services = (config.lighthouses.iter().map(|l| ("lighthouse", l)))
+            .chain(config.relays.iter().map(|r| ("relay", r)));
+        for (owner, s) in services {
+            let public_key = s.key()?;
+            let written = std::slice::from_ref(&s.endpoint);
+            lists
+                .named
+                .extend(Named::new(public_key, owner, written, start));
+            // Installed even when unresolved: `status` shows it and `reresolve` retries (§13.1).
+            let service = LighthouseConfig {
+                public_key,
+                endpoints: resolve(owner, &s.endpoint).await,
+            };
+            let (shown, configs) = if owner == "relay" {
+                (&mut lists.relays, &mut lists.configs.2)
+            } else {
+                (&mut lists.lighthouses, &mut lists.configs.1)
+            };
+            shown.push((public_key, s.endpoint.clone()));
+            configs.push(service);
+        }
+        Ok(lists)
+    }
+
+    /// The overlay addresses routed to peers (spec §11).
+    fn routes(&self) -> Vec<IpAddr> {
+        (self.configs.0.iter())
+            .flat_map(|p| p.addresses.iter().copied())
+            .collect()
+    }
+
+    /// Replaces the lists in the core and the IO state; `running` gives the `[node]` section,
+    /// which a reload does not change (spec §4.1).
+    fn install(&self, state: &mut State, running: &NodeConfig) {
+        state.node.set_peers(self.configs.0.clone());
+        state.node.set_lighthouses(self.configs.1.clone());
+        state.node.set_relays(self.configs.2.clone());
+        state.peers = self.peers.clone();
+        state.lighthouses = self.lighthouses.clone();
+        state.relays = self.relays.clone();
+        state.locals = (!self.lighthouses.is_empty()).then(|| Locals {
+            listen_port: running.node.listen_port,
+            overlay: running.addresses(),
+        });
+    }
+
+    /// Every configured party by key, as a comparable description.
+    fn parties(&self) -> HashMap<PublicKey, String> {
+        let peers = (self.configs.0.iter()).map(|p| {
+            (
+                p.public_key,
+                format!("{p:?}{:?}", self.peers.get(&p.public_key)),
+            )
+        });
+        let services = (self.configs.1.iter().map(|l| ("lighthouse", l)))
+            .chain(self.configs.2.iter().map(|r| ("relay", r)))
+            .map(|(role, l)| (l.public_key, format!("{role}{l:?}")));
+        peers.chain(services).collect()
+    }
+}
+
+/// What a reload needs beside the state: the file, the interface for the routes, the file
+/// the node runs with and the lists it installed.
+struct Reload<'a> {
+    path: &'a Path,
+    interface: &'a str,
+    running: NodeConfig,
+    lists: Lists,
+}
+
+/// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver; on `SIGHUP`,
+/// a [`reload`] (ADR 0026).
+async fn maintain(
+    state: Arc<Mutex<State>>,
+    mut r: Reload<'_>,
+    mut hangup: tokio::signal::unix::Signal,
+) {
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(kekkai_io::MAX_SLEEP) => {
+                let lists = &mut r.lists;
+                reresolve_pass(&state, &mut lists.configs, &mut lists.named, clock::monotonic, resolve).await;
+            }
+            _ = hangup.recv() => reload(&state, &mut r).await,
+        }
+    }
+}
+
+/// Spec §4.1: reads the file again, applies its lists as a diff and keeps every other
+/// section until a restart. An invalid file, or a host route the kernel refuses, changes
+/// nothing.
+async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
+    let _ = systemd::notify("RELOADING=1");
+    let result = async {
+        let new = load(r.path)?;
+        let next = Lists::new(&new).await?;
+        set_routes(r.interface, &r.lists.routes(), &next.routes())
+            .map_err(|e| format!("{}: {e}", r.interface))?;
+        Ok::<_, String>((new, next))
+    };
+    match result.await {
+        Err(e) => error!(event = "reload-failed", err = %e),
+        Ok((new, next)) => {
+            let restart = r.running.restart_sections(&new);
+            if !restart.is_empty() {
+                let sections = restart.join(",");
+                warn!(
+                    event = "reload-restart-required",
+                    sections, "kept until a restart"
+                );
+            }
+            let (old, now) = (r.lists.parties(), next.parties());
+            let added = now.keys().filter(|k| !old.contains_key(*k)).count();
+            let removed = old.keys().filter(|k| !now.contains_key(*k)).count();
+            let changed = (now.iter())
+                .filter(|(k, d)| old.get(*k).is_some_and(|o| o != *d))
+                .count();
+            next.install(&mut state.lock().expect("no poison"), &r.running);
+            r.lists = next;
+            r.running.peers = new.peers;
+            r.running.lighthouses = new.lighthouses;
+            r.running.relays = new.relays;
+            info!(
+                event = "reloaded",
+                peers = r.running.peers.len(),
+                added,
+                removed,
+                changed
+            );
+        }
+    }
+    let _ = systemd::notify("READY=1");
+}
+
+/// Adds the new host routes, then deletes the old ones (spec §11); a refused addition
+/// undoes the others, so that a failed reload leaves the routes as they were.
+fn set_routes(interface: &str, old: &[IpAddr], new: &[IpAddr]) -> io::Result<()> {
+    let added: Vec<IpAddr> = new.iter().filter(|r| !old.contains(r)).copied().collect();
+    for (i, route) in added.iter().enumerate() {
+        if let Err(e) = set_route(interface, *route, true) {
+            for r in &added[..i] {
+                let _ = set_route(interface, *r, false);
+            }
+            return Err(e);
+        }
+    }
+    for route in old.iter().filter(|r| !new.contains(r)) {
+        if let Err(e) = set_route(interface, *route, false) {
+            warn!(event = "route-delete-failed", route = %route, err = %e);
+        }
+    }
+    Ok(())
 }
 
 /// A party whose endpoints include a DNS name (ADR 0016), with its resolution backoff.
@@ -257,14 +402,6 @@ type Configs = (
     Vec<LighthouseConfig>,
     Vec<LighthouseConfig>,
 );
-
-/// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver.
-async fn reresolve(state: Arc<Mutex<State>>, mut configs: Configs, mut named: Vec<Named>) {
-    loop {
-        tokio::time::sleep(kekkai_io::MAX_SLEEP).await;
-        reresolve_pass(&state, &mut configs, &mut named, clock::monotonic, resolve).await;
-    }
-}
 
 /// Resolves the stale parties of `named` again and replaces their static candidates when
 /// the addresses changed, without touching sessions or an in-flight sequence (§13.1).
@@ -339,6 +476,16 @@ fn open_tunnel(
     Ok((tun, INTERFACE.into()))
 }
 
+#[cfg(target_os = "linux")]
+fn set_route(interface: &str, route: IpAddr, add: bool) -> io::Result<()> {
+    kekkai_io::tun::set_route(interface, route, add)
+}
+
+#[cfg(target_os = "macos")]
+fn set_route(interface: &str, route: IpAddr, add: bool) -> io::Result<()> {
+    kekkai_io::utun::set_route(interface, route, add)
+}
+
 #[cfg(target_os = "macos")]
 fn open_tunnel(
     mtu: u16,
@@ -358,6 +505,56 @@ mod tests {
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
+    }
+
+    /// Spec §4.1, ADR 0026: an invalid file changes nothing; a valid one installs its lists
+    /// and keeps the sections that need a restart. Same routes: no route command runs.
+    #[test]
+    fn reload_applies_the_lists_and_keeps_the_rest() {
+        let file = |name: &str, port: u16| {
+            format!(
+                "[node]\nprivate_key_file = \"/k\"\nlisten_port = {port}\n\
+                 addresses = [\"10.0.0.1/32\"]\n\
+                 [[peers]]\nname = \"{name}\"\n\
+                 public_key = \"hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\"\n\
+                 addresses = [\"10.0.0.2/32\"]\nendpoints = [\"192.0.2.2:4802\"]\n"
+            )
+        };
+        let dir = std::env::temp_dir().join(format!("kekkai-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let running = NodeConfig::parse(&file("a", 4802)).unwrap();
+        let lists = runtime.block_on(Lists::new(&running)).unwrap();
+        let mut state = State::new(
+            Node::new(StaticKey::from_bytes([1; 32]).clamped(), Vec::new()),
+            HashMap::new(),
+        );
+        lists.install(&mut state, &running);
+        let state = Mutex::new(state);
+        let mut r = Reload {
+            path: &path,
+            interface: "none",
+            running,
+            lists,
+        };
+        let names = |state: &Mutex<State>| -> Vec<String> {
+            let state = state.lock().unwrap();
+            state.peers.values().map(|p| p.name.clone()).collect()
+        };
+
+        std::fs::write(&path, file("", 4802)).unwrap();
+        runtime.block_on(reload(&state, &mut r));
+        assert_eq!(names(&state), ["a"], "invalid: nothing applied");
+
+        std::fs::write(&path, file("b", 4803)).unwrap();
+        runtime.block_on(reload(&state, &mut r));
+        assert_eq!(names(&state), ["b"]);
+        assert_eq!(r.running.peers[0].name, "b");
+        assert_eq!(r.running.node.listen_port, 4802, "kept until a restart");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// L4: an unresolved lighthouse is installed with no candidate, shows in the node's

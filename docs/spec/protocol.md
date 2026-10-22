@@ -153,6 +153,64 @@ options (amended 2026-10-21, ADR 0013 amendment of that date).
 
 Vectors: [`vectors/keygen.json`](vectors/keygen.json).
 
+### 4.1 Reload of the configured lists (v0.6)
+
+A reload (ADR 0026: `SIGHUP`) replaces the party's configured lists without restarting it:
+on a node `[[peers]]`, `[[lighthouses]]` and `[[relays]]`, on a lighthouse or a relay its
+`[[peers]]`. The IO layer reads the file again, validates it exactly as at start (the same
+parser as `config check`) and resolves its endpoints; only then does it apply anything.
+An invalid file, or a host route the kernel refuses (§11), changes nothing: the party logs
+`reload-failed{err}` at `error` and runs on with the lists it had. A DNS name that does not
+resolve is not an error (installed without candidates and retried, §13.1). The core applies
+the new lists as a **diff by static public key**:
+
+- **Added key**: listed at once (§4 `verify` accepts it) with a fresh state; on a node its
+  addresses enter the routing table (§11) and the IO layer adds their host routes.
+- **Removed key**: as if it had never been listed. Its sessions are discarded (§8.5, keys
+  erased), their indices released (its `data` is then dropped as an unknown
+  `receiver_index`, §8.2), its in-flight handshake and staged packets dropped, its §12 state
+  (endpoint, learnt candidates, relayed-session paths, attempt sequence) dropped, and its
+  `last_timestamp` (§7.4) forgotten: listing it again later accepts a replayed message 1
+  once, as a restart does. A lighthouse drops its registration and query budget (§13.2), a
+  relay its sender counters and bucket (§14.2). On a node its routes go, and so do the
+  firewall entries (§15) whose source or destination is one of its addresses. Its later
+  message 1 is refused (§7.6 identity, §16). The removed party learns nothing: its own
+  session towards this party stays up on its side until its "new handshake" timer (§9)
+  initiates again, about 15 s after its next packet, and that handshake is refused.
+- **Kept key, unchanged**: nothing happens. Its sessions, indices, timers, endpoint and
+  learnt candidates are untouched: no handshake, the same `receiver_index`.
+- **Kept key, changed fields**: applied in place, sessions kept.
+  - `addresses`: the routing table is rebuilt; a packet from an address the peer no longer
+    owns is dropped by §11 on the very session it arrives on. The firewall entries of an
+    address that left the table or now belongs to another peer are dropped, so that a reply
+    flow opened towards the old owner never admits the new one.
+  - `allow_inbound`: the new rules apply from the next packet. Entries of the flow table are
+    not tied to a rule (§15 rule 3: replies to flows this node opened) and stay; a TCP
+    connection already open keeps passing (§15 rule 4) until it closes.
+  - `endpoints`, and a lighthouse's or relay's `endpoint`: the static candidates are
+    replaced, as by a re-resolution (§13.1); the last known endpoint, the learnt candidates
+    and a running attempt sequence are kept.
+  - `name`: a local label (logs, metrics, status), never on the wire.
+- **Role change** (a key moving between the peer, lighthouse and relay lists of a node):
+  a removal followed by an addition. What a party may send depends on its role (§10.2), and
+  its §12 and §13 state is role-specific: nothing of the old role is carried over.
+
+Everything else in the file needs a **restart**; a reload that changes it logs
+`reload-restart-required{sections}` at `warn` and keeps the running value:
+
+| Party | Section | Why it is not reloaded |
+| --- | --- | --- |
+| node | `[node]` (`private_key_file`, `listen_port`, `addresses`, `mtu`) | the key is the identity every session was made with; the socket and the interface are set up once |
+| node | `[firewall] udp_flows_max` | resizing the table empties it (§15) |
+| lighthouse, relay | `[service]` (`private_key_file`, `listen_port`, the relay's `max_bytes_per_second`) | identity and socket, as above; the rate limit stays as set at start |
+| all | `[log]`, `[metrics]` | the log filter and the metrics listener are installed once |
+
+The Nix modules derive their triggers from this table (ADR 0026): a change of the lists
+alone reloads, any other change restarts. A successful reload logs
+`reloaded{peers,added,removed,changed}` at `info` (counts only, also on a lighthouse and a
+relay, ADR 0012); under systemd it is framed by `RELOADING=1` and `READY=1`. The bounds of
+§17 do not change: every per-key table follows the list.
+
 ## 5. Outer messages
 
 Every datagram is exactly one outer message. Every outer message starts with the 4-byte

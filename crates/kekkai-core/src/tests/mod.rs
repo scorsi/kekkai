@@ -5,4 +5,5 @@ mod paths;
 mod peer;
 mod props;
 mod relay;
+mod reload;
 mod vectors;

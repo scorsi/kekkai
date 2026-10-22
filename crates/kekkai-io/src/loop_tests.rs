@@ -63,6 +63,7 @@ async fn two_loops_carry_a_packet_each_way() {
         );
         let info = PeerInfo {
             name: format!("host{other}"),
+            ..PeerInfo::default()
         };
         let state = Arc::new(Mutex::new(State::new(
             node,

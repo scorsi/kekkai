@@ -26,5 +26,5 @@ Nodes behind NAT do not know their public endpoint and cannot find each other. A
 
 ## Consequences
 
-- The lighthouse is a small, stateless-on-disk service; a restart loses registrations that return within 25 s.
+- The lighthouse is a small, stateless-on-disk service; a restart loses registrations, which come back within about 40 s: the node's next register (every 25 s) goes unanswered on its stale session, and the 15 s "new handshake" timer then re-establishes the session, after which the node registers at once (spec §9, §13.1).
 - The lighthouse becomes the directory of public keys and certificates in v1 (0007), which does not change its trust level.

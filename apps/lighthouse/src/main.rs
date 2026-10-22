@@ -15,14 +15,15 @@ use std::time::Duration;
 
 use kekkai_control::v1::control_service_server::{ControlService, ControlServiceServer};
 use kekkai_control::v1::{GetStatusRequest, GetStatusResponse, NodeStatus, Registration};
-use kekkai_core::keys::public_key_to_text;
+use kekkai_core::keys::{PublicKey, public_key_to_text};
 use kekkai_core::node::Node;
-use kekkai_io::config::{LIGHTHOUSE_DEFAULT_PATH, LighthouseConfig};
+use kekkai_io::config::{LIGHTHOUSE_DEFAULT_PATH, LighthouseConfig, NamedKey};
 use kekkai_io::metrics::{drops, family};
 use kekkai_io::{NoTunnel, PeerInfo, State, clock, systemd, udp};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{error, info, warn};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
@@ -89,16 +90,12 @@ fn run(path: &Path) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime.block_on(serve(config))
+    runtime.block_on(serve(path, config))
 }
 
-async fn serve(config: LighthouseConfig) -> Result<(), String> {
+async fn serve(path: &Path, config: LighthouseConfig) -> Result<(), String> {
     let key = kekkai_io::load_key(&config.service.private_key_file).map_err(|e| e.to_string())?;
-    let mut peers = HashMap::new();
-    for peer in &config.peers {
-        let name = peer.name.clone();
-        peers.insert(peer.key()?, PeerInfo { name });
-    }
+    let peers = peers(&config)?;
     let node = Node::lighthouse(key, peers.keys().copied().collect());
     let port = config.service.listen_port;
     let control = Control {
@@ -125,12 +122,61 @@ async fn serve(config: LighthouseConfig) -> Result<(), String> {
         let state = state.clone();
         std::thread::spawn(move || kekkai_io::metrics::serve(listener, &state, render));
     }
+    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
     info!(event = "ready", port, peers = config.peers.len());
     tokio::select! {
         r = kekkai_io::run(state.clone(), socket, NoTunnel, kekkai_core::MTU as u16) => r.map_err(|e| e.to_string()),
-        r = control.serve(state, listener) => r.map_err(|e| format!("control socket: {e}")),
+        r = control.serve(state.clone(), listener) => r.map_err(|e| format!("control socket: {e}")),
+        () = reloads(path, &state, config, hangup) => Ok(()),
         () = terminate() => Ok(()),
+    }
+}
+
+/// `[[peers]]` by key, with their names (ADR 0016).
+fn peers(config: &LighthouseConfig) -> Result<HashMap<PublicKey, PeerInfo>, String> {
+    let named = |p: &NamedKey| {
+        let name = p.name.clone();
+        Ok((
+            p.key()?,
+            PeerInfo {
+                name,
+                ..PeerInfo::default()
+            },
+        ))
+    };
+    config.peers.iter().map(named).collect()
+}
+
+/// On `SIGHUP` (ADR 0026, spec §4.1): reads the file again and replaces the peer list; the
+/// other sections are kept until a restart, and an invalid file changes nothing.
+async fn reloads(
+    path: &Path,
+    state: &Mutex<State>,
+    mut running: LighthouseConfig,
+    mut hangup: Signal,
+) {
+    while hangup.recv().await.is_some() {
+        let _ = systemd::notify("RELOADING=1");
+        match load(path).and_then(|new| Ok((peers(&new)?, new))) {
+            Err(e) => error!(event = "reload-failed", err = %e),
+            Ok((peers, new)) => {
+                let restart = running.restart_sections(&new);
+                if !restart.is_empty() {
+                    let sections = restart.join(",");
+                    warn!(
+                        event = "reload-restart-required",
+                        sections, "kept until a restart"
+                    );
+                }
+                let (added, removed, changed) =
+                    state.lock().expect("no poison").reload_named_peers(peers);
+                running.peers = new.peers;
+                let peers = running.peers.len();
+                info!(event = "reloaded", peers, added, removed, changed);
+            }
+        }
+        let _ = systemd::notify("READY=1");
     }
 }
 
@@ -271,7 +317,10 @@ mod tests {
     fn exposition_has_no_per_node_label() {
         let peer = StaticKey::from_bytes([2; 32]).clamped().public();
         let node = Node::lighthouse(StaticKey::from_bytes([1; 32]).clamped(), vec![peer]);
-        let info = PeerInfo { name: "a".into() };
+        let info = PeerInfo {
+            name: "a".into(),
+            ..PeerInfo::default()
+        };
         let text = render(&State::new(node, HashMap::from([(peer, info)])));
         assert!(
             text.contains("kekkai_lighthouse_registrations 0\n"),

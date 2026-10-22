@@ -149,4 +149,8 @@ message PeerStatus {
   // The name this node's configuration gives the peer; a local label, never sent over the
   // overlay (identity is the public key until v1 certificates, 0027).
   string name = 15;
+  // Local index of the `current` session (spec section 7.5), the `receiver_index` the peer
+  // puts in its packets to this node; unset without one. Unchanged by a reload that keeps
+  // the peer (spec section 4.1).
+  optional uint32 receiver_index = 16;
 }

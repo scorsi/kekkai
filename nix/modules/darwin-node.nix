@@ -13,7 +13,9 @@ let
   cfg = config.services.kekkai-node;
   label = "org.nixos.kekkai-node";
   configPath = "/etc/kekkai/node.toml";
+  # What the last activation installed: the file, and the hash of its restart-only sections.
   marker = "/var/db/kekkai-node.config";
+  restartMarker = "/var/db/kekkai-node.restart";
 in
 {
   imports = [ ./node-common.nix ];
@@ -58,12 +60,17 @@ in
       };
     };
 
-    # v0: a configuration change restarts the service at switch (0016). The plist names the
-    # stable path, so launchd cannot see the change: compare the generated file instead.
+    # 0026, spec §4.1: the plist names the stable path, so a peer change leaves it untouched
+    # and launchd does not restart the daemon (a binary change does). A change of a
+    # restart-only section restarts it; any other change of the file reloads it (SIGHUP).
     system.activationScripts.postActivation.text = ''
-      if [ "$(cat ${marker} 2>/dev/null)" != "${cfg.configFile}" ]; then
+      if [ "$(cat ${restartMarker} 2>/dev/null)" != "${cfg.restartFingerprint}" ]; then
+        echo "${cfg.restartFingerprint}" > ${restartMarker}
         echo "${cfg.configFile}" > ${marker}
         /bin/launchctl kickstart -k system/${label} 2>/dev/null || true
+      elif [ "$(cat ${marker} 2>/dev/null)" != "${cfg.configFile}" ]; then
+        echo "${cfg.configFile}" > ${marker}
+        /bin/launchctl kill SIGHUP system/${label} 2>/dev/null || true
       fi
     '';
   };

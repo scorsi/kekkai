@@ -50,14 +50,14 @@ pub struct NodeConfig {
     pub metrics: Option<MetricsSection>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsSection {
     /// `127.0.0.1:PORT` or `[::1]:PORT`: loopback only, the local agent is the only scraper.
     pub listen: SocketAddr,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSection {
     pub private_key_file: PathBuf,
@@ -115,7 +115,7 @@ pub struct LighthouseConfig {
     pub metrics: Option<MetricsSection>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSection {
     pub private_key_file: PathBuf,
@@ -139,7 +139,26 @@ fn default_relay_port() -> u16 {
     DEFAULT_RELAY_PORT
 }
 
+/// The sections of a file a reload does not apply (spec §4.1): those that differ between
+/// the running file and `new`, by name.
+fn changed(sections: &[(&'static str, bool)]) -> Vec<&'static str> {
+    sections
+        .iter()
+        .filter(|(_, same)| !same)
+        .map(|(n, _)| *n)
+        .collect()
+}
+
 impl LighthouseConfig {
+    /// Sections that need a restart: everything but `[[peers]]` (spec §4.1).
+    pub fn restart_sections(&self, new: &Self) -> Vec<&'static str> {
+        changed(&[
+            ("service", self.service == new.service),
+            ("log", self.log == new.log),
+            ("metrics", self.metrics == new.metrics),
+        ])
+    }
+
     /// Parses and validates a lighthouse file: what `kekkai-lighthouse config check` runs.
     pub fn parse(text: &str) -> Result<Self, String> {
         refuse_inline_secret(text, "service.private_key_file")?;
@@ -165,7 +184,7 @@ pub struct RelayConfig {
     pub metrics: Option<MetricsSection>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelayServiceSection {
     pub private_key_file: PathBuf,
@@ -177,6 +196,15 @@ pub struct RelayServiceSection {
 }
 
 impl RelayConfig {
+    /// Sections that need a restart: everything but `[[peers]]` (spec §4.1).
+    pub fn restart_sections(&self, new: &Self) -> Vec<&'static str> {
+        changed(&[
+            ("service", self.service == new.service),
+            ("log", self.log == new.log),
+            ("metrics", self.metrics == new.metrics),
+        ])
+    }
+
     /// Parses and validates a relay file: what `kekkai-relay config check` runs.
     pub fn parse(text: &str) -> Result<Self, String> {
         refuse_inline_secret(text, "service.private_key_file")?;
@@ -235,7 +263,7 @@ fn check_metrics(metrics: &Option<MetricsSection>) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FirewallSection {
     /// Bound of the UDP flow and fragment table (spec §15).
@@ -255,7 +283,7 @@ fn default_udp_flows_max() -> usize {
     UDP_FLOWS_MAX
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LogSection {
     /// A `tracing` filter (`info`, `kekkai_io=debug,info`); `RUST_LOG` overrides it.
@@ -284,6 +312,17 @@ fn default_level() -> String {
 }
 
 impl NodeConfig {
+    /// Sections that need a restart: all but `[[peers]]`, `[[lighthouses]]` and `[[relays]]`
+    /// (spec §4.1).
+    pub fn restart_sections(&self, new: &Self) -> Vec<&'static str> {
+        changed(&[
+            ("node", self.node == new.node),
+            ("firewall", self.firewall == new.firewall),
+            ("log", self.log == new.log),
+            ("metrics", self.metrics == new.metrics),
+        ])
+    }
+
     /// Parses and validates a node file: what `kekkai-node config check` runs.
     pub fn parse(text: &str) -> Result<Self, String> {
         refuse_inline_secret(text, "node.private_key_file")?;
@@ -516,6 +555,24 @@ level = "info"
         assert!(c.lighthouses[0].key().is_ok());
         assert_eq!(c.relays.len(), 1);
         assert_eq!(c.relays[0].endpoint, "relay.example.org:4801");
+    }
+
+    /// Spec §4.1: the lists reload, every other section needs a restart.
+    #[test]
+    fn restart_sections() {
+        let running = NodeConfig::parse(EXAMPLE).unwrap();
+        let lists = EXAMPLE
+            .replace("name = \"b\"", "name = \"c\"")
+            .replace("relay.example.org", "relay2.example.org");
+        let same = running.restart_sections(&NodeConfig::parse(&lists).unwrap());
+        assert!(same.is_empty(), "{same:?}");
+        let all = lists
+            .replace("listen_port = 4802", "listen_port = 4803")
+            .replace("udp_flows_max = 128", "udp_flows_max = 64")
+            .replace("level = \"info\"", "level = \"debug\"")
+            + "[metrics]\nlisten = \"127.0.0.1:9480\"\n";
+        let all = running.restart_sections(&NodeConfig::parse(&all).unwrap());
+        assert_eq!(all, ["node", "firewall", "log", "metrics"]);
     }
 
     #[test]

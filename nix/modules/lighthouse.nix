@@ -25,6 +25,10 @@ let
   }
   // lib.optionalAttrs (cfg.logLevel != "info") { log.level = cfg.logLevel; }
   // lib.optionalAttrs (cfg.metrics.listen != null) { metrics.listen = cfg.metrics.listen; };
+  # Spec §4.1: a reload applies `[[peers]]`; any other change needs a restart (0026).
+  restartFingerprint = builtins.hashString "sha256" (
+    builtins.toJSON (removeAttrs settings [ "peers" ])
+  );
 in
 {
   options.services.kekkai-lighthouse = {
@@ -117,10 +121,16 @@ in
         "kekkai-lighthouse.socket"
       ];
       requires = [ "kekkai-lighthouse.socket" ];
-      restartTriggers = [ cfg.configFile ];
+      # 0026: a peer change reloads (SIGHUP); the binary or any other section restarts.
+      reloadTriggers = [ cfg.configFile ];
+      restartTriggers = [
+        cfg.package
+        restartFingerprint
+      ];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${lib.getExe cfg.package} --config ${configPath}";
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         User = "kekkai-lighthouse";
         Group = "kekkai-lighthouse";

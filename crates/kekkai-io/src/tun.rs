@@ -102,6 +102,49 @@ fn in6(ip: Ipv6Addr) -> libc::in6_addr {
     }
 }
 
+/// Adds (`add`) or deletes the host route of `route` towards `name` (spec §11): at start and
+/// when a reload changes the peers' addresses (§4.1).
+pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
+    match route {
+        IpAddr::V4(ip) => {
+            // SIOCADDRT copies IFNAMSIZ − 1 bytes from rt_dev: give it a full-size buffer.
+            let mut devname = ifreq(name)?.ifr_name;
+            // SAFETY: plain old data; all zeros is a valid value.
+            let mut rt: RtEntry = unsafe { zeroed() };
+            rt.rt_dst = sockaddr_v4(ip);
+            rt.rt_genmask = sockaddr_v4(Ipv4Addr::BROADCAST);
+            rt.rt_flags = libc::RTF_UP | libc::RTF_HOST;
+            rt.rt_dev = devname.as_mut_ptr();
+            let request = if add {
+                libc::SIOCADDRT
+            } else {
+                libc::SIOCDELRT
+            };
+            ioctl(socket(libc::AF_INET)?.as_raw_fd(), request, &mut rt)
+        }
+        IpAddr::V6(ip) => {
+            let cname = CString::new(name).map_err(|_| io::ErrorKind::InvalidInput)?;
+            // SAFETY: cname is a valid C string.
+            let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+            if index == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: plain old data; all zeros is a valid value.
+            let mut rt: In6RtMsg = unsafe { zeroed() };
+            rt.rtmsg_dst = in6(ip);
+            rt.rtmsg_dst_len = 128;
+            rt.rtmsg_flags = u32::from(libc::RTF_UP);
+            rt.rtmsg_ifindex = index as libc::c_int;
+            let request = if add {
+                libc::SIOCADDRT
+            } else {
+                libc::SIOCDELRT
+            };
+            ioctl(socket(libc::AF_INET6)?.as_raw_fd(), request, &mut rt)
+        }
+    }
+}
+
 impl Tun {
     /// Creates `name`, sets its MTU, brings it up, assigns `addresses` (each a `/32` or
     /// `/128`) and adds one host route per entry of `routes` towards it (spec §11).
@@ -141,8 +184,6 @@ impl Tun {
             return Err(io::Error::last_os_error());
         }
         let inet6 = || socket(libc::AF_INET6);
-        // SIOCADDRT copies IFNAMSIZ − 1 bytes from rt_dev: give it a full-size buffer.
-        let mut devname = ifreq(name)?.ifr_name;
         for address in addresses {
             match address {
                 IpAddr::V4(ip) => {
@@ -164,26 +205,7 @@ impl Tun {
             }
         }
         for route in routes {
-            match route {
-                IpAddr::V4(ip) => {
-                    // SAFETY: plain old data; all zeros is a valid value.
-                    let mut rt: RtEntry = unsafe { zeroed() };
-                    rt.rt_dst = sockaddr_v4(*ip);
-                    rt.rt_genmask = sockaddr_v4(Ipv4Addr::BROADCAST);
-                    rt.rt_flags = libc::RTF_UP | libc::RTF_HOST;
-                    rt.rt_dev = devname.as_mut_ptr();
-                    ioctl(inet.as_raw_fd(), libc::SIOCADDRT, &mut rt)?;
-                }
-                IpAddr::V6(ip) => {
-                    // SAFETY: plain old data; all zeros is a valid value.
-                    let mut rt: In6RtMsg = unsafe { zeroed() };
-                    rt.rtmsg_dst = in6(*ip);
-                    rt.rtmsg_dst_len = 128;
-                    rt.rtmsg_flags = u32::from(libc::RTF_UP);
-                    rt.rtmsg_ifindex = index as libc::c_int;
-                    ioctl(inet6()?.as_raw_fd(), libc::SIOCADDRT, &mut rt)?;
-                }
-            }
+            set_route(name, *route, true)?;
         }
         const _: () = assert!(size_of::<libc::sockaddr_in>() == size_of::<libc::sockaddr>());
         // SAFETY: the TUN descriptor is owned here and never replaced or closed behind tokio.

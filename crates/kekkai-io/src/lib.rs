@@ -33,10 +33,13 @@ use tracing::{debug, info, trace};
 /// second of resuming and every deadline that passed meanwhile runs at once.
 pub const MAX_SLEEP: Duration = Duration::from_secs(1);
 
-/// The IO layer's name for a peer, for logs, metrics and status (ADR 0019).
-#[derive(Clone, Debug, Default)]
+/// The IO layer's name for a peer, for logs, metrics and status (ADR 0019), and on a node
+/// its addresses and rules as written, for status (ADR 0015). Replaced by a reload (§4.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeerInfo {
     pub name: String,
+    pub addresses: Vec<String>,
+    pub allow_inbound: Vec<String>,
 }
 
 /// What the node collects for `lighthouse_register` (spec §13.1).
@@ -75,6 +78,24 @@ impl State {
             log_peers: true,
             drops: BTreeMap::new(),
         }
+    }
+
+    /// A lighthouse's or relay's reload (spec §4.1): replaces its peer list, keys and names.
+    /// Returns how many keys were added and removed and how many kept ones were renamed.
+    pub fn reload_named_peers(
+        &mut self,
+        peers: HashMap<PublicKey, PeerInfo>,
+    ) -> (usize, usize, usize) {
+        let old = &self.peers;
+        let added = peers.keys().filter(|k| !old.contains_key(*k)).count();
+        let removed = old.keys().filter(|k| !peers.contains_key(*k)).count();
+        let renamed = (peers.iter())
+            .filter(|(k, p)| old.get(*k).is_some_and(|o| o != *p))
+            .count();
+        self.node
+            .set_lighthouse_peers(peers.keys().copied().collect());
+        self.peers = peers;
+        (added, removed, renamed)
     }
 
     fn count_drop(&mut self, reason: DropReason) {
@@ -330,6 +351,36 @@ mod loop_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use kekkai_core::keys::StaticKey;
+    use kekkai_core::node::Node;
+
+    use super::{PeerInfo, State};
+
+    /// Spec §4.1 on a lighthouse: keys added, removed and renamed.
+    #[test]
+    fn reload_named_peers() {
+        let key = |b: u8| StaticKey::from_bytes([b; 32]).clamped().public();
+        let info = |name: &str| PeerInfo {
+            name: name.into(),
+            ..PeerInfo::default()
+        };
+        let node = Node::lighthouse(
+            StaticKey::from_bytes([9; 32]).clamped(),
+            vec![key(1), key(2)],
+        );
+        let mut state = State::new(
+            node,
+            HashMap::from([(key(1), info("a")), (key(2), info("b"))]),
+        );
+        let next = HashMap::from([(key(2), info("b2")), (key(3), info("c"))]);
+        assert_eq!(state.reload_named_peers(next), (1, 1, 1));
+        assert!(state.node.status(&key(1)).is_none());
+        assert!(state.node.status(&key(3)).is_some());
+        assert_eq!(state.peers[&key(2)].name, "b2");
+    }
+
     #[test]
     fn load_key() {
         let dir = std::env::temp_dir().join(format!("kekkai-io-key-{}", std::process::id()));

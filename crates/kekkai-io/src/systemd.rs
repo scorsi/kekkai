@@ -1,5 +1,5 @@
 //! The two systemd protocols the node speaks, on the standard library (ADR 0029): `READY=1`
-//! for `Type=notify` (ADR 0018, 0019) and the control socket inherited from a `.socket` unit,
+//! for `Type=notify` (ADR 0018, 0019), `RELOADING=1` around a reload (ADR 0026), and the control socket inherited from a `.socket` unit,
 //! which systemd creates `root:kekkai 0660` before the unprivileged daemon starts (ADR 0015).
 
 use std::ffi::CString;
@@ -11,6 +11,12 @@ use std::path::Path;
 
 /// Sends `READY=1` to `$NOTIFY_SOCKET`; does nothing outside systemd.
 pub fn notify_ready() -> io::Result<()> {
+    notify("READY=1")
+}
+
+/// Sends `state` (`READY=1`, `RELOADING=1`) to `$NOTIFY_SOCKET`; does nothing outside systemd.
+pub fn notify(state: &str) -> io::Result<()> {
+    let state = state.as_bytes();
     let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
         return Ok(());
     };
@@ -20,10 +26,10 @@ pub fn notify_ready() -> io::Result<()> {
     if let Some(name) = bytes.strip_prefix(b"@") {
         use std::os::linux::net::SocketAddrExt;
         let addr = std::os::unix::net::SocketAddr::from_abstract_name(name)?;
-        return socket.send_to_addr(b"READY=1", &addr).map(drop);
+        return socket.send_to_addr(state, &addr).map(drop);
     }
     let _ = bytes;
-    socket.send_to(b"READY=1", &path).map(drop)
+    socket.send_to(state, &path).map(drop)
 }
 
 /// The listening socket passed by systemd (`LISTEN_FDS`, first descriptor 3) or, outside

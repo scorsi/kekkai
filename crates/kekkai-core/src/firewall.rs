@@ -302,6 +302,15 @@ impl Firewall {
         allowed
     }
 
+    /// Drops every entry whose source or destination address is `gone` (a reload, §4.1).
+    pub fn forget(&mut self, gone: impl Fn(&IpAddr) -> bool) {
+        let hit = |k: &Key| match k {
+            Key::Flow(s, d, ..) | Key::Fragment(s, d, ..) => gone(s) || gone(d),
+        };
+        self.entries.retain(|k, _| !hit(k));
+        self.by_expiry.retain(|(_, k)| !hit(k));
+    }
+
     /// The entry's header length if it exists and has not expired; an expired one is removed.
     fn live(&mut self, now: Duration, key: &Key) -> Option<usize> {
         let (expires, header) = *self.entries.get(key)?;

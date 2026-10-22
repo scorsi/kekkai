@@ -27,3 +27,7 @@ The Go CLI needs to read the node's state; later it will drive reloads and more.
 ## Amendment — 2026-10-21: peer name in status
 
 Owner decision: `PeerStatus` carries `name`, the name this node's own configuration gives the peer (0016), matched by public key; a local label, never sent over the overlay nor learned from peers.
+
+## Implementation note — 2026-10-22: receiver index in status (v0.6)
+
+`PeerStatus.receiver_index` (field 16, `optional uint32`, unset without a `current` session) is the local index of the peer's `current` session (spec §7.5); the reload test of 0026 compares it before and after a reload. Additive (0024), shown by `status --json` without CLI change.

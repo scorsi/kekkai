@@ -116,6 +116,9 @@ pub struct PeerStatus {
     pub endpoint: Option<Endpoint>,
     pub last_direct_path_failure: Option<PathFailure>,
     pub counters: Counters,
+    /// The `current` session's local index (§7.5): what the peer puts in `receiver_index`.
+    /// Kept across a reload that keeps the peer (§4).
+    pub current_index: Option<u32>,
 }
 
 /// §12 state of one configured party, beside its [`Peer`].
@@ -311,10 +314,11 @@ impl Node {
         self.firewall.status()
     }
 
-    /// Replaces the peer list (ADR 0004, 0016): a removed peer loses its sessions (§8.5),
-    /// a kept one keeps them, the routing table and the firewall rules are rebuilt.
+    /// Replaces the peer list (ADR 0004, 0016, spec §4.1): a removed peer loses its sessions
+    /// (§8.5), a kept one keeps them, the routing table and the firewall rules are rebuilt,
+    /// and the firewall entries of an address that left the table or changed peer go (§15).
     pub fn set_peers(&mut self, peers: Vec<PeerConfig>) {
-        self.routes.clear();
+        let old = std::mem::take(&mut self.routes);
         self.rules.clear();
         for config in &peers {
             for address in &config.addresses {
@@ -323,6 +327,8 @@ impl Node {
             self.rules
                 .insert(config.public_key, config.allow_inbound.clone());
         }
+        let routes = &self.routes;
+        self.firewall.forget(|ip| old.get(ip) != routes.get(ip));
         let keep: Vec<PublicKey> = peers.iter().map(|c| c.public_key).collect();
         self.retain(Role::Peer, &keep);
         for config in peers {
@@ -369,14 +375,30 @@ impl Node {
             .map(|(k, _)| *k)
             .collect();
         for key in gone {
-            if let Some(mut peer) = self.peers.remove(&key) {
-                peer.forget(&mut self.indices);
-            }
-            self.links.remove(&key);
+            self.remove(&key);
+        }
+    }
+
+    /// §4.1: the party's sessions, indices, handshake, staged packets and §12 state go
+    /// (keys erased, §8.5), and so do its registration or relay sender state (§13.2, §14.2).
+    fn remove(&mut self, key: &PublicKey) {
+        if let Some(mut peer) = self.peers.remove(key) {
+            peer.forget(&mut self.indices);
+        }
+        self.links.remove(key);
+        if let Some(registry) = &mut self.registry {
+            registry.forget(key);
+        }
+        if let Some(forwarder) = &mut self.forwarder {
+            forwarder.senders.remove(key);
         }
     }
 
     fn insert(&mut self, key: PublicKey, role: Role, statics: Vec<Endpoint>) {
+        // §4.1: a key that changes role (peer, lighthouse, relay) starts afresh.
+        if self.links.get(&key).is_some_and(|l| l.role != role) {
+            self.remove(&key);
+        }
         self.peers.entry(key).or_insert_with(|| Peer::new(key));
         let link = self.links.entry(key).or_default();
         link.role = role;
@@ -405,6 +427,7 @@ impl Node {
             endpoint: link.endpoint,
             last_direct_path_failure: link.failure,
             counters: p.counters,
+            current_index: p.current().map(|s| s.local_index),
         })
     }
 

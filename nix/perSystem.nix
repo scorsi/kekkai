@@ -138,7 +138,8 @@
       relayFile = serviceFile "kekkai-relay" inputs.self.nixosModules.relay relaySettings;
       # The darwin node module against stubs of the nix-darwin options it sets (0018: it is
       # tested by evaluation only); `modules-eval` runs `config check` on its node file.
-      darwinEval =
+      darwinWith =
+        extra:
         let
           stub = lib.mkOption { type = lib.types.attrsOf lib.types.anything; };
         in
@@ -157,8 +158,10 @@
               };
               config.services.kekkai-node = nodeSettings;
             }
+            extra
           ];
         }).config;
+      darwinEval = darwinWith { };
       # The NixOS node module, evaluated in a full NixOS system (for aarch64-linux when this
       # system is Darwin): the drvPath forces every option and unit without building anything.
       nodeEval = inputs.nixpkgs.lib.nixosSystem {
@@ -323,6 +326,40 @@
             command == "${lib.getExe pkgs.kekkai-node} --config /etc/kekkai/node.toml"
             && !(daemon ? ProgramArguments);
           assert daemon.KeepAlive && daemon.RunAtLoad;
+          # 0026, spec §4.1: a peer change reloads, a restart-only section restarts.
+          assert
+            let
+              fingerprint = e: e.services.kekkai-node.restartFingerprint;
+              file = e: "${e.services.kekkai-node.configFile}";
+              peerChange = darwinWith {
+                services.kekkai-node.peers.c = {
+                  publicKey = "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=";
+                  addresses = [ "10.0.0.9/32" ];
+                };
+              };
+              portChange = darwinWith { services.kekkai-node.listenPort = 4803; };
+            in
+            fingerprint peerChange == fingerprint darwinEval
+            && file peerChange != file darwinEval
+            && fingerprint portChange != fingerprint darwinEval;
+          assert lib.hasInfix "/bin/launchctl kill SIGHUP system/org.nixos.kekkai-node"
+            darwinEval.system.activationScripts.postActivation.text;
+          assert lib.all
+            (
+              unit:
+              let
+                service =
+                  nodeEval.config.systemd.services.${unit} or lighthouseEval.config.systemd.services.${unit};
+              in
+              lib.hasSuffix "/bin/kill -HUP $MAINPID" service.serviceConfig.ExecReload
+              && builtins.length service.reloadTriggers == 1
+              && builtins.length service.restartTriggers == 2
+            )
+            [
+              "kekkai-node"
+              "kekkai-lighthouse"
+              "kekkai-relay"
+            ];
           assert group.members == [ "alice" ] && darwinEval.users.knownGroups == [ "kekkai" ];
           pkgs.runCommand "modules-eval" { } ''
             ${lib.getExe pkgs.kekkai-node} config check --config ${
@@ -375,6 +412,12 @@
           relayModule = inputs.self.nixosModules.relay;
           validateLogs = inputs.nisshi.lib.validateLogs.${system};
           validateMetrics = inputs.masu.lib.validateMetrics.${system};
+        };
+        reload = import ./tests/reload.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          lighthouseModule = inputs.self.nixosModules.lighthouse;
+          relayModule = inputs.self.nixosModules.relay;
         };
         relay-upgrade = import ./tests/relay-upgrade.nix {
           inherit pkgs;

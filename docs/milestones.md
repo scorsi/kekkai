@@ -166,7 +166,7 @@ no `kekkai-node` in the relay's `cargo tree`). What review gate 2 receives is li
 
 **Objective**: kekkai runs on every host of the deployment, with the lighthouse and relay on the public entry point, and holds up to the manual scenarios.
 
-**Deliverables**: `SIGHUP` reload of the peer list in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary (0026); `nixosTest` `reload`. Everything the deployment repository has to do around it (peer attrset, keys, entry point, replacing Tailscale) is its own plan, not part of this milestone.
+**Deliverables**: `SIGHUP` reload of the peer list in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary (0026); `nixosTest` `reload`. Status 2026-10-22: reload implemented as specified in spec §4.1 (a node's lighthouse and relay lists reload too; every other section restarts), `nixosTest` `reload` written, not yet run. Everything the deployment repository has to do around it (peer attrset, keys, entry point, replacing Tailscale) is its own plan, not part of this milestone.
 
 **Acceptance criteria**
 

@@ -81,24 +81,33 @@ fn commands(name: &str, mtu: u16, addresses: &[IpAddr], routes: &[IpAddr]) -> Ve
             ],
         });
     }
-    for route in routes {
-        let (family, len) = if route.is_ipv4() {
-            ("-inet", 32)
-        } else {
-            ("-inet6", 128)
-        };
-        all.push(vec![
-            "/sbin/route".into(),
-            "-q".into(),
-            "-n".into(),
-            "add".into(),
-            family.into(),
-            format!("{route}/{len}"),
-            "-interface".into(),
-            name.into(),
-        ]);
-    }
+    all.extend(routes.iter().map(|r| route_command(name, *r, true)));
     all
+}
+
+/// `/sbin/route add` (`add`) or `delete` of the host route of `route` towards `name`.
+fn route_command(name: &str, route: IpAddr, add: bool) -> Vec<String> {
+    let (family, len) = if route.is_ipv4() {
+        ("-inet", 32)
+    } else {
+        ("-inet6", 128)
+    };
+    vec![
+        "/sbin/route".into(),
+        "-q".into(),
+        "-n".into(),
+        if add { "add" } else { "delete" }.into(),
+        family.into(),
+        format!("{route}/{len}"),
+        "-interface".into(),
+        name.into(),
+    ]
+}
+
+/// Adds (`add`) or deletes the host route of `route` towards `name` (spec §11): at start and
+/// when a reload changes the peers' addresses (§4.1).
+pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
+    run(&route_command(name, route, add))
 }
 
 fn run(command: &[String]) -> io::Result<()> {
@@ -258,6 +267,11 @@ mod tests {
                 "/sbin/route -q -n add -inet 10.0.0.2/32 -interface utun7",
                 "/sbin/route -q -n add -inet6 fd00::2/128 -interface utun7",
             ]
+        );
+        let delete = route_command("utun7", "fd00::2".parse().unwrap(), false).join(" ");
+        assert_eq!(
+            delete,
+            "/sbin/route -q -n delete -inet6 fd00::2/128 -interface utun7"
         );
     }
 }

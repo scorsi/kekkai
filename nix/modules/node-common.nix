@@ -46,6 +46,13 @@ let
   // lib.optionalAttrs (cfg.logLevel != "info") { log.level = cfg.logLevel; }
   // lib.optionalAttrs (cfg.metrics.listen != null) { metrics.listen = cfg.metrics.listen; };
 
+  # Spec §4.1: a reload applies the lists; any other change needs a restart.
+  restartSettings = removeAttrs settings [
+    "peers"
+    "lighthouses"
+    "relays"
+  ];
+
   peerType = types.submodule {
     options = {
       publicKey = mkOption {
@@ -186,6 +193,16 @@ in
       readOnly = true;
       default = (pkgs.formats.toml { }).generate "kekkai-node.toml" settings;
       description = "The generated node file, installed as /etc/kekkai/node.toml.";
+    };
+    restartFingerprint = mkOption {
+      type = types.str;
+      internal = true;
+      readOnly = true;
+      default = builtins.hashString "sha256" (builtins.toJSON restartSettings);
+      description = ''
+        Hash of the sections a reload does not apply (spec §4.1): when it changes, the
+        service restarts instead of reloading (0026).
+      '';
     };
   };
 }
