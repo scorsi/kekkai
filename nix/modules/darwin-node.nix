@@ -41,16 +41,21 @@ in
       description = "kekkai node control socket";
     };
 
-    launchd.daemons.kekkai-node.serviceConfig = {
-      Label = label;
-      ProgramArguments = [
+    launchd.daemons.kekkai-node = {
+      # `command`, not ProgramArguments: nix-darwin wraps it in `wait4path /nix/store`. launchd
+      # starts boot jobs before the Nix volume is mounted, and a missing program exits 78
+      # (EX_CONFIG) and is never retried, KeepAlive or not.
+      command = lib.escapeShellArgs [
         (lib.getExe cfg.package)
         "--config"
         configPath
       ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      StandardErrorPath = "/var/log/kekkai-node.log";
+      serviceConfig = {
+        Label = label;
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardErrorPath = "/var/log/kekkai-node.log";
+      };
     };
 
     # v0: a configuration change restarts the service at switch (0016). The plist names the

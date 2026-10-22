@@ -315,14 +315,13 @@
         modules-eval =
           let
             daemon = darwinEval.launchd.daemons.kekkai-node.serviceConfig;
+            # nix-darwin turns `command` into ProgramArguments behind `wait4path /nix/store`.
+            command = darwinEval.launchd.daemons.kekkai-node.command;
             group = darwinEval.users.groups.kekkai;
           in
           assert
-            daemon.ProgramArguments == [
-              (lib.getExe pkgs.kekkai-node)
-              "--config"
-              "/etc/kekkai/node.toml"
-            ];
+            command == "${lib.getExe pkgs.kekkai-node} --config /etc/kekkai/node.toml"
+            && !(daemon ? ProgramArguments);
           assert daemon.KeepAlive && daemon.RunAtLoad;
           assert group.members == [ "alice" ] && darwinEval.users.knownGroups == [ "kekkai" ];
           pkgs.runCommand "modules-eval" { } ''
