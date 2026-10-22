@@ -73,6 +73,7 @@ pkgs.testers.nixosTest {
 
   testScript = ''
     ${common.script}
+    from datetime import datetime
 
     boot(lighthouse, home, away, a, b)
     lighthouse.wait_for_unit("kekkai-lighthouse.service")
@@ -131,6 +132,19 @@ pkgs.testers.nixosTest {
         # `away`, fails the subtest: B's session must be the same before and after.
         old = peer(b, "${keys.a.public}")["endpoint"]
         assert old == "192.0.2.2:4802", old
+
+        def age(field):
+            """Age on B's clock of a timestamp of B's status of A."""
+            t = peer(b, "${keys.a.public}")[field]
+            return float(b.succeed("date +%s.%N")) - datetime.fromisoformat(t).timestamp()
+
+        # Let the session of subtest 2 settle first: its move may still bring a handshake,
+        # unrelated to this change (a rediscovery or punch deferred by the REKEY_TIMEOUT
+        # pacing, §7.9, §12.5, starts at most 5 s after the last message 1). Quiet once B's
+        # last handshake with A is 2 x REKEY_TIMEOUT old: past that deferral and its answer;
+        # the 3 s DIRECT_PATH_TIMEOUT window is within it, and the 15 s "new handshake" timer
+        # is not armed (B's pings are answered).
+        retry(lambda _: age("last_handshake") > 10, timeout_seconds=60)
         lighthouse.wait_until_succeeds(
             f"kekkai status --json --socket {LIGHTHOUSE_SOCKET} | jq -e"
             " '.registrations[] | select(.name == \"a\") | .last_seen | rtrimstr(\"s\") | tonumber < 1'",
@@ -142,6 +156,9 @@ pkgs.testers.nixosTest {
             p = peer(b, "${keys.a.public}")
             return p.get("receiver_index"), p.get("last_handshake")
 
+        # The one handshake left that could land in the window, the 120 s rekey (§8.6), is
+        # excluded by this bound: the window (< 5 s) ends before the session is 120 s old.
+        assert age("session_created") < 120 - 15, "too close to the 120 s rekey"
         before = session()
         start = float(b.succeed("date +%s.%N"))
         a.succeed(
