@@ -112,6 +112,11 @@ impl Registry {
         self.budgets.retain(|k, _| listed(k));
     }
 
+    #[cfg(test)]
+    pub(crate) fn budget_keys(&self) -> Vec<PublicKey> {
+        self.budgets.keys().copied().collect()
+    }
+
     pub(crate) fn entries(&self, now: Duration) -> Vec<(PublicKey, Registration)> {
         let mut all: Vec<_> = self
             .entries

@@ -4,9 +4,10 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use super::relay::{Net, ep, key, wall};
+use super::relay::{Net, ep, key, relay_net, wall};
+use crate::inner::Inner;
 use crate::keys::PublicKey;
-use crate::node::{LighthouseConfig, Node, PeerConfig};
+use crate::node::{LighthouseConfig, Node, Path, PeerConfig};
 use crate::wire::DropReason;
 
 const T: Duration = Duration::from_secs(1);
@@ -175,7 +176,8 @@ fn a_role_change_is_a_removal_and_an_addition() {
     assert!(at(&net, 0, 2).is_some_and(|s| s.sessions == 0));
 }
 
-/// A lighthouse forgets a removed node's registration at once; a relay its sender state.
+/// A lighthouse forgets a removed node's registration and query budget at once; a relay
+/// its sender counters and bucket. Both are populated first, and inspected directly.
 #[test]
 fn lighthouse_and_relay_forget_removed_nodes() {
     let (a, b, l) = (key(1), key(2), key(3));
@@ -196,8 +198,13 @@ fn lighthouse_and_relay_forget_removed_nodes() {
     for t in 0..3 {
         net.tick(Duration::from_secs(t));
     }
+    let now = Duration::from_secs(3);
+    let query = Inner::LighthouseQuery { pubkey: b.public() }.encode();
+    let out = net.parties[0]
+        .0
+        .send_inner_to(now, wall(now), l.public(), &query);
+    net.run(now, 0, out);
     let registered = |net: &Net| -> Vec<PublicKey> {
-        let now = Duration::from_secs(3);
         net.parties[2]
             .0
             .registrations(now)
@@ -206,11 +213,146 @@ fn lighthouse_and_relay_forget_removed_nodes() {
             .collect()
     };
     assert_eq!(registered(&net).len(), 2);
+    assert_eq!(
+        net.parties[2].0.per_key_state().0,
+        [a.public()],
+        "a's budget"
+    );
     net.parties[2].0.set_lighthouse_peers(vec![b.public()]);
     assert_eq!(registered(&net), [b.public()]);
+    assert!(net.parties[2].0.per_key_state().0.is_empty(), "budget gone");
 
-    let mut relay = Node::relay(l, vec![a.public(), b.public()], None);
-    assert_eq!(relay.relay_senders().len(), 2);
-    relay.set_lighthouse_peers(vec![a.public()]);
-    assert_eq!(relay.relay_senders(), [(a.public(), Default::default())]);
+    let (mut net, a, b) = relay_net(Some(1_000_000));
+    let rk = key(3).public();
+    let junk = vec![0xee; 64];
+    let forward = Inner::RelayForward {
+        to: b,
+        payload: &junk,
+    }
+    .encode();
+    let out = net.parties[0].0.send_inner_to(T, wall(T), rk, &forward);
+    net.run(T, 0, out);
+    let relay = &mut net.parties[2].0;
+    assert_eq!(relay.per_key_state().1, [a], "a's counters and bucket");
+    relay.set_lighthouse_peers(vec![b]);
+    assert!(relay.per_key_state().1.is_empty(), "sender state gone");
+    relay.set_lighthouse_peers(vec![a, b]);
+    let fresh = relay.relay_senders();
+    assert!(
+        fresh.iter().all(|(_, c)| *c == Default::default()),
+        "{fresh:?}"
+    );
+}
+
+/// R1, §4.1: a peer that loses an address drops its staged packets. A stages a packet for
+/// 10.0.0.2 (B) and initiates; B's message 2 is held while a reload gives 10.0.0.2 to C and
+/// 10.0.0.9 to B. Released, it completes the handshake but carries no staged payload to B.
+#[test]
+fn a_lost_address_drops_the_staged_packets() {
+    for owner in [Some(3), None] {
+        let mut a = Node::new(key(1), vec![peer(2, 2)]);
+        let mut b = Node::new(key(2), vec![peer(1, 1)]);
+        let packet = udp(1, 2);
+        let m1 = a.send_packet(T, wall(T), &packet).unwrap().datagrams;
+        assert_eq!(a.status(&key(2).public()).unwrap().staged_packets, 1);
+        let m2 = b
+            .handle_datagram(T, wall(T), ep(1, 4802), &m1[0].1)
+            .unwrap();
+        let moved = PeerConfig {
+            addresses: vec![v4(9)],
+            ..peer(2, 2)
+        };
+        a.set_peers(
+            [moved]
+                .into_iter()
+                .chain(owner.map(|k| peer(k, 2)))
+                .collect(),
+        );
+        let status = a.status(&key(2).public()).unwrap();
+        assert!(
+            status.handshake_in_flight && status.staged_packets == 0,
+            "{status:?}"
+        );
+        let out = a
+            .handle_datagram(T, wall(T), ep(2, 4802), &m2.datagrams[0].1)
+            .unwrap();
+        assert!(
+            a.status(&key(2).public()).unwrap().current,
+            "handshake kept"
+        );
+        for (_, d) in out.datagrams {
+            let got = b.handle_datagram(T, wall(T), ep(1, 4802), &d).unwrap();
+            assert!(!got.packets.contains(&packet), "staged packet reached B");
+        }
+    }
+}
+
+/// R3, §4.1: a key that leaves the relay list (to the peer or the lighthouse list) no
+/// longer relays. A↔B is relayed through R; after the move, and once A's new session with R
+/// is up, A's traffic for B is never wrapped in a `relay_forward` to R.
+#[test]
+fn a_former_relay_relays_nothing() {
+    for to_peer in [true, false] {
+        let (mut net, a, b) = relay_net(None);
+        let rk = key(3).public();
+        let mut now = T;
+        let out = net.parties[0]
+            .0
+            .send_packet(now, wall(now), &udp(1, 2))
+            .unwrap();
+        net.run(now, 0, out.datagrams);
+        while net.parties[0].0.status(&b).unwrap().path != Some(Path::Relayed(rk)) {
+            assert!(now < Duration::from_secs(30), "no relayed session");
+            now += Duration::from_millis(500);
+            net.tick(now);
+        }
+        let b_config = PeerConfig {
+            public_key: b,
+            addresses: vec![v4(2)],
+            ..PeerConfig::default()
+        };
+        let node = &mut net.parties[0].0;
+        node.set_relays(Vec::new());
+        if to_peer {
+            let r = PeerConfig {
+                public_key: rk,
+                addresses: vec![v4(3)],
+                endpoints: vec![ep(3, 4801)],
+                ..PeerConfig::default()
+            };
+            node.set_peers(vec![b_config, r]);
+            let out = node.send_packet(now, wall(now), &udp(1, 3)).unwrap();
+            net.run(now, 0, out.datagrams);
+        } else {
+            node.set_lighthouses(vec![LighthouseConfig {
+                public_key: rk,
+                endpoints: vec![ep(3, 4801)],
+            }]);
+            net.tick(now);
+        }
+        assert!(
+            net.parties[0].0.status(&rk).unwrap().current,
+            "R's new session"
+        );
+        let forwarded = |net: &Net| {
+            let senders = net.parties[2].0.relay_senders();
+            senders
+                .iter()
+                .find(|(k, _)| *k == a)
+                .unwrap()
+                .1
+                .forwarded_packets
+        };
+        let before = forwarded(&net);
+        let out = net.parties[0]
+            .0
+            .send_packet(now, wall(now), &udp(1, 2))
+            .unwrap();
+        net.run(now, 0, out.datagrams);
+        assert_eq!(forwarded(&net), before, "relayed through a former relay");
+        // The direct retry (§12.3) does not wait `DIRECT_RETRY_INTERVAL`.
+        let later = now + crate::REKEY_TIMEOUT + Duration::from_secs(1);
+        net.tick(later);
+        assert!(net.parties[0].0.status(&b).unwrap().handshake_in_flight);
+    }
 }

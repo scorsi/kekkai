@@ -50,14 +50,14 @@ pub struct NodeConfig {
     pub metrics: Option<MetricsSection>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsSection {
     /// `127.0.0.1:PORT` or `[::1]:PORT`: loopback only, the local agent is the only scraper.
     pub listen: SocketAddr,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSection {
     pub private_key_file: PathBuf,
@@ -263,7 +263,7 @@ fn check_metrics(metrics: &Option<MetricsSection>) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FirewallSection {
     /// Bound of the UDP flow and fragment table (spec §15).
@@ -283,7 +283,7 @@ fn default_udp_flows_max() -> usize {
     UDP_FLOWS_MAX
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LogSection {
     /// A `tracing` filter (`info`, `kekkai_io=debug,info`); `RUST_LOG` overrides it.
@@ -321,6 +321,25 @@ impl NodeConfig {
             ("log", self.log == new.log),
             ("metrics", self.metrics == new.metrics),
         ])
+    }
+
+    /// Spec §4.1: what a reload runs with, `new`'s lists and this file's restart-only
+    /// sections, validated as at start (an address moved from the node to a peer, or an
+    /// IPv6 peer under a running MTU below 1280, is refused although `new` alone is valid).
+    pub fn with_lists(&self, new: Self) -> Result<Self, String> {
+        let effective = Self {
+            node: self.node.clone(),
+            firewall: self.firewall.clone(),
+            log: self.log.clone(),
+            metrics: self.metrics.clone(),
+            peers: new.peers,
+            lighthouses: new.lighthouses,
+            relays: new.relays,
+        };
+        effective
+            .validate()
+            .map_err(|e| format!("with the running restart-only sections: {e}"))?;
+        Ok(effective)
     }
 
     /// Parses and validates a node file: what `kekkai-node config check` runs.
@@ -731,6 +750,35 @@ listen = "127.0.0.1:9481"
         assert_eq!(c.log.level, "info");
         assert_eq!(c.firewall.udp_flows_max, 4096);
         assert!(c.peers.is_empty());
+    }
+
+    /// R2, spec §4.1: the effective configuration of a reload is validated, not only the
+    /// file: the node's own address given to a peer while the node moves (restart-only),
+    /// and an IPv6 peer under a running MTU below 1280 while the file raises it.
+    #[test]
+    fn reload_validates_the_effective_configuration() {
+        let file = |own: &str, mtu: u16, peer: &str| {
+            format!(
+                "[node]\nprivate_key_file = \"/k\"\naddresses = [\"{own}\"]\nmtu = {mtu}\n\
+                 [[peers]]\nname = \"a\"\npublic_key = \"{PUB_A}\"\naddresses = [\"{peer}\"]\n"
+            )
+        };
+        let parse = |text: String| NodeConfig::parse(&text).unwrap();
+        let running = parse(file("10.0.0.1/32", 1280, "10.0.0.2/32"));
+        let moved = parse(file("10.0.0.9/32", 1280, "10.0.0.1/32"));
+        let err = running.with_lists(moved).unwrap_err();
+        assert!(err.contains("appears twice"), "{err}");
+        let running = parse(file("10.0.0.1/32", 1200, "10.0.0.2/32"));
+        let v6 = parse(file("10.0.0.1/32", 1280, "fd00::2/128"));
+        assert!(running.with_lists(v6).unwrap_err().contains("IPv6"));
+        let fine = parse(file("10.0.0.9/32", 1280, "10.0.0.3/32"));
+        let effective = running.with_lists(fine).unwrap();
+        assert_eq!(
+            effective.addresses(),
+            running.addresses(),
+            "restart-only kept"
+        );
+        assert_eq!(effective.peers[0].addresses, ["10.0.0.3/32"]);
     }
 
     #[test]

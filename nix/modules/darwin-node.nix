@@ -63,14 +63,18 @@ in
     # 0026, spec §4.1: the plist names the stable path, so a peer change leaves it untouched
     # and launchd does not restart the daemon (a binary change does). A change of a
     # restart-only section restarts it; any other change of the file reloads it (SIGHUP).
+    # A marker records an action that succeeded, never one about to run: a launchctl failure
+    # stops the activation (nix-darwin runs it under `set -e`) before the marker moves, so the
+    # next activation runs the action again. `.config` means "signalled": a reload the
+    # daemon then refuses shows as `reload-failed` in its log, not here.
     system.activationScripts.postActivation.text = ''
       if [ "$(cat ${restartMarker} 2>/dev/null)" != "${cfg.restartFingerprint}" ]; then
+        /bin/launchctl kickstart -k system/${label}
+        echo "${cfg.configFile}" > ${marker}
         echo "${cfg.restartFingerprint}" > ${restartMarker}
-        echo "${cfg.configFile}" > ${marker}
-        /bin/launchctl kickstart -k system/${label} 2>/dev/null || true
       elif [ "$(cat ${marker} 2>/dev/null)" != "${cfg.configFile}" ]; then
+        /bin/launchctl kill SIGHUP system/${label}
         echo "${cfg.configFile}" > ${marker}
-        /bin/launchctl kill SIGHUP system/${label} 2>/dev/null || true
       fi
     '';
   };

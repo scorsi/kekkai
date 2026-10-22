@@ -65,6 +65,8 @@ pub struct State {
     pub log_peers: bool,
     /// Datagrams and tunnel packets the core dropped, by `DropReason` name (ADR 0019).
     pub drops: BTreeMap<&'static str, u64>,
+    /// What `log_events` saw of each party at the last tick; follows the lists (§4.1).
+    seen: HashMap<PublicKey, Seen>,
 }
 
 impl State {
@@ -77,6 +79,29 @@ impl State {
             locals: None,
             log_peers: true,
             drops: BTreeMap::new(),
+            seen: HashMap::new(),
+        }
+    }
+
+    /// A node's reload (spec §4.1): replaces the IO lists. A key removed or moved to another
+    /// role starts with a fresh log history, as its core state does, so that its counters
+    /// are never compared with those of its previous life.
+    pub fn set_lists(
+        &mut self,
+        peers: HashMap<PublicKey, PeerInfo>,
+        lighthouses: Vec<(PublicKey, String)>,
+        relays: Vec<(PublicKey, String)>,
+    ) {
+        let role = |s: &Self, k: &PublicKey| {
+            let has = |l: &[(PublicKey, String)]| l.iter().any(|(x, _)| x == k);
+            (s.peers.contains_key(k), has(&s.lighthouses), has(&s.relays))
+        };
+        let before: Vec<_> = self.seen.keys().map(|k| (*k, role(self, k))).collect();
+        (self.peers, self.lighthouses, self.relays) = (peers, lighthouses, relays);
+        for (k, r) in before {
+            if role(self, &k) != r {
+                self.seen.remove(&k);
+            }
         }
     }
 
@@ -94,6 +119,7 @@ impl State {
             .count();
         self.node
             .set_lighthouse_peers(peers.keys().copied().collect());
+        self.seen.retain(|k, _| peers.contains_key(k));
         self.peers = peers;
         (added, removed, renamed)
     }
@@ -144,7 +170,7 @@ impl Tunnel for NoTunnel {
 }
 
 /// What `log_events` remembers of a peer between two ticks.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Seen {
     path: &'static str,
     counters: Counters,
@@ -163,7 +189,6 @@ pub async fn run(
 ) -> io::Result<()> {
     let mut udp_buf = vec![0u8; 1 << 16];
     let mut tun_buf = vec![0u8; 1 << 16];
-    let mut seen: HashMap<PublicKey, Seen> = HashMap::new();
     let lock = || state.lock().expect("no panic while holding the state");
     let log_peers = lock().log_peers;
     loop {
@@ -229,7 +254,7 @@ pub async fn run(
                     }
                 }
                 let output = guard.node.tick(clock::monotonic(), clock::wall());
-                log_events(&guard, &mut seen);
+                log_events(&mut guard);
                 drop(guard);
                 output
             }
@@ -262,10 +287,11 @@ async fn send_datagrams(
 /// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
 /// completed, path change, endpoint change, direct-path failure, lighthouse and relay
 /// session state.
-fn log_events(state: &State, seen: &mut HashMap<PublicKey, Seen>) {
+fn log_events(state: &mut State) {
     if !state.log_peers {
         return;
     }
+    let seen = &mut state.seen;
     for (key, peer) in &state.peers {
         let Some(status) = state.node.status(key) else {
             continue;
@@ -379,6 +405,44 @@ mod tests {
         assert!(state.node.status(&key(1)).is_none());
         assert!(state.node.status(&key(3)).is_some());
         assert_eq!(state.peers[&key(2)].name, "b2");
+    }
+
+    /// R7, spec §4.1: a key removed, even if listed again before the next tick, or moved to
+    /// another role, forgets its log history (its next `handshake-completed` compares with
+    /// zero counters, like its fresh core state); a kept key keeps it, and the history never
+    /// outgrows the lists.
+    #[test]
+    fn a_reload_resets_the_log_history() {
+        let key = |b: u8| StaticKey::from_bytes([b; 32]).clamped().public();
+        let (a, b) = (key(1), key(2));
+        let info = |name: &str| PeerInfo {
+            name: name.into(),
+            ..PeerInfo::default()
+        };
+        let both = HashMap::from([(a, info("a")), (b, info("b"))]);
+        let only_b = HashMap::from([(b, info("b"))]);
+        let node = Node::new(StaticKey::from_bytes([9; 32]).clamped(), Vec::new());
+        let mut state = State::new(node, HashMap::new());
+        state.set_lists(both.clone(), Vec::new(), Vec::new());
+        let busy = |state: &mut State, k| {
+            let mut seen = super::Seen::default();
+            seen.counters.handshakes_initiated = 3;
+            state.seen.insert(k, seen);
+        };
+        busy(&mut state, a);
+        busy(&mut state, b);
+        state.set_lists(only_b.clone(), Vec::new(), Vec::new());
+        state.set_lists(both.clone(), Vec::new(), Vec::new());
+        assert!(!state.seen.contains_key(&a), "removed and re-added");
+        assert_eq!(state.seen[&b].counters.handshakes_initiated, 3, "kept");
+        busy(&mut state, a);
+        state.set_lists(only_b.clone(), vec![(a, "l".into())], Vec::new());
+        assert!(!state.seen.contains_key(&a), "peer to lighthouse");
+        busy(&mut state, a);
+        state.set_lists(only_b.clone(), Vec::new(), vec![(a, "r".into())]);
+        assert!(!state.seen.contains_key(&a), "lighthouse to relay");
+        state.reload_named_peers(HashMap::new());
+        assert!(state.seen.is_empty(), "a lighthouse's or relay's reload");
     }
 
     #[test]

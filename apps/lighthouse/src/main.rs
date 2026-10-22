@@ -94,6 +94,8 @@ fn run(path: &Path) -> Result<(), String> {
 }
 
 async fn serve(path: &Path, config: LighthouseConfig) -> Result<(), String> {
+    // ADR 0026: first, so that a SIGHUP during start-up is a pending reload, not an exit.
+    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
     let key = kekkai_io::load_key(&config.service.private_key_file).map_err(|e| e.to_string())?;
     let peers = peers(&config)?;
     let node = Node::lighthouse(key, peers.keys().copied().collect());
@@ -122,7 +124,6 @@ async fn serve(path: &Path, config: LighthouseConfig) -> Result<(), String> {
         let state = state.clone();
         std::thread::spawn(move || kekkai_io::metrics::serve(listener, &state, render));
     }
-    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
     info!(event = "ready", port, peers = config.peers.len());
     tokio::select! {

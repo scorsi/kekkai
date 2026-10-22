@@ -329,6 +329,14 @@ impl Node {
         }
         let routes = &self.routes;
         self.firewall.forget(|ip| old.get(ip) != routes.get(ip));
+        // §4.1: a kept peer that lost an address may hold staged packets for it.
+        for (ip, key) in &old {
+            if routes.get(ip) != Some(key) {
+                if let Some(peer) = self.peers.get_mut(key) {
+                    peer.drop_staged();
+                }
+            }
+        }
         let keep: Vec<PublicKey> = peers.iter().map(|c| c.public_key).collect();
         self.retain(Role::Peer, &keep);
         for config in peers {
@@ -385,7 +393,21 @@ impl Node {
         if let Some(mut peer) = self.peers.remove(key) {
             peer.forget(&mut self.indices);
         }
-        self.links.remove(key);
+        let was_relay = self
+            .links
+            .remove(key)
+            .is_some_and(|l| l.role == Role::Relay);
+        if was_relay {
+            // §4.1: a session relayed by this key loses its path; the direct retry of §12.3
+            // starts at the next tick instead of `DIRECT_RETRY_INTERVAL` later.
+            for (k, link) in &mut self.links {
+                let orphaned = (self.peers.get(k).and_then(Peer::current))
+                    .is_some_and(|s| link.relayed.get(&s.local_index) == Some(key));
+                if orphaned {
+                    link.retry_at = Some(Duration::ZERO);
+                }
+            }
+        }
         if let Some(registry) = &mut self.registry {
             registry.forget(key);
         }
@@ -1115,6 +1137,11 @@ impl Node {
                 match path {
                     Path::Direct(e) => out.push((e, datagram.clone())),
                     Path::Relayed(r) => {
+                        // §4.1: only a configured relay relays; a path through a key that
+                        // left the relay list is unavailable, never direct.
+                        if self.links.get(&r).is_none_or(|l| l.role != Role::Relay) {
+                            continue;
+                        }
                         let Some(relay) = self.peers.get_mut(&r) else {
                             continue;
                         };
@@ -1164,6 +1191,20 @@ impl Node {
     #[cfg(test)]
     pub(crate) fn index_count(&self) -> usize {
         self.indices.len()
+    }
+
+    /// Keys holding a lighthouse query budget and keys holding relay sender state, sorted:
+    /// what [`Node::relay_senders`] cannot show (it lists the configured keys).
+    #[cfg(test)]
+    pub(crate) fn per_key_state(&self) -> (Vec<PublicKey>, Vec<PublicKey>) {
+        let sorted = |mut v: Vec<PublicKey>| {
+            v.sort();
+            v
+        };
+        let budgets = (self.registry.as_ref()).map_or_else(Vec::new, |r| r.budget_keys());
+        let senders = (self.forwarder.as_ref())
+            .map_or_else(Vec::new, |f| f.senders.keys().copied().collect());
+        (sorted(budgets), sorted(senders))
     }
 
     /// Seals `inner` on `key`'s `current` session and routes it: a misbehaving party.

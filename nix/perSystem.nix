@@ -344,6 +344,8 @@
             && fingerprint portChange != fingerprint darwinEval;
           assert lib.hasInfix "/bin/launchctl kill SIGHUP system/org.nixos.kekkai-node"
             darwinEval.system.activationScripts.postActivation.text;
+          # R5: no failure is swallowed.
+          assert !lib.hasInfix "|| true" darwinEval.system.activationScripts.postActivation.text;
           assert lib.all
             (
               unit:
@@ -361,7 +363,54 @@
               "kekkai-relay"
             ];
           assert group.members == [ "alice" ] && darwinEval.users.knownGroups == [ "kekkai" ];
+          let
+            # The darwin activation fragment against a fake launchctl and markers in $TMPDIR,
+            # under `set -e` like nix-darwin's activate script.
+            activation =
+              e:
+              pkgs.writeText "kekkai-activation" (
+                builtins.replaceStrings [ "/var/db/" "/bin/launchctl" ] [ "$MARKERS/" "launchctl" ]
+                  e.system.activationScripts.postActivation.text
+              );
+            peerChange = darwinWith {
+              services.kekkai-node.peers.c = {
+                publicKey = "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=";
+                addresses = [ "10.0.0.9/32" ];
+              };
+            };
+          in
           pkgs.runCommand "modules-eval" { } ''
+            # R5, ADR 0026: markers move only after a successful launchctl action.
+            export MARKERS=$TMPDIR/markers CALLS=$TMPDIR/calls
+            mkdir -p $MARKERS bin
+            printf '#!${pkgs.runtimeShell}\necho "$*" >> %s\n[ ! -e %s ]\n' $CALLS $TMPDIR/fail > bin/launchctl
+            chmod +x bin/launchctl
+            export PATH=$PWD/bin:$PATH
+            run() { sh -ec ". $1"; }
+            calls() { cat $CALLS 2>/dev/null | wc -l | tr -d ' '; }
+            # First activation, launchctl refuses: the activation fails, no marker is written.
+            touch $TMPDIR/fail
+            ! run ${activation darwinEval}
+            [ -z "$(ls $MARKERS)" ]
+            rm $TMPDIR/fail
+            # The retry restarts (no marker), then a second run does nothing.
+            run ${activation darwinEval}
+            grep -q '^kickstart -k system/org.nixos.kekkai-node$' $CALLS
+            run ${activation darwinEval}
+            [ "$(calls)" = 2 ]
+            # A peer change signals; refused, the config marker stays and the retry signals again.
+            touch $TMPDIR/fail
+            ! run ${activation peerChange}
+            rm $TMPDIR/fail
+            run ${activation peerChange}
+            [ "$(tail -n 1 $CALLS)" = "kill SIGHUP system/org.nixos.kekkai-node" ]
+            [ "$(calls)" = 4 ]
+            run ${activation peerChange}
+            [ "$(calls)" = 4 ]
+            # Interrupted after the kickstart, before the markers: the next run restarts again.
+            rm $MARKERS/kekkai-node.restart
+            run ${activation darwinEval}
+            [ "$(tail -n 1 $CALLS)" = "kickstart -k system/org.nixos.kekkai-node" ]
             ${lib.getExe pkgs.kekkai-node} config check --config ${
               darwinEval.environment.etc."kekkai/node.toml".source
             }

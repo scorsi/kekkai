@@ -95,6 +95,8 @@ fn run(path: &Path) -> Result<(), String> {
 }
 
 async fn serve(path: &Path, config: RelayConfig) -> Result<(), String> {
+    // ADR 0026: first, so that a SIGHUP during start-up is a pending reload, not an exit.
+    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
     let key = kekkai_io::load_key(&config.service.private_key_file).map_err(|e| e.to_string())?;
     let peers = peers(&config)?;
     let limit = config.service.max_bytes_per_second;
@@ -124,7 +126,6 @@ async fn serve(path: &Path, config: RelayConfig) -> Result<(), String> {
         let state = state.clone();
         std::thread::spawn(move || kekkai_io::metrics::serve(listener, &state, render));
     }
-    let hangup = signal(SignalKind::hangup()).map_err(|e| format!("SIGHUP handler: {e}"))?;
     systemd::notify_ready().map_err(|e| format!("sd_notify: {e}"))?;
     info!(
         event = "ready",

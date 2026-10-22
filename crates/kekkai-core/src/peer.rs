@@ -381,6 +381,12 @@ impl Peer {
         self.staged.clear();
     }
 
+    /// §4.1: the peer lost an address its staged packets may be for; sessions and the
+    /// in-flight handshake stay.
+    pub fn drop_staged(&mut self) {
+        self.staged.clear();
+    }
+
     pub(crate) fn sessions(&self) -> impl Iterator<Item = &Session> {
         [&self.current, &self.previous, &self.next]
             .into_iter()

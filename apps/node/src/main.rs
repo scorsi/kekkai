@@ -103,6 +103,9 @@ fn run(path: &Path) -> Result<(), String> {
 }
 
 async fn serve(path: &Path, config: NodeConfig) -> Result<(), String> {
+    // ADR 0026, spec §4.1: first, so that a SIGHUP during start-up (DNS, interface) is a
+    // pending reload, applied once ready, and never the default action (exit).
+    let hangup = hangup()?;
     let key = kekkai_io::load_key(&config.node.private_key_file).map_err(|e| e.to_string())?;
     let lists = Lists::new(&config).await?;
     let mut node = Node::new(key, Vec::new());
@@ -132,11 +135,10 @@ async fn serve(path: &Path, config: NodeConfig) -> Result<(), String> {
         port = config.node.listen_port,
         peers = config.peers.len()
     );
-    let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|e| format!("SIGHUP handler: {e}"))?;
     let reload = Reload {
         path,
         interface: &interface,
+        routes: lists.routes(),
         running: config,
         lists,
     };
@@ -225,9 +227,11 @@ impl Lists {
         state.node.set_peers(self.configs.0.clone());
         state.node.set_lighthouses(self.configs.1.clone());
         state.node.set_relays(self.configs.2.clone());
-        state.peers = self.peers.clone();
-        state.lighthouses = self.lighthouses.clone();
-        state.relays = self.relays.clone();
+        state.set_lists(
+            self.peers.clone(),
+            self.lighthouses.clone(),
+            self.relays.clone(),
+        );
         state.locals = (!self.lighthouses.is_empty()).then(|| Locals {
             listen_port: running.node.listen_port,
             overlay: running.addresses(),
@@ -249,13 +253,21 @@ impl Lists {
     }
 }
 
-/// What a reload needs beside the state: the file, the interface for the routes, the file
-/// the node runs with and the lists it installed.
+/// What a reload needs beside the state: the file, the interface for the routes, the host
+/// routes the kernel holds, the configuration the node runs with and the lists it installed.
 struct Reload<'a> {
     path: &'a Path,
     interface: &'a str,
+    /// What the kernel holds, which a failed rollback can leave apart from `lists`.
+    routes: Vec<IpAddr>,
     running: NodeConfig,
     lists: Lists,
+}
+
+/// The `SIGHUP` handler (ADR 0026); signals received from here on are kept until read.
+fn hangup() -> Result<tokio::signal::unix::Signal, String> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .map_err(|e| format!("SIGHUP handler: {e}"))
 }
 
 /// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver; on `SIGHUP`,
@@ -283,15 +295,19 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
     let _ = systemd::notify("RELOADING=1");
     let result = async {
         let new = load(r.path)?;
-        let next = Lists::new(&new).await?;
-        set_routes(r.interface, &r.lists.routes(), &next.routes())
-            .map_err(|e| format!("{}: {e}", r.interface))?;
-        Ok::<_, String>((new, next))
+        let restart = r.running.restart_sections(&new);
+        let effective = r.running.with_lists(new)?;
+        let next = Lists::new(&effective).await?;
+        let interface = r.interface;
+        set_routes(&mut r.routes, &next.routes(), |route, add| {
+            set_route(interface, route, add)
+        })
+        .map_err(|e| format!("{interface}: {e}"))?;
+        Ok::<_, String>((restart, effective, next))
     };
     match result.await {
         Err(e) => error!(event = "reload-failed", err = %e),
-        Ok((new, next)) => {
-            let restart = r.running.restart_sections(&new);
+        Ok((restart, effective, next)) => {
             if !restart.is_empty() {
                 let sections = restart.join(",");
                 warn!(
@@ -305,11 +321,9 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
             let changed = (now.iter())
                 .filter(|(k, d)| old.get(*k).is_some_and(|o| o != *d))
                 .count();
-            next.install(&mut state.lock().expect("no poison"), &r.running);
+            next.install(&mut state.lock().expect("no poison"), &effective);
             r.lists = next;
-            r.running.peers = new.peers;
-            r.running.lighthouses = new.lighthouses;
-            r.running.relays = new.relays;
+            r.running = effective;
             info!(
                 event = "reloaded",
                 peers = r.running.peers.len(),
@@ -322,22 +336,49 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
     let _ = systemd::notify("READY=1");
 }
 
-/// Adds the new host routes, then deletes the old ones (spec §11); a refused addition
-/// undoes the others, so that a failed reload leaves the routes as they were.
-fn set_routes(interface: &str, old: &[IpAddr], new: &[IpAddr]) -> io::Result<()> {
-    let added: Vec<IpAddr> = new.iter().filter(|r| !old.contains(r)).copied().collect();
-    for (i, route) in added.iter().enumerate() {
-        if let Err(e) = set_route(interface, *route, true) {
-            for r in &added[..i] {
-                let _ = set_route(interface, *r, false);
+/// Spec §4.1, §11: takes the kernel's host routes from `installed` to `new`, additions
+/// first, as one transaction. A refused operation undoes the completed ones, in reverse,
+/// and fails the reload; an undo the kernel refuses too is logged and named in the error.
+/// `installed` follows every operation that succeeded, so the next reload reconciles a
+/// route such an undo left behind (or failed to restore).
+// shortcut: a route deleted behind the daemon's back fails every reload that removes it
+// (the kernel refuses the deletion); a restart reconciles. Treat "not found" as done if seen.
+fn set_routes(
+    installed: &mut Vec<IpAddr>,
+    new: &[IpAddr],
+    mut op: impl FnMut(IpAddr, bool) -> io::Result<()>,
+) -> Result<(), String> {
+    let adds = new
+        .iter()
+        .filter(|r| !installed.contains(r))
+        .map(|r| (*r, true));
+    let deletes = installed
+        .iter()
+        .filter(|r| !new.contains(r))
+        .map(|r| (*r, false));
+    let plan: Vec<(IpAddr, bool)> = adds.chain(deletes).collect();
+    let apply = |installed: &mut Vec<IpAddr>, route: IpAddr, add: bool| {
+        installed.retain(|r| *r != route);
+        if add {
+            installed.push(route);
+        }
+    };
+    for (i, &(route, add)) in plan.iter().enumerate() {
+        if let Err(e) = op(route, add) {
+            let verb = if add { "adding" } else { "deleting" };
+            let mut err = format!("{verb} route {route}: {e}");
+            for &(done, added) in plan[..i].iter().rev() {
+                match op(done, !added) {
+                    Ok(()) => apply(installed, done, !added),
+                    Err(e) => {
+                        error!(event = "route-rollback-failed", route = %done, err = %e);
+                        err.push_str(&format!("; undoing route {done}: {e}"));
+                    }
+                }
             }
-            return Err(e);
+            return Err(err);
         }
-    }
-    for route in old.iter().filter(|r| !new.contains(r)) {
-        if let Err(e) = set_route(interface, *route, false) {
-            warn!(event = "route-delete-failed", route = %route, err = %e);
-        }
+        apply(installed, route, add);
     }
     Ok(())
 }
@@ -537,6 +578,7 @@ mod tests {
         let mut r = Reload {
             path: &path,
             interface: "none",
+            routes: lists.routes(),
             running,
             lists,
         };
@@ -554,7 +596,107 @@ mod tests {
         assert_eq!(names(&state), ["b"]);
         assert_eq!(r.running.peers[0].name, "b");
         assert_eq!(r.running.node.listen_port, 4802, "kept until a restart");
+
+        // R2: the file moves the node to .9 (restart-only) and gives its running .1 to the
+        // peer; valid alone, refused with the running address. No route command runs.
+        let transfer = file("c", 4802)
+            .replace("10.0.0.1/32", "10.0.0.9/32")
+            .replace("10.0.0.2/32", "10.0.0.1/32");
+        std::fs::write(&path, transfer).unwrap();
+        runtime.block_on(reload(&state, &mut r));
+        assert_eq!(names(&state), ["b"], "effective configuration refused");
+        assert_eq!(r.routes, ["10.0.0.2".parse::<IpAddr>().unwrap()]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R6, ADR 0026: a SIGHUP received after the handler is installed but while start-up is
+    /// still running (here a delay) does not kill the process and is read once ready.
+    #[test]
+    fn a_hangup_during_start_up_is_a_pending_reload() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut hangup = hangup().unwrap();
+            let pid = std::process::id().to_string();
+            let sent = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("kill -HUP {pid}")])
+                .status()
+                .unwrap();
+            assert!(sent.success());
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let pending = tokio::time::timeout(Duration::from_secs(5), hangup.recv());
+            assert!(pending.await.is_ok(), "the reload was lost");
+        });
+    }
+
+    /// R4, spec §4.1: the route transaction against a model kernel with injected refusals.
+    /// A refused second addition or second deletion undoes the completed operations and
+    /// fails; a refused undo is reported and stays in `installed`, which the next attempt
+    /// reconciles.
+    #[test]
+    fn routes_change_as_one_transaction() {
+        use std::collections::BTreeSet;
+        let ip = |n: u8| -> IpAddr { format!("10.0.0.{n}").parse().unwrap() };
+        // The kernel's routes, and the operations to refuse: (route, add), at most once each.
+        struct Kernel {
+            routes: BTreeSet<IpAddr>,
+            refuse: Vec<(IpAddr, bool)>,
+        }
+        impl Kernel {
+            fn op(&mut self, route: IpAddr, add: bool) -> io::Result<()> {
+                if let Some(i) = self.refuse.iter().position(|r| *r == (route, add)) {
+                    self.refuse.remove(i);
+                    return Err(io::Error::other("refused"));
+                }
+                let changed = if add {
+                    self.routes.insert(route)
+                } else {
+                    self.routes.remove(&route)
+                };
+                if changed {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("exists or missing"))
+                }
+            }
+        }
+        let start = || Kernel {
+            routes: BTreeSet::from([ip(1), ip(2)]),
+            refuse: Vec::new(),
+        };
+        let sorted = |v: &[IpAddr]| v.iter().copied().collect::<BTreeSet<_>>();
+        let (old, new) = (vec![ip(1), ip(2)], vec![ip(3), ip(4)]);
+
+        for refused in [(ip(4), true), (ip(2), false)] {
+            let mut kernel = start();
+            kernel.refuse.push(refused);
+            let mut installed = old.clone();
+            let err = set_routes(&mut installed, &new, |r, a| kernel.op(r, a)).unwrap_err();
+            assert!(err.contains(&refused.0.to_string()), "{err}");
+            assert_eq!(kernel.routes, sorted(&old), "{refused:?}: undone");
+            assert_eq!(sorted(&installed), sorted(&old));
+            set_routes(&mut installed, &new, |r, a| kernel.op(r, a)).unwrap();
+            assert_eq!(kernel.routes, sorted(&new), "{refused:?}: retried");
+        }
+
+        // The second deletion is refused and so is the undo of the first addition (3).
+        let mut kernel = start();
+        kernel.refuse = vec![(ip(2), false), (ip(3), false)];
+        let mut installed = old.clone();
+        let err = set_routes(&mut installed, &new, |r, a| kernel.op(r, a)).unwrap_err();
+        assert!(err.contains("undoing route 10.0.0.3"), "{err}");
+        assert_eq!(kernel.routes, sorted(&[ip(1), ip(2), ip(3)]));
+        assert_eq!(
+            sorted(&installed),
+            kernel.routes,
+            "installed is what the kernel holds"
+        );
+        // The next reload, back to the old list, removes the residual route.
+        set_routes(&mut installed, &old, |r, a| kernel.op(r, a)).unwrap();
+        assert_eq!(kernel.routes, sorted(&old));
+        assert_eq!(sorted(&installed), sorted(&old));
     }
 
     /// L4: an unresolved lighthouse is installed with no candidate, shows in the node's

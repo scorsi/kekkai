@@ -158,8 +158,16 @@ pkgs.testers.nixosTest {
     ''
       ${common.script}
 
+      import time
+      from datetime import datetime
+
       B = "${keys.b.public}"
       C = "${keys.stranger.public}"
+      # Spec §3: the initiator rekeys a session this old (§8.6), the responder later. A
+      # receiver index is compared across at most WINDOW seconds, on a session young enough
+      # that no rekey can replace it meanwhile (spec §4.1: a later rekey is not the reload).
+      REKEY_AFTER_TIME = 120
+      WINDOW = 60
       SYSTEM = {
           "a": "${nodes.a.system.build.toplevel}",
           "c": "${nodes.c.system.build.toplevel}",
@@ -196,6 +204,39 @@ pkgs.testers.nixosTest {
           )
 
 
+      def fresh_indices(m, addresses):
+          """The receiver index of each key of `addresses` (key: overlay address) and the end
+          of the comparison window, once every session is younger than REKEY_AFTER_TIME -
+          WINDOW; pings the addresses until rekeys make them so."""
+          for _ in range(40):
+              for ip in addresses.values():
+                  m.succeed(f"ping -c 3 -i 1 -W 2 {ip} >/dev/null")
+              now = float(m.succeed("date +%s.%N"))
+              peers = {k: peer(m, k) for k in addresses}
+              made = {
+                  k: datetime.fromisoformat(p["last_handshake"].replace("Z", "+00:00"))
+                  for k, p in peers.items()
+              }
+              if all(now - t.timestamp() < REKEY_AFTER_TIME - WINDOW for t in made.values()):
+                  indices = {k: p["receiver_index"] for k, p in peers.items()}
+                  return indices, time.monotonic() + WINDOW
+          raise Exception(f"no fresh sessions: {status(m)}")
+
+
+      def same_indices(m, kept):
+          indices, deadline = kept
+          assert time.monotonic() < deadline, f"over {WINDOW} s: a rekey may have run"
+          now = {k: peer(m, k)["receiver_index"] for k in indices}
+          assert now == indices, (indices, status(m))
+
+
+      def routes(m):
+          return (
+              m.succeed("ip route show dev kekkai0"),
+              m.succeed("ip -6 route show dev kekkai0"),
+          )
+
+
       def listed(m, key):
           return [p for p in status(m)["peers"] if p["public_key"] == key]
 
@@ -220,12 +261,12 @@ pkgs.testers.nixosTest {
 
       with subtest("adding a peer reloads: it becomes reachable, b keeps its session"):
           before = process(a, NODE)
-          index = peer(a, B)["receiver_index"]
+          kept = fresh_indices(a, {B: "${overlay4 "b"}"})
           reloaded_only(switch(a, "added"), NODE)
           wait_event(a, NODE, "reloaded", 1)
-          assert peer(a, B)["receiver_index"] == index, (index, status(a))
+          same_indices(a, kept)
           a.succeed("ping -c 2 -W 2 ${overlay4 "b"}")
-          assert peer(a, B)["receiver_index"] == index, (index, status(a))
+          same_indices(a, kept)
           c.wait_until_succeeds("ping -c 1 -W 1 ${overlay4 "a"}", timeout=60)
           a.succeed("ping -c 2 -W 2 ${overlay6 "c"}")
           assert "${overlay4 "c"}" in a.succeed("ip route show dev kekkai0")
@@ -234,22 +275,26 @@ pkgs.testers.nixosTest {
 
       with subtest("an invalid file is refused and changes nothing"):
           before = process(a, NODE)
+          kept = fresh_indices(a, {B: "${overlay4 "b"}", C: "${overlay4 "c"}"})
+          installed = routes(a)
           reloaded_only(switch(a, "invalid"), NODE)
           wait_event(a, NODE, "reload-failed", 1)
           assert {p["name"] for p in status(a)["peers"]} == {"b", "c"}, status(a)
+          same_indices(a, kept)
+          assert routes(a) == installed, (installed, routes(a))
           a.succeed("ping -c 2 -W 2 ${overlay4 "c"}")
           assert process(a, NODE) == before
 
       with subtest("removing a peer reloads: its handshakes are refused, c keeps its session"):
           before = process(a, NODE)
-          index = peer(a, C)["receiver_index"]
+          kept = fresh_indices(a, {C: "${overlay4 "c"}"})
           refused = rejected(a)
           reloaded_only(switch(a, "removed"), NODE)
           wait_event(a, NODE, "reloaded", 2)
           assert listed(a, B) == [], status(a)
           assert "${overlay4 "b"}" not in a.succeed("ip route show dev kekkai0")
           assert "${overlay6 "b"}" not in a.succeed("ip -6 route show dev kekkai0")
-          assert peer(a, C)["receiver_index"] == index, (index, status(a))
+          same_indices(a, kept)
           # b still holds its session: past the 15 s "new handshake" timer it initiates
           # again, and a drops its message 1 (spec §7.6 identity).
           b.succeed("timeout 60 ping -i 1 ${overlay4 "a"} >/dev/null 2>&1 &")

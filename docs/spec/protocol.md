@@ -157,12 +157,24 @@ Vectors: [`vectors/keygen.json`](vectors/keygen.json).
 
 A reload (ADR 0026: `SIGHUP`) replaces the party's configured lists without restarting it:
 on a node `[[peers]]`, `[[lighthouses]]` and `[[relays]]`, on a lighthouse or a relay its
-`[[peers]]`. The IO layer reads the file again, validates it exactly as at start (the same
-parser as `config check`) and resolves its endpoints; only then does it apply anything.
-An invalid file, or a host route the kernel refuses (§11), changes nothing: the party logs
-`reload-failed{err}` at `error` and runs on with the lists it had. A DNS name that does not
-resolve is not an error (installed without candidates and retried, §13.1). The core applies
-the new lists as a **diff by static public key**:
+`[[peers]]`. The IO layer reads the file again and validates it exactly as at start (the
+same parser as `config check`); it then validates the **effective configuration**, the new
+lists with the running restart-only sections (table below), with the same checks, so that
+for instance the node's running address given to a peer, or an IPv6 peer under a running
+MTU below 1280, is refused although the file alone is valid. It resolves the endpoints and
+changes the host routes (§11) as one transaction: additions, then deletions; a refused
+operation undoes those already done, in reverse. Only then does the core apply anything.
+An invalid file or effective configuration, or a refused route, changes nothing: the party
+logs `reload-failed{err}` at `error` and runs on with the lists it had. An undo the kernel
+refuses too is logged `route-rollback-failed{route,err}` at `error` and named in `err`; the
+IO layer keeps the set of routes the kernel holds, which may then differ from the lists, and
+the next reload starts from that set, so it reconciles the residual route. A DNS name that
+does not resolve is not an error (installed without candidates and retried, §13.1).
+
+The party installs its `SIGHUP` handler first thing at start: a `SIGHUP` received during
+start-up is a pending reload, applied once the party is ready, and readiness (`READY=1`,
+ADR 0018) implies the handler. The core applies the new lists as a **diff by static public
+key**:
 
 - **Added key**: listed at once (§4 `verify` accepts it) with a fresh state; on a node its
   addresses enter the routing table (§11) and the IO layer adds their host routes.
@@ -173,17 +185,32 @@ the new lists as a **diff by static public key**:
   `last_timestamp` (§7.4) forgotten: listing it again later accepts a replayed message 1
   once, as a restart does. A lighthouse drops its registration and query budget (§13.2), a
   relay its sender counters and bucket (§14.2). On a node its routes go, and so do the
-  firewall entries (§15) whose source or destination is one of its addresses. Its later
-  message 1 is refused (§7.6 identity, §16). The removed party learns nothing: its own
-  session towards this party stays up on its side until its "new handshake" timer (§9)
-  initiates again, about 15 s after its next packet, and that handshake is refused.
+  firewall entries (§15) whose source or destination is one of its addresses. The IO
+  layer forgets its per-key log history (ADR 0019): listed again, even before the next
+  tick, its events compare with its fresh counters. Its later message 1 is refused (§7.6
+  identity, §16). The removed party learns nothing: its own session towards this party
+  stays up on its side until its "new handshake" timer (§9) initiates again, about 15 s
+  after its next packet, and that handshake is refused. The boundary is the core's: no
+  datagram from the removed key is processed after the reload, but output the core
+  produced before it (datagrams and tunnel packets of packets already processed, still
+  being written by the IO layer) may still leave after it.
+- **Removed relay**: beside the above, a session of another peer whose path is
+  `relayed(R)` (§12.4) through a key R that left the relay list keeps its keys and index,
+  but that path is unavailable: nothing is sent on it, neither wrapped in a
+  `relay_forward` to R nor sent direct instead, until an authenticated packet or a
+  handshake gives the session a path again. The direct retry of §12.3 starts at the next
+  tick. Only a configured relay relays (§14.1), whatever session R has in another role.
 - **Kept key, unchanged**: nothing happens. Its sessions, indices, timers, endpoint and
-  learnt candidates are untouched: no handshake, the same `receiver_index`.
+  learnt candidates are untouched: no handshake, the same `receiver_index`. The reload
+  does not stop later timer activity either: a rekey (§8.6) replaces the session, and its
+  index, as it would have without the reload.
 - **Kept key, changed fields**: applied in place, sessions kept.
   - `addresses`: the routing table is rebuilt; a packet from an address the peer no longer
     owns is dropped by §11 on the very session it arrives on. The firewall entries of an
     address that left the table or now belongs to another peer are dropped, so that a reply
-    flow opened towards the old owner never admits the new one.
+    flow opened towards the old owner never admits the new one. A peer that lost an
+    address (withdrawn or given to another peer) drops its staged packets (§8.7), some of
+    which may be for that address; its sessions and in-flight handshake stay.
   - `allow_inbound`: the new rules apply from the next packet. Entries of the flow table are
     not tied to a rule (§15 rule 3: replies to flows this node opened) and stay; a TCP
     connection already open keeps passing (§15 rule 4) until it closes.
@@ -193,7 +220,8 @@ the new lists as a **diff by static public key**:
   - `name`: a local label (logs, metrics, status), never on the wire.
 - **Role change** (a key moving between the peer, lighthouse and relay lists of a node):
   a removal followed by an addition. What a party may send depends on its role (§10.2), and
-  its §12 and §13 state is role-specific: nothing of the old role is carried over.
+  its §12 and §13 state is role-specific: nothing of the old role is carried over, the IO
+  layer's log history included. A relay that changes role is a removed relay (above).
 
 Everything else in the file needs a **restart**; a reload that changes it logs
 `reload-restart-required{sections}` at `warn` and keeps the running value:

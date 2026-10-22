@@ -45,9 +45,27 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
   restart-only sections) and `/var/db/kekkai-node.config` (the file). A changed hash runs
   `launchctl kickstart -k`; otherwise a changed file runs `launchctl kill SIGHUP` (launchctl
   takes the signal's full name). A binary change still changes the plist and restarts.
+  A marker moves only after its launchctl action succeeded, and a failure stops the
+  activation (nix-darwin runs it under `set -e`), so an interrupted or failed activation
+  runs the action again next time instead of recording it. `.config` means "signalled",
+  as `systemctl reload` does on Linux: a reload the daemon refuses shows as
+  `reload-failed` in its log. The first activation, without markers, restarts the daemon
+  launchd has just started (redundant, harmless). A deployment fragment ordered after
+  this one (e.g. a secret installation that restarts the daemon and records its own
+  marker after a successful kickstart) does not run when this one fails, and runs again
+  with it at the next activation; when both a restart-only section and the secret change,
+  the daemon restarts twice. `modules-eval` runs the fragment against a fake launchctl:
+  missing markers, a refused action, an interruption between action and marker.
+- The daemons install their `SIGHUP` handler first thing at start, before DNS resolution
+  and interface creation and always before `READY=1` (spec §4.1); a `SIGHUP` during
+  start-up is applied once ready.
+- Routes (spec §4.1): additions then deletions as one transaction, undone in reverse on a
+  refusal (the reload then fails); the daemon keeps the set the kernel holds, so a route
+  an undo could not restore is reconciled at the next reload. A route deleted behind the
+  daemon's back makes every reload that removes it fail until a restart.
 - Log events (0019 schema): `reloaded{peers,added,removed,changed}` (`info`),
   `reload-failed{err}` (`error`), `reload-restart-required{sections}` (`warn`),
-  `route-delete-failed{route,err}` (`warn`).
+  `route-rollback-failed{route,err}` (`error`).
 - Status (0015, additive per 0024): `PeerStatus.receiver_index` (16, optional), the local
   index of the `current` session; a reload that keeps the peer keeps it.
 - `nixosTest` `reload` switches specialisations with `switch-to-configuration test`, so
