@@ -426,6 +426,9 @@
             sleep 3
             [ ! -e $TMPDIR/started ]
             touch $TMPDIR/key
+            # Started by the key (polled every second), not by the 60 s fallback.
+            sleep 3
+            [ -e $TMPDIR/started ]
             wait $!
             [ "$(cat $TMPDIR/started)" = "--config /etc/kekkai/node.toml" ]
             ${lib.getExe pkgs.kekkai-node} config check --config ${
