@@ -1,7 +1,8 @@
 # kekkai threat model
 
 Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021) and for v0.5, the
-version submitted to review gate 2 (complete protocol: lighthouse, NAT traversal, relay).
+version submitted to review gate 2 (complete protocol: lighthouse, NAT traversal, relay),
+amended after it (2026-10-22, ADR 0021: sections 4.2 to 4.4 and 5); gate 2 passed.
 Scope fixed by ADR 0006. Section references of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
 
 This document is generic by policy (ADR 0025): it speaks of roles and of "a host whose

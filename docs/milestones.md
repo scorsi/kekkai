@@ -147,7 +147,7 @@ Nothing external blocks v0.1.
 - Unit test: the relay's state type holds no session key of a node pair; `kekkai-relay` has no dependency on the tunnel decryption path (checked by a `cargo tree`-based check in `nix flake check`).
 - Rate limit: with a limit configured, a flooding sender is capped and the counters show drops; with no limit nothing is dropped.
 - Silence: a `relay_forward` from an unlisted key gets no reply.
-- Review gate 2 passed (authorizes Internet exposure).
+- Review gate 2 passed (2026-10-22, ADR 0021 amendment of that date; authorizes Internet exposure).
 
 **Note (2026-10-21)**: the per-sender rate limit is in payload bytes per second
 (`[service] max_bytes_per_second`), and the lighthouse's query budget left open by the v0.4

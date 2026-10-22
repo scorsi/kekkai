@@ -3,7 +3,8 @@
 Wire version **1**. Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021), after the
 independent review of v0.4 (2026-10-21: §9 register timer, §12.2 admission, §13.1, §13.2)
 and for v0.5 (2026-10-21: §12.3 relay fallback and direct retry, §12.4, §13.2 query
-budget, §14, §16, §17), the version submitted to review gate 2.
+budget, §14, §16, §17), the version submitted to review gate 2, and after review gate 2
+(2026-10-22, ADR 0021: §12.2 validity, §12.3, §12.5, §13.1, §13.2, §17), which it passed.
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
