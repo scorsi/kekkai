@@ -6,7 +6,7 @@ Order of v0: local network first, then discovery, then relaying, then the real n
 
 ```
 v0.0 skeleton → v0.1 spec + core → v0.2 first tunnel (Linux) → v0.3 macOS + firewall
-→ v0.4 lighthouse → v0.5 relay → v0.6 real network
+→ v0.4 lighthouse → v0.5 relay → v0.6 real network → v0.7 reload
                   ↑ review gate 1                    ↑ review gate 2
 ```
 
@@ -166,18 +166,32 @@ no `kekkai-node` in the relay's `cargo tree`). What review gate 2 receives is li
 
 **Objective**: kekkai runs on every host of the deployment, with the lighthouse and relay on the public entry point, and holds up to the manual scenarios.
 
-**Deliverables**: `SIGHUP` reload of the peer list in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary (0026); `nixosTest` `reload`. Status 2026-10-22: reload implemented as specified in spec §4.1 (a node's lighthouse and relay lists reload too; every other section restarts), `nixosTest` `reload` written, not yet run. Everything the deployment repository has to do around it (peer attrset, keys, entry point, replacing Tailscale) is its own plan, not part of this milestone.
+**Deliverables**: v0.5 running on every host of the deployment with the lighthouse and relay on the public entry point; detached activation in the deployment repository's scripts (0026, option 2). Everything the deployment repository has to do around it (peer attrset, keys, entry point, replacing Tailscale) is its own plan, not part of this milestone. The `SIGHUP` reload moved to v0.7 (owner, 2026-10-22).
 
 **Acceptance criteria**
 
-- `nixosTest reload`: adding a peer in the configuration and reloading makes it reachable without restarting; removing one makes its handshakes refused; an unchanged peer's session keeps its receiver index across the reload.
 - `status --json` shows the expected `path` for every pair: direct where the underlay allows it (same hypervisor bridge, native IPv6), relayed elsewhere.
-- Manual scenarios passed and recorded: reboot of the public entry point, of the VM host and of the hypervisor host; laptop sleep and wake; Wi-Fi change and change of location; restart of `kekkai-node` during an SSH session with recovery under 10 s; a deployment over kekkai that changes the peer list (reload) and one that upgrades the binary (detached activation, 0026).
+- Manual scenarios passed and recorded: reboot of the public entry point, of the VM host and of the hypervisor host; laptop sleep and wake; Wi-Fi change and change of location; restart of `kekkai-node` during an SSH session with recovery under 10 s; a deployment over kekkai that upgrades the binary (detached activation, 0026).
 - A breakage seen on the real network becomes a simulation or `nixosTest` case before it is fixed (0020).
 
 **Dependencies**: v0.5 and review gate 2; the public VPS; the laptop for the roaming scenarios.
 
-**Excluded**: everything in ADR 0027. After v0.6, the next ADR opens v1 (certificates and groups).
+---
+
+## v0.7 — Reload
+
+**Objective**: a change of the configured lists applies without restarting the daemons, so the most frequent deployment over kekkai does not cut its own session.
+
+**Deliverables**: `SIGHUP` reload of the configured lists in node, lighthouse and relay with `ExecReload`, `reloadTriggers` on the configuration file and `restartTriggers` on the binary and the restart-only settings (0026; spec §4.1: a node's lighthouse and relay lists reload too, every other section restarts); `nixosTest` `reload`. Status 2026-10-22: implemented (1ed92e7), review findings closed (29b4297), re-review and `nixosTest` reruns pending.
+
+**Acceptance criteria**
+
+- `nixosTest reload`: adding a peer in the configuration and reloading makes it reachable without restarting; removing one makes its handshakes refused; an unchanged peer's session keeps its receiver index across the reload; an invalid configuration changes nothing.
+- Manual scenario passed and recorded: a deployment over kekkai that changes the peer list.
+
+**Dependencies**: v0.6.
+
+**Excluded**: everything in ADR 0027. After v0.7, the next ADR opens v1 (certificates and groups).
 
 ---
 
@@ -193,7 +207,7 @@ Nothing blocks v0.1. Still open, with the milestone they block:
 | Nested virtualization in the CI VM, validated by `nix build nixpkgs#nixosTests.simple` | `nixosTest`s in CI from v0.0 | Fallback: run by hand until the laptop runner exists |
 | Scheduled fuzz job | nothing | Manual fuzzing in v0 (0020) |
 | Release method (branch, changelog) | nothing | Specified at the first tagged release |
-| v1 certificate format (home-grown minimal preferred over X.509), lifetime, groups | nothing in v0 | Decided after v0.6 (0027) |
+| v1 certificate format (home-grown minimal preferred over X.509), lifetime, groups | nothing in v0 | Decided after v0.7 (0027) |
 
 Note (owner, 2026-10-21): when two crossing handshakes complete, one direct and one relayed, each
 side may keep a different path until the next handshake (at most about 60 s). Accepted until after

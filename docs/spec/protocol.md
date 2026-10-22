@@ -153,7 +153,7 @@ options (amended 2026-10-21, ADR 0013 amendment of that date).
 
 Vectors: [`vectors/keygen.json`](vectors/keygen.json).
 
-### 4.1 Reload of the configured lists (v0.6)
+### 4.1 Reload of the configured lists (v0.7)
 
 A reload (ADR 0026: `SIGHUP`) replaces the party's configured lists without restarting it:
 on a node `[[peers]]`, `[[lighthouses]]` and `[[relays]]`, on a lighthouse or a relay its

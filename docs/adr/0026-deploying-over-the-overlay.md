@@ -14,7 +14,7 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
 
 ## Decision
 
-- **Options 1 and 2 together**, delivered in the real-network milestone (v0.6). Option 3 only if 2 proves fragile.
+- **Options 1 and 2 together**, delivered in the real-network milestone (v0.6). Option 3 only if 2 proves fragile. (2026-10-22: option 1, the reload, moved to its own milestone v0.7; option 2 stays in v0.6.)
 - Reload: `ExecReload` sends `SIGHUP`; the daemon re-reads the configuration at its stable path (`/etc/kekkai/node.toml`) and applies a **diff of the peer list** to the core (0004, 0016) without touching existing sessions of unchanged peers. The module sets `reloadTriggers` on the configuration file and `restartTriggers` on the binary. Lighthouse and relay get the same reload for their peer lists.
 - A restart still cuts traffic for one to two seconds; TCP survives, so a detached activation makes deployment safe even across a binary upgrade.
 - **macOS** has neither `systemd-run` nor `reloadTriggers`, and a remote `darwin-rebuild switch` loses its SSH session when the LaunchDaemon restarts. Equivalents:
@@ -27,7 +27,7 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
 - The real-network milestone includes a deployment over kekkai that changes the peer list and one that upgrades the binary.
 - Reload is the first mutating operation in the daemon's life; it needs its own `nixosTest` (peer added and reachable, peer removed and refused, unchanged peer's session untouched).
 
-## Implementation notes — 2026-10-22 (v0.6)
+## Implementation notes — 2026-10-22 (reload, v0.7)
 
 - Semantics are specified in spec §4.1: the lists (node: peers, lighthouses, relays;
   lighthouse and relay: peers) reload as a diff by public key; every other section needs a
