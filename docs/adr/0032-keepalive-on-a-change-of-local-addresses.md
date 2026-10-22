@@ -1,6 +1,6 @@
 # ADR 0032 — Keepalive on a change of local addresses
 
-Status: Proposed — 2026-10-22
+Status: Accepted — 2026-10-22
 
 ## Context
 
