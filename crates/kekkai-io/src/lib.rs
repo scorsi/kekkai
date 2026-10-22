@@ -197,75 +197,68 @@ pub async fn run(
     // endpoints nor the tick (§12.4, §13.1): a fresh one-second sleep per iteration would.
     let mut poll_at = clock::monotonic();
     loop {
+        // A tunnel or socket that is always readable never returns `Pending` (the AsyncFd fast
+        // path takes no budget): yield regularly, or the runtime's timers and IO driver starve.
+        tokio::task::coop::consume_budget().await;
         let next = lock()
             .node
             .next_deadline()
             .map_or(poll_at, |d| d.min(poll_at));
         let wake = next.saturating_sub(clock::monotonic());
-        let output = tokio::select! {
-            received = socket.recv_from(&mut udp_buf) => {
-                let (n, source) = match received {
-                    Ok(r) => r,
-                    Err(e) => {
-                        debug!(event = "udp-receive-failed", error = %e);
-                        continue;
-                    }
-                };
-                let mut guard = lock();
-                let result = guard.node.handle_datagram(
-                    clock::monotonic(),
-                    clock::wall(),
-                    Endpoint::from(source),
-                    &udp_buf[..n],
-                );
-                match result {
-                    Ok(output) => {
-                        // Rejected inner content: the transport effects still go out (§8.2).
-                        if let Some(reason) = output.dropped {
+        // Overdue: tick now. A new `sleep(0)` is rounded up to the next millisecond by tokio and
+        // can lose to ready input at every iteration.
+        let output = if wake.is_zero() {
+            tick(&mut lock(), &mut poll_at)
+        } else {
+            tokio::select! {
+                received = socket.recv_from(&mut udp_buf) => {
+                    let (n, source) = match received {
+                        Ok(r) => r,
+                        Err(e) => {
+                            debug!(event = "udp-receive-failed", error = %e);
+                            continue;
+                        }
+                    };
+                    let mut guard = lock();
+                    let result = guard.node.handle_datagram(
+                        clock::monotonic(),
+                        clock::wall(),
+                        Endpoint::from(source),
+                        &udp_buf[..n],
+                    );
+                    match result {
+                        Ok(output) => {
+                            // Rejected inner content: the transport effects still go out (§8.2).
+                            if let Some(reason) = output.dropped {
+                                guard.count_drop(reason);
+                                trace!(event = "datagram-dropped", reason = reason.as_str());
+                            }
+                            output
+                        }
+                        Err(reason) => {
                             guard.count_drop(reason);
                             trace!(event = "datagram-dropped", reason = reason.as_str());
+                            continue;
                         }
-                        output
-                    }
-                    Err(reason) => {
-                        guard.count_drop(reason);
-                        trace!(event = "datagram-dropped", reason = reason.as_str());
-                        continue;
                     }
                 }
-            }
-            read = tunnel.recv(&mut tun_buf) => {
-                let packet = &mut tun_buf[..read?];
-                mss::clamp(packet, mtu);
-                let mut guard = lock();
-                let result = guard
-                    .node
-                    .send_packet(clock::monotonic(), clock::wall(), packet);
-                match result {
-                    Ok(output) => output,
-                    Err(reason) => {
-                        guard.count_drop(reason);
-                        trace!(event = "tunnel-packet-dropped", reason = reason.as_str());
-                        continue;
+                read = tunnel.recv(&mut tun_buf) => {
+                    let packet = &mut tun_buf[..read?];
+                    mss::clamp(packet, mtu);
+                    let mut guard = lock();
+                    let result = guard
+                        .node
+                        .send_packet(clock::monotonic(), clock::wall(), packet);
+                    match result {
+                        Ok(output) => output,
+                        Err(reason) => {
+                            guard.count_drop(reason);
+                            trace!(event = "tunnel-packet-dropped", reason = reason.as_str());
+                            continue;
+                        }
                     }
                 }
-            }
-            () = tokio::time::sleep(wake) => {
-                let mut guard = lock();
-                if let Some(locals) = guard.locals.clone() {
-                    // §12.4, §13.1: polled at every tick (at least once a second, traffic or
-                    // not), so a change is acted upon by the tick below; v0 listens to no OS
-                    // network event.
-                    match ifaddrs::local_endpoints(locals.listen_port, &locals.overlay) {
-                        Ok(found) => guard.node.set_local_endpoints(found),
-                        Err(e) => debug!(event = "local-addresses-failed", error = %e),
-                    }
-                }
-                let output = guard.node.tick(clock::monotonic(), clock::wall());
-                poll_at = clock::monotonic() + MAX_SLEEP;
-                log_events(&mut guard);
-                drop(guard);
-                output
+                () = tokio::time::sleep(wake) => tick(&mut lock(), &mut poll_at),
             }
         };
         send_datagrams(&socket, output.datagrams, log_peers).await;
@@ -276,6 +269,23 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Polls the local endpoints, ticks the core and logs its events; the next poll is due one
+/// second later.
+fn tick(state: &mut State, poll_at: &mut Duration) -> node::Output {
+    if let Some(locals) = state.locals.clone() {
+        // §12.4, §13.1: polled at every tick (at least once a second, traffic or not), so a
+        // change is acted upon by the tick below; v0 listens to no OS network event.
+        match ifaddrs::local_endpoints(locals.listen_port, &locals.overlay) {
+            Ok(found) => state.node.set_local_endpoints(found),
+            Err(e) => debug!(event = "local-addresses-failed", error = %e),
+        }
+    }
+    let output = state.node.tick(clock::monotonic(), clock::wall());
+    *poll_at = clock::monotonic() + MAX_SLEEP;
+    log_events(state);
+    output
 }
 
 /// Sends what the core produced. A failure is logged with its destination only when

@@ -31,8 +31,9 @@ reproduces it: 0.6 to 9.8 s depending on the phase of that keepalive.
 - The IO layer of the node collects its local endpoints at every wake-up whether a
   lighthouse is configured or not, and wakes up at least once a second on an absolute
   deadline that received traffic does not postpone (a fresh one-second sleep per received
-  datagram or packet would starve the collection under steady inbound traffic). No OS
-  event, no new dependency.
+  datagram or packet would starve the collection under steady inbound traffic). Even
+  under saturated input: an overdue deadline is served before any input is read, and the
+  loop yields to the runtime regularly. No OS event, no new dependency.
 - Rule 3 of §12.5 (re-registration and rediscovery at the register tick) is unchanged.
 
 ## Consequences

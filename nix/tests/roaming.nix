@@ -17,7 +17,7 @@
 #
 # Then (v0.6 finding 4) A changes its address on the away LAN, which keeps its public port:
 # its keepalive on the change of its local endpoints (§12.4) reopens the way for B's traffic
-# within 5 s, measured on B's clock.
+# within 5 s, measured on B's clock from before the change, with B's session unchanged.
 {
   pkgs,
   nodeModule,
@@ -126,6 +126,9 @@ pkgs.testers.nixosTest {
         # its keepalive on the change of its local endpoints (spec §12.4), sent at the next
         # poll. The daemon is stopped while the address and route change, so that the poll
         # sees only the final state (a keepalive with no route would be lost, ADR 0032).
+        # Timers run on while it is stopped: the time is measured from before the stop, and a
+        # new handshake (A's "new handshake" timer, a rediscovery), which would also reopen
+        # `away`, fails the subtest: B's session must be the same before and after.
         old = peer(b, "${keys.a.public}")["endpoint"]
         assert old == "192.0.2.2:4802", old
         lighthouse.wait_until_succeeds(
@@ -134,13 +137,19 @@ pkgs.testers.nixosTest {
             timeout=60,
         )
         b.succeed("ping -c 1 -W 1 ${overlay4 "a"}")
+
+        def session():
+            p = peer(b, "${keys.a.public}")
+            return p.get("receiver_index"), p.get("last_handshake")
+
+        before = session()
+        start = float(b.succeed("date +%s.%N"))
         a.succeed(
             "systemctl kill --signal=SIGSTOP kekkai-node.service"
             " && ip addr del 10.1.0.2/24 dev eth2 && ip addr add 10.1.0.3/24 dev eth2"
             " && ip route replace default via 10.1.0.1 dev eth2"
         )
         away.succeed("conntrack -F")
-        start = float(b.succeed("date +%s.%N"))
         a.succeed("systemctl kill --signal=SIGCONT kekkai-node.service")
         out = b.succeed(
             "until ping -c 1 -W 1 ${overlay4 "a"} >/dev/null; do :; done; date +%s.%N",
@@ -148,6 +157,7 @@ pkgs.testers.nixosTest {
         )
         took = float(out) - start
         assert 0 < took < 5, f"traffic from B resumed after {took:.1f} s"
+        assert session() == before, f"recovered by a new handshake: {before} -> {session()}"
         b.succeed(jq_peer("${keys.a.public}", f'.path == "PATH_DIRECT" and .endpoint == "{old}"'))
   '';
 }

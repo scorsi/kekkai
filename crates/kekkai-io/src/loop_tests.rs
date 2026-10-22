@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::StaticKey;
 use kekkai_core::node::{Node, PeerConfig};
 use tokio::net::UnixDatagram;
@@ -196,47 +198,88 @@ async fn discovery_through_a_lighthouse_loop() {
     assert!(counters.queries_known >= 1 && counters.punches >= 1);
 }
 
-/// Codex R1 on v0.6 finding 4: the loop collects its local endpoints at least once a second
-/// even while datagrams arrive more often than that; each one used to restart a one-second
-/// sleep, so the poll (and the tick) waited for the next core deadline.
-#[tokio::test(flavor = "current_thread")]
-async fn local_endpoints_are_polled_under_continuous_traffic() {
-    let socket = udp::bind(0).unwrap();
-    let port = socket.local_addr().unwrap().port();
-    let mut state = State::new(Node::new(key(1), vec![]), HashMap::new());
-    state.locals = Some(crate::Locals {
-        listen_port: port,
-        overlay: vec![],
+/// Always one packet ready, never `Pending`, as a saturated TUN on the AsyncFd fast path; the
+/// core drops it (not IP). `reads` counts them.
+struct Flood(Arc<AtomicU64>);
+
+impl Tunnel for Flood {
+    async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        buf[0] = 0;
+        Ok(1)
+    }
+
+    async fn send(&self, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Codex R1, S1, S3 on v0.6 finding 4: under saturated input the loop still collects its
+/// local endpoints at least once a second, and yields to the runtime. Each received packet
+/// used to restart a one-second sleep; then an overdue `sleep(0)` could lose to ready input
+/// at every iteration, and a tunnel that never returns `Pending` kept the runtime from
+/// running anything else. Synchronised on the polls themselves, not on sleeps: input never
+/// pauses, so the old loops never poll and the watchdog fails the test.
+#[test]
+fn local_endpoints_are_polled_under_saturated_input() {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let socket = udp::bind(0).unwrap();
+            let port = socket.local_addr().unwrap().port();
+            // Not on this host: only a poll replaces it.
+            let marker = |port| Endpoint::from(SocketAddr::from(([192, 0, 2, 99], port)));
+            let mut state = State::new(Node::new(key(1), vec![]), HashMap::new());
+            state.locals = Some(crate::Locals {
+                listen_port: port,
+                overlay: vec![],
+            });
+            state.node.set_local_endpoints(vec![marker(1)]);
+            let state = Arc::new(Mutex::new(state));
+            let reads = Arc::new(AtomicU64::new(0));
+            tokio::spawn(crate::run(
+                state.clone(),
+                socket,
+                Flood(reads.clone()),
+                1280,
+            ));
+            // Runs only when the loop yields.
+            let shared = &state;
+            let polled = |marker| async move {
+                while shared
+                    .lock()
+                    .unwrap()
+                    .node
+                    .local_endpoints()
+                    .contains(&marker)
+                {
+                    tokio::task::yield_now().await;
+                }
+            };
+            polled(marker(1)).await;
+            // After the first poll, plant another marker; this tick consumes the change it makes,
+            // so that no zero deadline wakes the loop: only the periodic poll removes it.
+            let before = {
+                let node = &mut state.lock().unwrap().node;
+                node.set_local_endpoints(vec![marker(2)]);
+                let _ = node.tick(crate::clock::monotonic(), crate::clock::wall());
+                reads.load(Ordering::Relaxed)
+            };
+            polled(marker(2)).await;
+            assert!(
+                reads.load(Ordering::Relaxed) > before,
+                "the input kept coming"
+            );
+        });
+        let _ = done.send(());
     });
-    let state = Arc::new(Mutex::new(state));
-    tokio::spawn(crate::run(state.clone(), socket, crate::NoTunnel, 1280));
-    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let to: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    // Not on this host: only a poll replaces it.
-    let marker: SocketAddr = "192.0.2.99:1".parse().unwrap();
-    // Let the loop start and run its first poll, then plant the marker; this tick consumes
-    // the change it makes, so that no zero deadline wakes the loop: only a poll removes it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    {
-        let node = &mut state.lock().unwrap().node;
-        node.set_local_endpoints(vec![marker.into()]);
-        let _ = node.tick(crate::clock::monotonic(), crate::clock::wall());
-    }
-    for _ in 0..150 {
-        // Not a kekkai datagram: dropped, but it wakes the loop every 20 ms.
-        sender.send_to(b"noise", to).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let state = state.lock().unwrap();
-    assert!(
-        state.drops.values().sum::<u64>() >= 100,
-        "{:?}",
-        state.drops
-    );
-    assert!(
-        !state.node.local_endpoints().contains(&marker.into()),
-        "no poll in 3 s of traffic"
-    );
+    finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("no poll, or no yield, within 10 s of saturated input");
 }
 
 /// Every field of every event emitted while `f` runs, as `name=value` lines.
