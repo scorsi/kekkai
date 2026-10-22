@@ -152,9 +152,10 @@ pkgs.testers.nixosTest {
         )
         b.succeed("ping -c 1 -W 1 ${overlay4 "a"}")
 
+        # A new handshake always takes a new receiver index; last_handshake is not compared, it is
+        # rebuilt from the monotonic clock at each status call and drifts by nanoseconds.
         def session():
-            p = peer(b, "${keys.a.public}")
-            return p.get("receiver_index"), p.get("last_handshake")
+            return peer(b, "${keys.a.public}").get("receiver_index")
 
         # The one handshake left that could land in the window, the 120 s rekey (§8.6), is
         # excluded by this bound: the window (< 5 s) ends before the session is 120 s old.
