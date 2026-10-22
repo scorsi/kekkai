@@ -897,7 +897,9 @@ of the first copy: its source address, or the relay it came through (§14.1). La
 responses to `A` fail §7.7 step 1.
 
 The endpoints learnt from lighthouse replies and punches are kept as candidates of `B` until
-a handshake with `B` completes (in either role) or the attempt sequence is abandoned
+a handshake with `B` completes (in either role: a valid response, §7.7, or the confirmation
+of a responder session, §8.2 step 5; accepting `B`'s message 1, §7.6, which only creates an
+unconfirmed `next` session, is not a completion) or the attempt sequence is abandoned
 (§7.9); the end of a rediscovery's `DIRECT_PATH_TIMEOUT` window (§12.5) does not drop them,
 and a retransmission within the sequence goes to them too. A candidate learnt while a
 message 1 is in flight receives **that** message 1 (the same bytes), not a new one, and
@@ -921,9 +923,20 @@ completed handshake (the instant §12.6 records the failure) and `A` has a confi
 `R` whose `current` session can send, the attempt sequence towards `B` **falls back to the
 relay**: if a message 1 is in flight, the same bytes are sent at once through `R` (§14.1);
 every later message 1 of the sequence (its retransmissions, a deferred start, §7.9) goes to
-the direct candidates **and** through `R`. The fallback belongs to the sequence: it ends
-when the sequence ends, by completion in either role, by abandonment (§7.9), or because a
-confirmed responder session ended it (§8.2 step 5); a later sequence starts direct only.
+the direct candidates **and** through `R`. The in-flight message 1 is the one current
+after every retransmission due at that instant (§7.9): when the same wake-up passes both
+the retransmit deadline and `DIRECT_PATH_TIMEOUT`, only the fresh message 1 goes through
+`R`, never the one it replaced. The fallback belongs to the sequence: it ends when the
+sequence ends, by its own completion (§7.7), because a confirmed responder session ended
+it (§8.2 step 5), or by abandonment (§7.9), and whenever no sequence is in flight or
+deferred; a later sequence starts direct only. Accepting `B`'s message 1 (§7.6) ends
+neither: crossing initiations whose responses are lost keep their fallback and retry
+through `R`.
+
+The fallback is evaluated at each window end only: if no relay session can send at that
+instant (a relay restart, its §9 re-handshake in flight), the sequence stays direct until a
+later rediscovery window of the same sequence ends with a live relay session, or until it
+is abandoned; a relay session that comes back meanwhile does not change the sequence.
 With several relays configured (not in v0) the smallest key among the live ones is used.
 A handshake completing through `R` yields a session with `path = relayed(R)`.
 
@@ -997,15 +1010,25 @@ triggered by any of:
    towards the given endpoints even if a session with `B` exists. The punch already
    carries what a query would return, so this trigger sends no `lighthouse_query`.
 
-A rediscovery **runs** from its trigger until a handshake with `B` completes or
-`DIRECT_PATH_TIMEOUT` elapses (§12.6). A trigger that fires while a rediscovery of `B` runs
+A rediscovery **runs** from its trigger until a handshake with `B` completes (in either
+role, as in §12.2: accepting `B`'s message 1 does not end it) or `DIRECT_PATH_TIMEOUT`
+elapses (§12.6). A trigger that fires while a rediscovery of `B` runs
 joins it: no new query, the in-flight handshake is kept or started as above. This bounds
 the queries of trigger 1 to one per `DIRECT_PATH_TIMEOUT` whatever the traffic. A
 handshake that the `REKEY_TIMEOUT` pacing of §7.9 refuses (a message 1 went out less than
 `REKEY_TIMEOUT` ago, typically the handshake that just completed) is deferred to the end
 of that pacing (§7.9); if it is unanswered, its first retransmit deadline is trigger 2. So
 a move that lands just after a handshake still leads, without traffic, to an attempt
-within `REKEY_TIMEOUT` of the trigger and to a fresh query `REKEY_TIMEOUT` later.
+within `REKEY_TIMEOUT` of the trigger and to a fresh query `REKEY_TIMEOUT` later. This
+holds for trigger 1 too: its handshake is the one the staged packet starts (§8.7), and when
+the pacing refuses it, it is deferred like any other.
+
+The window of a deferred attempt still runs from its trigger, not from its first message
+1. It may therefore end before that message 1 leaves: the failure is then recorded as
+`timeout` (§12.6) although no message 1 of that attempt was sent, and with a live relay
+session the sequence falls back (§12.3), so its first message 1 goes to the direct
+candidates and through `R` at once. Since candidates are not ranked, the relayed copy may
+complete first, and the peer then stays relayed until the next direct retry (§12.3).
 
 v0 does not listen to OS network-change events.
 

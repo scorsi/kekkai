@@ -452,7 +452,7 @@ impl Node {
         let key = *self.routes.get(&destination).ok_or(DropReason::NoRoute)?;
         self.firewall.outbound(now, packet);
         let peer = self.peers.get_mut(&key).expect("routes point at peers");
-        // §12.5 rule 1, before send_ip initiates.
+        // §12.5 rule 1, before send_ip stages and initiates (§8.7).
         let rediscover = !peer.can_send(now);
         let mut sends: Vec<Send> = peer
             .send_ip(&mut ctx!(self, now, wall), packet)
@@ -460,7 +460,8 @@ impl Node {
             .map(|d| (key, None, d))
             .collect();
         if rediscover {
-            self.rediscover(now, wall, key, false, &mut sends);
+            // §7.9: a handshake send_ip could not start under the pacing is deferred.
+            self.rediscover(now, wall, key, true, &mut sends);
         }
         Ok(Output {
             datagrams: self.route(now, wall, sends),
@@ -516,7 +517,9 @@ impl Node {
             Some(c) if c != key => Err(DropReason::NotAccepted),
             _ => Ok(()),
         };
-        let (key, index, plaintext, before) = match wire::parse(datagram)? {
+        // `completed`: the attempt sequence ends (§7.9): its own response, or a confirmed
+        // responder session (§8.2 step 5); accepting a message 1 alone does not end it.
+        let (key, index, plaintext, before, completed) = match wire::parse(datagram)? {
             Outer::HandshakeInit(init) => {
                 init.verify_mac1(&self.mac1)?;
                 let pending = handshake::read_init(&self.key, &init, &Listed(&self.peers))?;
@@ -529,7 +532,7 @@ impl Node {
                 let index = u32::from_be_bytes(response[4..8].try_into().expect("message 2"));
                 // §12.2: message 2 goes back the way the accepted copy came.
                 sends.push((key, Some(via), response));
-                (key, index, None, before)
+                (key, index, None, before, false)
             }
             Outer::HandshakeResp(resp) => {
                 resp.verify_mac1(&self.mac1)?;
@@ -542,7 +545,7 @@ impl Node {
                 let before = peer.last_handshake;
                 let out = peer.handle_resp(&mut ctx, &resp)?;
                 sends.extend(out.into_iter().map(|d| (key, None, d)));
-                (key, resp.receiver_index, None, before)
+                (key, resp.receiver_index, None, before, true)
             }
             Outer::Data(data) => {
                 let key = *ctx
@@ -552,6 +555,7 @@ impl Node {
                 claim(key)?;
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
                 let before = peer.last_handshake;
+                let current = peer.current().map(|s| s.local_index);
                 let (plaintext, out) = match peer.handle_data(&mut ctx, &data) {
                     Err(DropReason::CounterRejected) => {
                         peer.counters.replay_rejections += 1;
@@ -560,7 +564,11 @@ impl Node {
                     result => result?,
                 };
                 sends.extend(out.into_iter().map(|d| (key, None, d)));
-                (key, data.receiver_index, Some(plaintext), before)
+                // Only step 5 replaces `current`; expiry can only empty it.
+                let confirmed = peer
+                    .current()
+                    .is_some_and(|s| Some(s.local_index) != current);
+                (key, data.receiver_index, Some(plaintext), before, confirmed)
             }
         };
         output.from = Some(key);
@@ -583,8 +591,10 @@ impl Node {
         }
         link.last_received = Some(now);
         link.received_since_register = true;
-        if self.peers[&key].last_handshake != before {
+        if completed {
             link.end_attempts();
+        }
+        if self.peers[&key].last_handshake != before {
             link.register_due = link.role == Role::Lighthouse;
         }
         let Some(plaintext) = plaintext else {
@@ -804,6 +814,7 @@ impl Node {
             .collect();
         if punch && link.discovery.is_none() {
             link.discovery = Some(now);
+            link.unknown = false;
         }
         let peer = self.peers.get_mut(&target).expect("links follow peers");
         if peer.has_in_flight_handshake() {
@@ -976,18 +987,23 @@ impl Node {
                     PathFailure::Timeout
                 });
                 link.end_discovery();
-                // §12.3: the sequence goes through the relay too, the in-flight message 1 now.
+                // §12.3: the sequence goes through the relay too, the in-flight message 1 now;
+                // a fresh one queued by this tick goes through it in `route`, the cached one
+                // is obsolete then.
+                let fresh = sends.iter().any(|(k, to, d)| {
+                    *k == key && to.is_none() && d.first() == Some(&wire::TYPE_HANDSHAKE_INIT)
+                });
                 if let Some(relay) = self.live_relay(now) {
                     let link = self.links.get_mut(&key).expect("links follow peers");
                     link.via_relay = true;
                     let m1 = link.message_1.clone();
-                    if self.peers[&key].has_in_flight_handshake() {
+                    if self.peers[&key].has_in_flight_handshake() && !fresh {
                         sends.extend(m1.map(|m1| (key, Some(Path::Relayed(relay)), m1)));
                     }
                 }
             }
-            // The fallback belongs to the sequence: it ends with it, also when a confirmed
-            // responder session ended it (§8.2 step 5) rather than its own completion.
+            // The fallback belongs to the sequence: it ends with it (completion ends it in
+            // `receive`), and whenever nothing is in flight or deferred.
             let link = self.links.get_mut(&key).expect("links follow peers");
             if !self.peers[&key].has_in_flight_handshake() && link.deferred.is_none() {
                 link.via_relay = false;

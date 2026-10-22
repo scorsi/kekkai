@@ -13,36 +13,57 @@ use crate::tai64n::Tai64n;
 use crate::wire::DropReason;
 use crate::{DIRECT_PATH_TIMEOUT, MAX_RELAY_PAYLOAD};
 
-fn wall(now: Duration) -> Tai64n {
+pub(super) fn wall(now: Duration) -> Tai64n {
     Tai64n::from_unix(1_800_000_000 + now.as_secs(), now.subsec_nanos())
 }
 
-fn ep(last: u8, port: u16) -> Endpoint {
+pub(super) fn ep(last: u8, port: u16) -> Endpoint {
     Endpoint::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, last)), port)
 }
 
+/// Decides that a datagram is lost: `(from, to, hop, bytes)`, `hop` counting from 0 for
+/// what the call to [`Net::run`] started with.
+pub(super) type Lose = Box<dyn FnMut(usize, usize, usize, &[u8]) -> bool>;
+
 /// Parties on one network, each at its endpoint; datagrams are delivered until none is left.
-struct Net {
-    parties: Vec<(Node, Endpoint)>,
+pub(super) struct Net {
+    pub(super) parties: Vec<(Node, Endpoint)>,
     /// Outputs of every delivery, by receiving party.
-    outputs: Vec<(usize, Result<Output, DropReason>)>,
+    pub(super) outputs: Vec<(usize, Result<Output, DropReason>)>,
+    pub(super) lose: Option<Lose>,
 }
 
 impl Net {
-    fn run(&mut self, now: Duration, from: usize, mut queue: Vec<(Endpoint, Vec<u8>)>) {
-        let mut sender = vec![from; queue.len()];
+    pub(super) fn new(parties: Vec<(Node, Endpoint)>) -> Self {
+        Self {
+            parties,
+            outputs: Vec::new(),
+            lose: None,
+        }
+    }
+
+    pub(super) fn run(&mut self, now: Duration, from: usize, mut queue: Vec<(Endpoint, Vec<u8>)>) {
+        let mut sender = vec![(from, 0); queue.len()];
         while let Some((to, d)) = queue.pop() {
-            let source = self.parties[sender.pop().expect("one per datagram")].1;
+            let (from, hop) = sender.pop().expect("one per datagram");
+            let source = self.parties[from].1;
             let Some(i) = self.parties.iter().position(|(_, e)| *e == to) else {
                 continue;
             };
+            if self
+                .lose
+                .as_mut()
+                .is_some_and(|lose| lose(from, i, hop, &d))
+            {
+                continue;
+            }
             let result = self.parties[i]
                 .0
                 .handle_datagram(now, wall(now), source, &d);
             if let Ok(out) = &result {
                 for (e, d) in &out.datagrams {
                     queue.push((*e, d.clone()));
-                    sender.push(i);
+                    sender.push((i, hop + 1));
                 }
             }
             self.outputs.push((
@@ -55,7 +76,7 @@ impl Net {
         }
     }
 
-    fn tick(&mut self, now: Duration) {
+    pub(super) fn tick(&mut self, now: Duration) {
         for i in 0..self.parties.len() {
             let out = self.parties[i].0.tick(now, wall(now));
             self.run(now, i, out.datagrams);
@@ -63,12 +84,12 @@ impl Net {
     }
 }
 
-fn key(b: u8) -> StaticKey {
+pub(super) fn key(b: u8) -> StaticKey {
     StaticKey::from_bytes([b; 32]).clamped()
 }
 
 /// Node A (0), node B (1) and a relay (2) listing both, which each node configures.
-fn relay_net(limit: Option<u64>) -> (Net, PublicKey, PublicKey) {
+pub(super) fn relay_net(limit: Option<u64>) -> (Net, PublicKey, PublicKey) {
     let (a, b, r) = (key(1), key(2), key(3));
     let peer = |k: &StaticKey, last: u8| PeerConfig {
         public_key: k.public(),
@@ -84,10 +105,11 @@ fn relay_net(limit: Option<u64>) -> (Net, PublicKey, PublicKey) {
     na.set_relays(vec![relay.clone()]);
     nb.set_relays(vec![relay]);
     let nr = Node::relay(r, vec![a.public(), b.public()], limit);
-    let mut net = Net {
-        parties: vec![(na, ep(1, 4802)), (nb, ep(2, 4802)), (nr, ep(3, 4801))],
-        outputs: Vec::new(),
-    };
+    let mut net = Net::new(vec![
+        (na, ep(1, 4802)),
+        (nb, ep(2, 4802)),
+        (nr, ep(3, 4801)),
+    ]);
     net.tick(Duration::ZERO);
     let rk = key(3).public();
     for i in 0..2 {
@@ -217,10 +239,7 @@ fn the_lighthouse_query_budget() {
     let mut na = Node::new(a.clone(), vec![peer]);
     na.set_lighthouses(vec![lighthouse]);
     let nl = Node::lighthouse(l.clone(), vec![a.public(), b.public()]);
-    let mut net = Net {
-        parties: vec![(na, ep(1, 4802)), (nl, ep(4, 4800))],
-        outputs: Vec::new(),
-    };
+    let mut net = Net::new(vec![(na, ep(1, 4802)), (nl, ep(4, 4800))]);
     net.tick(Duration::ZERO);
     let query = Inner::LighthouseQuery { pubkey: b.public() }.encode();
     let t = Duration::from_secs(1);
