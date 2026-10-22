@@ -15,8 +15,9 @@
 # sets as B's endpoint (spec §12.4); B's status is checked right after. The command's
 # timeout is only a watchdog.
 #
-# Then (v0.6 finding 4) A changes its address on the away LAN: its keepalive on the change of
-# its local endpoints (§12.4) gives B the new NAT port within 5 s, measured on B's clock.
+# Then (v0.6 finding 4) A changes its address on the away LAN, which keeps its public port:
+# its keepalive on the change of its local endpoints (§12.4) reopens the way for B's traffic
+# within 5 s, measured on B's clock.
 {
   pkgs,
   nodeModule,
@@ -36,10 +37,15 @@ pkgs.testers.nixosTest {
       lan = 2;
       inside = "10.2.0.1";
     };
-    away = common.router {
-      public = "192.0.2.2";
-      lan = 3;
-      inside = "10.1.0.1";
+    away = {
+      imports = [
+        (common.router {
+          public = "192.0.2.2";
+          lan = 3;
+          inside = "10.1.0.1";
+        })
+      ];
+      environment.systemPackages = [ pkgs.conntrack-tools ];
     };
     # eth1 on the home LAN, eth2 on the away LAN, unconfigured until the move.
     a = common.node {
@@ -109,32 +115,39 @@ pkgs.testers.nixosTest {
         out = b.succeed("ping -c 3 -W 2 ${overlay4 "a"}")
         assert " 0% packet loss" in out, out
 
-    with subtest("A changes its address behind the same NAT: B learns it within 5 s"):
-        # v0.6 finding 4. Masquerade gives A's new address another port, and B keeps sending
-        # to the old one. Just after A's register and a ping from B, nothing of A's own
-        # reaches B for about 15 s (A's "new handshake" timer; its register tick and
-        # persistent keepalive come later), except its keepalive on the change of its local
-        # endpoints (spec §12.4), sent at the next tick after the change.
+    with subtest("A changes its address behind the same NAT: traffic from B resumes within 5 s"):
+        # v0.6 finding 4: the peer of a node that changes address must be found again at once
+        # when it is reachable at its unchanged endpoint. B is behind `home`, which drops
+        # datagrams from any port of `away` but the one B sent to: so `away` keeps A's public
+        # port, its conntrack table flushed as a NAT that lost the old mapping, and B's pings
+        # to that port are dropped by `away` until A itself sends from its new address.
+        # Nothing of A's own goes to B for about 15 s (just after A's register and a ping from
+        # B: no passive keepalive due, register tick and "new handshake" timer later), except
+        # its keepalive on the change of its local endpoints (spec §12.4), sent at the next
+        # poll. The daemon is stopped while the address and route change, so that the poll
+        # sees only the final state (a keepalive with no route would be lost, ADR 0032).
         old = peer(b, "${keys.a.public}")["endpoint"]
+        assert old == "192.0.2.2:4802", old
         lighthouse.wait_until_succeeds(
             f"kekkai status --json --socket {LIGHTHOUSE_SOCKET} | jq -e"
             " '.registrations[] | select(.name == \"a\") | .last_seen | rtrimstr(\"s\") | tonumber < 1'",
             timeout=60,
         )
         b.succeed("ping -c 1 -W 1 ${overlay4 "a"}")
-        start = float(b.succeed("date +%s.%N"))
         a.succeed(
-            "ip addr del 10.1.0.2/24 dev eth2 && ip addr add 10.1.0.3/24 dev eth2"
+            "systemctl kill --signal=SIGSTOP kekkai-node.service"
+            " && ip addr del 10.1.0.2/24 dev eth2 && ip addr add 10.1.0.3/24 dev eth2"
             " && ip route replace default via 10.1.0.1 dev eth2"
         )
-        b_sees_a = jq_peer(
-            "${keys.a.public}",
-            f'.path == "PATH_DIRECT" and .endpoint != "{old}" and (.endpoint | startswith("192.0.2.2:"))',
+        away.succeed("conntrack -F")
+        start = float(b.succeed("date +%s.%N"))
+        a.succeed("systemctl kill --signal=SIGCONT kekkai-node.service")
+        out = b.succeed(
+            "until ping -c 1 -W 1 ${overlay4 "a"} >/dev/null; do :; done; date +%s.%N",
+            timeout=60,
         )
-        out = b.succeed(f"until {b_sees_a} >/dev/null; do sleep 0.1; done; date +%s.%N", timeout=60)
         took = float(out) - start
-        assert 0 < took < 5, f"B learnt A's new endpoint after {took:.1f} s"
-        out = b.succeed("ping -c 3 -W 2 ${overlay4 "a"}")
-        assert " 0% packet loss" in out, out
+        assert 0 < took < 5, f"traffic from B resumed after {took:.1f} s"
+        b.succeed(jq_peer("${keys.a.public}", f'.path == "PATH_DIRECT" and .endpoint == "{old}"'))
   '';
 }

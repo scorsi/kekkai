@@ -443,6 +443,11 @@ impl Node {
         self.locals = endpoints;
     }
 
+    /// The local endpoints last given to [`Node::set_local_endpoints`].
+    pub fn local_endpoints(&self) -> &[Endpoint] {
+        &self.locals
+    }
+
     pub fn status(&self, peer: &PublicKey) -> Option<PeerStatus> {
         let (p, link) = (self.peers.get(peer)?, self.links.get(peer)?);
         Some(PeerStatus {

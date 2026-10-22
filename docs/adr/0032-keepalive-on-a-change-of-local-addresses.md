@@ -28,8 +28,11 @@ reproduces it: 0.6 to 9.8 s depending on the phase of that keepalive.
   next tick one keepalive on every `current` session that can send (peers, lighthouses,
   relays), so each moves its endpoint by §12.4 within one round trip. Existing message
   type, no wire change.
-- The IO layer of the node collects its local endpoints at every wake-up (at least once a
-  second) whether a lighthouse is configured or not. No OS event, no new dependency.
+- The IO layer of the node collects its local endpoints at every wake-up whether a
+  lighthouse is configured or not, and wakes up at least once a second on an absolute
+  deadline that received traffic does not postpone (a fresh one-second sleep per received
+  datagram or packet would starve the collection under steady inbound traffic). No OS
+  event, no new dependency.
 - Rule 3 of §12.5 (re-registration and rediscovery at the register tick) is unchanged.
 
 ## Consequences
@@ -40,4 +43,10 @@ reproduces it: 0.6 to 9.8 s depending on the phase of that keepalive.
 - A peer reached through an address the node has left still waits for §12.5 rule 2 or 3.
 - A keepalive sent while the new address has no route yet is lost; the next change of the
   collection, or the §12.5 triggers, recover.
-- One extra keepalive per session per change, at most one per second: no measurable cost.
+- One extra keepalive per session per change, at most one per collection (two deadlines of
+  the core within a second can make two collections): no measurable cost.
+- A peer behind a NAT that filters by address and port is not reached by the keepalive
+  when the node's own NAT gives its new address another public port: that peer's NAT
+  drops it, and the triggers of §12.5 find the node (about 20 s in the `roaming` nixosTest
+  before it was changed to keep the port). Only the lighthouse, the relays and peers with
+  an unfiltered endpoint learn the new port from the keepalive.

@@ -193,11 +193,15 @@ pub async fn run(
     let mut tun_buf = vec![0u8; 1 << 16];
     let lock = || state.lock().expect("no panic while holding the state");
     let log_peers = lock().log_peers;
+    // Absolute, so that received datagrams and packets postpone neither the poll of the local
+    // endpoints nor the tick (§12.4, §13.1): a fresh one-second sleep per iteration would.
+    let mut poll_at = clock::monotonic();
     loop {
-        let next = lock().node.next_deadline();
-        let wake = next
-            .map_or(MAX_SLEEP, |d| d.saturating_sub(clock::monotonic()))
-            .min(MAX_SLEEP);
+        let next = lock()
+            .node
+            .next_deadline()
+            .map_or(poll_at, |d| d.min(poll_at));
+        let wake = next.saturating_sub(clock::monotonic());
         let output = tokio::select! {
             received = socket.recv_from(&mut udp_buf) => {
                 let (n, source) = match received {
@@ -249,14 +253,16 @@ pub async fn run(
             () = tokio::time::sleep(wake) => {
                 let mut guard = lock();
                 if let Some(locals) = guard.locals.clone() {
-                    // §12.4, §13.1: polled at every tick (at least once a second), so a change
-                    // is acted upon by the tick below; v0 listens to no OS network event.
+                    // §12.4, §13.1: polled at every tick (at least once a second, traffic or
+                    // not), so a change is acted upon by the tick below; v0 listens to no OS
+                    // network event.
                     match ifaddrs::local_endpoints(locals.listen_port, &locals.overlay) {
                         Ok(found) => guard.node.set_local_endpoints(found),
                         Err(e) => debug!(event = "local-addresses-failed", error = %e),
                     }
                 }
                 let output = guard.node.tick(clock::monotonic(), clock::wall());
+                poll_at = clock::monotonic() + MAX_SLEEP;
                 log_events(&mut guard);
                 drop(guard);
                 output

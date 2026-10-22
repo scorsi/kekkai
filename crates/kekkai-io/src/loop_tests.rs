@@ -196,6 +196,49 @@ async fn discovery_through_a_lighthouse_loop() {
     assert!(counters.queries_known >= 1 && counters.punches >= 1);
 }
 
+/// Codex R1 on v0.6 finding 4: the loop collects its local endpoints at least once a second
+/// even while datagrams arrive more often than that; each one used to restart a one-second
+/// sleep, so the poll (and the tick) waited for the next core deadline.
+#[tokio::test(flavor = "current_thread")]
+async fn local_endpoints_are_polled_under_continuous_traffic() {
+    let socket = udp::bind(0).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let mut state = State::new(Node::new(key(1), vec![]), HashMap::new());
+    state.locals = Some(crate::Locals {
+        listen_port: port,
+        overlay: vec![],
+    });
+    let state = Arc::new(Mutex::new(state));
+    tokio::spawn(crate::run(state.clone(), socket, crate::NoTunnel, 1280));
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let to: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    // Not on this host: only a poll replaces it.
+    let marker: SocketAddr = "192.0.2.99:1".parse().unwrap();
+    // Let the loop start and run its first poll, then plant the marker; this tick consumes
+    // the change it makes, so that no zero deadline wakes the loop: only a poll removes it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    {
+        let node = &mut state.lock().unwrap().node;
+        node.set_local_endpoints(vec![marker.into()]);
+        let _ = node.tick(crate::clock::monotonic(), crate::clock::wall());
+    }
+    for _ in 0..150 {
+        // Not a kekkai datagram: dropped, but it wakes the loop every 20 ms.
+        sender.send_to(b"noise", to).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let state = state.lock().unwrap();
+    assert!(
+        state.drops.values().sum::<u64>() >= 100,
+        "{:?}",
+        state.drops
+    );
+    assert!(
+        !state.node.local_endpoints().contains(&marker.into()),
+        "no poll in 3 s of traffic"
+    );
+}
+
 /// Every field of every event emitted while `f` runs, as `name=value` lines.
 fn capture_events(f: impl FnOnce()) -> Vec<String> {
     use std::fmt::{Debug, Write as _};

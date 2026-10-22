@@ -1090,7 +1090,8 @@ local endpoints the IO layer collects (§13.1) differ, compared as a set, from t
 collection, the node sends at once one keepalive on every `current` session that can send
 (peers, lighthouses and relays alike, on each session's path), and each of them moves its
 endpoint by the rule above. The IO layer collects them at every wake-up (§9), lighthouse
-configured or not, so the keepalives leave at most one wake-up after the change. This
+configured or not, and wakes up at least once a second whatever the traffic it receives,
+so the keepalives leave at most one second after the change. This
 neither registers nor rediscovers: rule 3 of §12.5 keeps its register-tick detection, and a
 peer the keepalive cannot reach (an endpoint on a network the node has left) is found by
 the triggers of §12.5. A keepalive sent while the new address has no route yet is lost;
