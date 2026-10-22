@@ -171,9 +171,9 @@ IO layer keeps the set of routes the kernel holds, which may then differ from th
 the next reload starts from that set, so it reconciles the residual route. A DNS name that
 does not resolve is not an error (installed without candidates and retried, §13.1).
 
-The party installs its `SIGHUP` handler first thing at start, before it reads its
-configuration: a `SIGHUP` received from the process start on is one pending reload, applied
-once the party is ready, and readiness (`READY=1`, ADR 0018) implies the handler. The core applies the new lists as a **diff by static public
+The party installs its `SIGHUP` handler as soon as its runtime exists, before it reads its
+configuration: a `SIGHUP` received from then on is one pending reload, applied once the party
+is ready, and readiness (`READY=1`, ADR 0018) implies the handler. The core applies the new lists as a **diff by static public
 key**:
 
 - **Added key**: listed at once (§4 `verify` accepts it) with a fresh state; on a node its

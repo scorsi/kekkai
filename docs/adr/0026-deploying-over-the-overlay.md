@@ -56,9 +56,11 @@ Once kekkai is in production, hosts are deployed over SSH through kekkai. A `swi
   with it at the next activation; when both a restart-only section and the secret change,
   the daemon restarts twice. `modules-eval` runs the fragment against a fake launchctl:
   missing markers, a refused action, an interruption between action and marker.
-- The daemons install their `SIGHUP` handler first thing at start, before DNS resolution
-  and interface creation and always before `READY=1` (spec §4.1); a `SIGHUP` during
-  start-up is applied once ready.
+- The daemons install their `SIGHUP` handler as soon as the async runtime exists, before
+  reading the configuration, DNS resolution and interface creation, and always before
+  `READY=1` (spec §4.1); a `SIGHUP` during start-up is applied once ready. A `SIGHUP` in the
+  short interval between exec and runtime creation still terminates the process: covering it
+  would take a signal mask inherited across exec, not worth it for a signal only reload sends.
 - Routes (spec §4.1): additions then deletions as one transaction, undone in reverse on a
   refusal (the reload then fails); the daemon keeps the set the kernel holds, so a route
   an undo could not restore is reconciled at the next reload. A route deleted behind the
