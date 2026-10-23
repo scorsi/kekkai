@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the `kekkai` package is built by crane like the daemons; Go, the protoc Go plugins, `gofmt`, `buildGoModule`, the `go-test` and `buf-generate` checks are gone (`buf-lint` stays).
+
 ## Context
 
 The deployment repository consumes the author's applications as pinned flake inputs and wraps them in its own feature modules. CI runs on self-hosted Forgejo runners: a Linux VM and a Mac.

@@ -1,6 +1,6 @@
 //! kekkai — the CLI (ADR 0015, 0033): `keygen` and `pubkey` run locally with kekkai-core's key
 //! code, `status --json` is a thin gRPC client of a daemon's control socket. Same commands,
-//! messages and exit codes as the Go CLI it replaces (apps/cli).
+//! messages and exit codes as the Go CLI it replaced.
 
 use std::error::Error;
 use std::io::{Read, Write};
@@ -139,7 +139,8 @@ async fn get_status(socket: String) -> Result<GetStatusResponse, String> {
 }
 
 /// What `status --json` prints: protojson with the proto field names, two-space indent and
-/// a final newline, byte for byte the Go CLI's `formatStatus` (checked by the tests below).
+/// a final newline, byte for byte the Go CLI's `formatStatus` it replaced (checked by the tests
+/// below).
 fn format_status(reply: &GetStatusResponse) -> Result<String, String> {
     let pool =
         DescriptorPool::decode(kekkai_control::FILE_DESCRIPTOR_SET).map_err(|e| e.to_string())?;
@@ -167,10 +168,12 @@ mod tests {
 
     const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/status");
 
-    /// ADR 0033: on the replies the Go CLI's status_test.go encodes, the output is the Go
-    /// CLI's, byte for byte.
+    /// ADR 0033: on the committed replies (`*.binpb`), the output is the committed `*.json`, byte
+    /// for byte. The first goldens were printed by the removed Go CLI; they are frozen, and a new
+    /// fixture is written by hand and reviewed against protojson's JSON mapping, never generated
+    /// by this code.
     #[test]
-    fn status_matches_the_go_goldens() {
+    fn status_matches_the_goldens() {
         let mut goldens = String::new();
         let mut count = 0;
         for entry in std::fs::read_dir(GOLDENS).unwrap() {
@@ -231,7 +234,7 @@ mod tests {
     /// The client half: a reply served on a Unix socket comes back intact.
     #[test]
     fn status_reads_a_unix_socket() {
-        let socket = std::env::temp_dir().join(format!("kekkai-cli-{}.sock", std::process::id()));
+        let socket = std::env::temp_dir().join(format!("kekkai-test-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

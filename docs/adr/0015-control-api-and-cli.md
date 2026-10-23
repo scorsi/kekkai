@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the CLI is Rust (`apps/cli`), a tonic client generated at build time by `kekkai-control`; no Go client is generated or committed. `keygen` and `pubkey` use `kekkai-core`'s key code, so the shared keygen vectors are checked by the Rust suites (core and CLI) only.
+
 ## Context
 
 The Go CLI needs to read the node's state; later it will drive reloads and more. The author already uses gRPC with buf conventions in another project.

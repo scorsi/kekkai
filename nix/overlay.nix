@@ -11,12 +11,6 @@
       kekkai-node = rust "kekkai-node";
       kekkai-lighthouse = rust "kekkai-lighthouse";
       kekkai-relay = rust "kekkai-relay";
-      kekkai = final.callPackage ./packages/kekkai.nix { };
-      # The Rust CLI, built beside the Go one until ADR 0033 replaces it.
-      kekkai-cli = final.callPackage ./packages/rust-bin.nix {
-        inherit craneLib;
-        pname = "kekkai-cli";
-        mainProgram = "kekkai";
-      };
+      kekkai = rust "kekkai";
     };
 }

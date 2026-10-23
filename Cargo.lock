@@ -718,7 +718,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kekkai-cli"
+name = "kekkai"
 version = "0.0.0"
 dependencies = [
  "hyper-util",

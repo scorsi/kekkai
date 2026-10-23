@@ -5,7 +5,6 @@
   protobuf,
   craneLib,
   pname,
-  mainProgram ? pname,
 }:
 let
   common = {
@@ -21,7 +20,7 @@ let
         (craneLib.fileset.commonCargoSources ../../apps/node)
         (craneLib.fileset.commonCargoSources ../../apps/lighthouse)
         (craneLib.fileset.commonCargoSources ../../apps/relay)
-        (craneLib.fileset.commonCargoSources ../../apps/cli-rs)
+        (craneLib.fileset.commonCargoSources ../../apps/cli)
         # A workspace member must be present for cargo to load the manifest.
         (craneLib.fileset.commonCargoSources ../../fuzz)
         ../../Cargo.toml
@@ -29,7 +28,7 @@ let
         ../../proto
         # The CLI's tests read the shared keygen vectors and the status goldens (0033).
         ../../docs/spec/vectors
-        ../../apps/cli-rs/testdata
+        ../../apps/cli/testdata
       ];
     };
   };
@@ -40,6 +39,6 @@ craneLib.buildPackage (
     inherit pname;
     cargoArtifacts = craneLib.buildDepsOnly common;
     cargoExtraArgs = "-p ${pname}";
-    meta = { inherit mainProgram; };
+    meta.mainProgram = pname;
   }
 )

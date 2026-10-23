@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the `kekkai` CLI is written in Rust, not Go; Rust is the only language of what kekkai ships, apart from glue scripts, `nixosTest` scripts and the iOS shell.
+
 ## Context
 
 The protocol must run as a privileged daemon on Linux and macOS, later inside an iOS Network Extension, and be fuzzed and property-tested. The author already uses Rust for daemons, Go for CLIs, Nushell for scripts and Python only where NixOS tests impose it.

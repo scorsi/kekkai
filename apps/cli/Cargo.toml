@@ -1,13 +1,8 @@
 [package]
-name = "kekkai-cli"
+name = "kekkai"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-# Shipped as `kekkai` once the Go CLI is removed (ADR 0033); until then built beside it.
-[[bin]]
-name = "kekkai"
-path = "src/main.rs"
 
 # Dependency policy: ADR 0029 and ADR 0033 (prost-reflect, serde_json).
 [dependencies]

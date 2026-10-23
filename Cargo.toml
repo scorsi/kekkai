@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "apps/node", "apps/lighthouse", "apps/relay", "apps/cli-rs", "fuzz"]
+members = ["crates/*", "apps/node", "apps/lighthouse", "apps/relay", "apps/cli", "fuzz"]
 
 [workspace.package]
 version = "0.0.0"

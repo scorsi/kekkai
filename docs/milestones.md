@@ -247,3 +247,8 @@ Note (owner, 2026-10-21): when two crossing handshakes complete, one direct and 
 side may keep a different path until the next handshake (at most about 60 s). Accepted until after
 review gate 2; making the direct session always win needs a change to session promotion in
 `peer.rs` (gate 1 scope) and is planned after gate 2.
+
+Note (2026-10-24): the `kekkai` CLI moved from Go to Rust after v0.7 (ADR 0033): same commands,
+output and errors the nixosTests match, built by crane from `apps/cli/`. The Go module, `go.work`
+and the Go-side keygen vectors named in v0.0 and v0.2 are gone; their criteria are now met by the
+Rust CLI (the shared keygen vectors run in the CLI's tests).

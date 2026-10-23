@@ -14,7 +14,10 @@
         fileset = lib.fileset.unions [
           ../VERSION
           ../Cargo.toml
-          ../apps/cli/internal/version/version.go
+          ../apps/node/Cargo.toml
+          ../apps/lighthouse/Cargo.toml
+          ../apps/relay/Cargo.toml
+          ../apps/cli/Cargo.toml
         ];
       };
       # The Rust workspace sources, for crane checks.
@@ -32,15 +35,15 @@
             (craneLib.fileset.commonCargoSources ../apps/node)
             (craneLib.fileset.commonCargoSources ../apps/lighthouse)
             (craneLib.fileset.commonCargoSources ../apps/relay)
-            (craneLib.fileset.commonCargoSources ../apps/cli-rs)
+            (craneLib.fileset.commonCargoSources ../apps/cli)
             (craneLib.fileset.commonCargoSources ../fuzz)
             ../Cargo.toml
             ../Cargo.lock
             ../proto
             # kekkai-core's tests load the vectors relative to CARGO_MANIFEST_DIR (spec §19).
             ../docs/spec/vectors
-            # The CLI's protojson parity goldens, written by apps/cli/status_test.go (0033).
-            ../apps/cli-rs/testdata
+            # The CLI's frozen protojson parity goldens (0033).
+            ../apps/cli/testdata
             # The fuzz crate's tests replay the committed corpus (ADR 0020).
             ../fuzz/corpus
           ];
@@ -219,7 +222,6 @@
           kekkai-lighthouse
           kekkai-relay
           kekkai
-          kekkai-cli
           ;
       };
 
@@ -237,11 +239,8 @@
           clippy
           rustfmt
           cargo-fuzz
-          go
           buf
           protobuf
-          protoc-gen-go
-          protoc-gen-go-grpc
           nushell
         ];
         PROTOC = "${pkgs.protobuf}/bin/protoc";
@@ -262,32 +261,6 @@
           buf lint
           touch $out
         '';
-
-        # The committed Go client must match what `buf generate` produces.
-        buf-generate =
-          pkgs.runCommand "buf-generate"
-            {
-              nativeBuildInputs = with pkgs; [
-                buf
-                protoc-gen-go
-                protoc-gen-go-grpc
-              ];
-              src = lib.fileset.toSource {
-                root = ../.;
-                fileset = lib.fileset.unions [
-                  ../proto
-                  ../apps/cli/internal/genproto
-                ];
-              };
-            }
-            ''
-              export HOME=$TMPDIR
-              cp -r $src work && chmod -R u+w work
-              rm -r work/apps/cli/internal/genproto
-              (cd work/proto && buf generate)
-              diff -r $src/apps/cli/internal/genproto work/apps/cli/internal/genproto
-              touch $out
-            '';
 
         cargo-clippy = craneLib.cargoClippy (
           rustArgs
@@ -316,9 +289,6 @@
             installPhaseCommand = "mkdir -p $out && cp relay.txt $out/";
           }
         );
-        # The CLI build runs `go vet` and `go test`, including the shared keygen vectors (0015).
-        go-test = pkgs.kekkai;
-
         modules-eval =
           let
             daemon = darwinEval.launchd.daemons.kekkai-node.serviceConfig;
@@ -504,11 +474,9 @@
         projectRootFile = "flake.nix";
         programs = {
           rustfmt.enable = true;
-          gofmt.enable = true;
           nixfmt.enable = true;
         };
         settings.excludes = [
-          "apps/cli/internal/genproto/**"
           "target/**"
           "Cargo.lock"
           "LICENSE"

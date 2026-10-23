@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-18
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the CLI is Rust; its dependencies are listed in 0033 and the Go paragraph below no longer applies.
+
 ## Context
 
 ADR 0028 fixes the dependencies of `kekkai-core`. The first tunnel milestone (v0.2) adds

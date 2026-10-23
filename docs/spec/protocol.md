@@ -1491,7 +1491,7 @@ a field whose type can hold a value above 2^53 − 1 (every 64-bit counter: `rep
 counters, `handshake.json` `data_packets[].counter`) is a **decimal string in every entry**,
 whatever the value, so that readers that store JSON numbers as doubles stay exact; a JSON
 number is used only for fields bounded by 2^53 − 1 (indices, lengths, seconds, types). Each file carries a `description` naming the section it exercises.
-They are loaded by the Rust test suite of `kekkai-core` (all of them) and by the Go CLI's
+They are loaded by the Rust test suite of `kekkai-core` (all of them) and by the CLI's
 tests (`keygen.json`), both run by `nix flake check` (ADR 0020).
 
 | File | Checks | Section |
@@ -1545,8 +1545,8 @@ it checked independently of the Rust code:
   transport packets with a second implementation.
 
 So the TAI64N and transport-nonce glue rests on one independent reproduction. A durable
-second implementation of `mac1` and of the transport nonce (for example in the Go CLI's
-tests over `handshake.json`) would keep that check alive; it is future work, not a v0 task.
+second implementation of `mac1` and of the transport nonce (for example in a test suite
+over `handshake.json` independent of `kekkai-core`) would keep that check alive; it is future work, not a v0 task.
 
 **Checks over existing bytes.** The **receiver recognition** check documents the accepted
 property of §5.5 using only public fields of `handshake.json`: for `message_2.datagram`

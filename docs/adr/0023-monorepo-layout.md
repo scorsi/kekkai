@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: `apps/cli/` is a Rust workspace member (package and binary `kekkai`); `go.work` and the committed generated Go code are gone, every generated client is built at build time.
+
 ## Context
 
 Three Rust daemons, a Go CLI, a gRPC contract, Nix modules, a spec and fuzz targets. The author's kajiba monorepo (its ADR 0018) is the template.

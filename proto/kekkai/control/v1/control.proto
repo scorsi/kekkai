@@ -5,8 +5,6 @@ package kekkai.control.v1;
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/scorsi/kekkai/cli/internal/genproto/kekkai/control/v1;controlv1";
-
 // Control API served by the node, the lighthouse and the relay over a Unix socket (0015,
 // 0030, 0031).
 service ControlService {
