@@ -1,0 +1,26 @@
+[package]
+name = "kekkai-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Shipped as `kekkai` once the Go CLI is removed (ADR 0033); until then built beside it.
+[[bin]]
+name = "kekkai"
+path = "src/main.rs"
+
+# Dependency policy: ADR 0029 and ADR 0033 (prost-reflect, serde_json).
+[dependencies]
+kekkai-control = { path = "../../crates/kekkai-control" }
+kekkai-core = { path = "../../crates/kekkai-core" }
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost.workspace = true
+prost-reflect = { version = "0.14", features = ["serde"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+tonic.workspace = true
+tower = { version = "0.4", default-features = false, features = ["util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "net", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }

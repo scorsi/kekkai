@@ -1,5 +1,5 @@
 # The Go CLI (0002, 0022). The source root is the repository so that the tests read the shared
-# keygen vectors under docs/spec/vectors (0015, 0020).
+# keygen vectors under docs/spec/vectors (0015, 0020) and the status goldens (0033).
 { lib, buildGoModule }:
 buildGoModule {
   pname = "kekkai";
@@ -9,6 +9,8 @@ buildGoModule {
     fileset = lib.fileset.unions [
       ../../apps/cli
       ../../docs/spec/vectors/keygen.json
+      # status_test.go checks the protojson parity goldens (0033).
+      ../../apps/cli-rs/testdata
     ];
   };
   modRoot = "apps/cli";

@@ -32,12 +32,15 @@
             (craneLib.fileset.commonCargoSources ../apps/node)
             (craneLib.fileset.commonCargoSources ../apps/lighthouse)
             (craneLib.fileset.commonCargoSources ../apps/relay)
+            (craneLib.fileset.commonCargoSources ../apps/cli-rs)
             (craneLib.fileset.commonCargoSources ../fuzz)
             ../Cargo.toml
             ../Cargo.lock
             ../proto
             # kekkai-core's tests load the vectors relative to CARGO_MANIFEST_DIR (spec §19).
             ../docs/spec/vectors
+            # The CLI's protojson parity goldens, written by apps/cli/status_test.go (0033).
+            ../apps/cli-rs/testdata
             # The fuzz crate's tests replay the committed corpus (ADR 0020).
             ../fuzz/corpus
           ];
@@ -216,6 +219,7 @@
           kekkai-lighthouse
           kekkai-relay
           kekkai
+          kekkai-cli
           ;
       };
 

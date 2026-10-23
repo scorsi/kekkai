@@ -1,0 +1,24 @@
+{
+  "node": {
+    "public_key": "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=",
+    "version": "0.0.0",
+    "wire_version": 1,
+    "uptime": "86400s",
+    "listen_port": 4801
+  },
+  "senders": [
+    {
+      "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "name": "a",
+      "connected": true,
+      "forwarded_packets": "1000",
+      "forwarded_bytes": "1234567890123",
+      "dropped_no_route": "2",
+      "dropped_rate_limited": "4"
+    },
+    {
+      "public_key": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=",
+      "name": "b"
+    }
+  ]
+}

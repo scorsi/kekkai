@@ -1,0 +1,38 @@
+{
+  "node": {
+    "public_key": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+    "version": "0.0.0",
+    "wire_version": 1,
+    "uptime": "0s",
+    "listen_port": 4800
+  },
+  "registrations": [
+    {
+      "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "name": "a",
+      "observed_endpoint": "198.51.100.1:4802",
+      "local_endpoints": [
+        "10.1.0.5:4802",
+        "[fd12::5]:4802"
+      ],
+      "last_seen": "1.500s"
+    },
+    {
+      "public_key": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=",
+      "observed_endpoint": "198.51.100.2:31000",
+      "last_seen": "0.000000001s"
+    },
+    {
+      "last_seen": "0.000001s"
+    },
+    {
+      "last_seen": "315576000000s"
+    },
+    {
+      "last_seen": "-1.500s"
+    },
+    {
+      "last_seen": "-0.001s"
+    }
+  ]
+}

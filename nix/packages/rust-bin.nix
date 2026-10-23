@@ -1,9 +1,11 @@
-# One of the three Rust daemons, built by crane. kekkai-control's build.rs needs protoc (0023).
+# A Rust binary of the workspace (the three daemons, the CLI), built by crane. kekkai-control's
+# build.rs needs protoc (0023).
 {
   lib,
   protobuf,
   craneLib,
   pname,
+  mainProgram ? pname,
 }:
 let
   common = {
@@ -19,11 +21,15 @@ let
         (craneLib.fileset.commonCargoSources ../../apps/node)
         (craneLib.fileset.commonCargoSources ../../apps/lighthouse)
         (craneLib.fileset.commonCargoSources ../../apps/relay)
+        (craneLib.fileset.commonCargoSources ../../apps/cli-rs)
         # A workspace member must be present for cargo to load the manifest.
         (craneLib.fileset.commonCargoSources ../../fuzz)
         ../../Cargo.toml
         ../../Cargo.lock
         ../../proto
+        # The CLI's tests read the shared keygen vectors and the status goldens (0033).
+        ../../docs/spec/vectors
+        ../../apps/cli-rs/testdata
       ];
     };
   };
@@ -34,6 +40,6 @@ craneLib.buildPackage (
     inherit pname;
     cargoArtifacts = craneLib.buildDepsOnly common;
     cargoExtraArgs = "-p ${pname}";
-    meta.mainProgram = pname;
+    meta = { inherit mainProgram; };
   }
 )

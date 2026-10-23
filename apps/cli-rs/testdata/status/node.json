@@ -1,0 +1,92 @@
+{
+  "node": {
+    "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+    "addresses": [
+      "10.0.0.1/32",
+      "fd00::1/128"
+    ],
+    "version": "0.0.0",
+    "wire_version": 1,
+    "uptime": "3725.500s",
+    "listen_port": 4802
+  },
+  "peers": [
+    {},
+    {
+      "public_key": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=",
+      "addresses": [
+        "10.0.0.2/32"
+      ],
+      "path": "PATH_DIRECT",
+      "endpoint": "192.0.2.7:4802",
+      "last_handshake": "2025-10-24T10:00:00Z",
+      "rx_bytes": "18446744073709551615",
+      "tx_bytes": "9007199254740992",
+      "rx_packets": "1",
+      "tx_packets": "2",
+      "replay_rejections": "3",
+      "last_direct_path_failure": "DIRECT_PATH_FAILURE_NO_CANDIDATES",
+      "allow_inbound": [
+        "tcp/22",
+        "udp/53"
+      ],
+      "firewall_drops": "12",
+      "name": "b",
+      "receiver_index": 0,
+      "session_created": "2025-10-24T10:00:00.000000001Z"
+    },
+    {
+      "public_key": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+      "path": "PATH_RELAYED",
+      "relay_public_key": "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=",
+      "endpoint": "[2001:db8::1]:4802",
+      "last_handshake": "2025-10-24T10:00:01.120Z",
+      "last_direct_path_failure": "DIRECT_PATH_FAILURE_TIMEOUT",
+      "name": "quote \" backslash \\ newline \n tab \t ctrl \u0001\u001f del  <>& é   🦀",
+      "receiver_index": 4294967295,
+      "session_created": "2025-10-24T10:00:01.000120Z"
+    },
+    {
+      "path": "PATH_NONE",
+      "last_direct_path_failure": "DIRECT_PATH_FAILURE_ABANDONED"
+    },
+    {
+      "last_direct_path_failure": "DIRECT_PATH_FAILURE_LIGHTHOUSE_UNKNOWN"
+    },
+    {
+      "path": 99,
+      "last_direct_path_failure": -1
+    }
+  ],
+  "firewall": {
+    "udp_flows": "17",
+    "udp_flows_max": "1024",
+    "evictions": "5"
+  },
+  "lighthouses": [
+    {
+      "public_key": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+      "endpoint": "lighthouse.example.org:4800",
+      "state": "SESSION_STATE_CONNECTED",
+      "last_handshake": "1970-01-01T00:00:00Z",
+      "last_received": "9999-12-31T23:59:59.999999999Z"
+    },
+    {
+      "public_key": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+      "state": "SESSION_STATE_HANDSHAKING"
+    },
+    {
+      "state": "SESSION_STATE_DOWN"
+    },
+    {}
+  ],
+  "relays": [
+    {
+      "public_key": "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=",
+      "endpoint": "relay.example.org:4801",
+      "state": "SESSION_STATE_CONNECTED",
+      "last_handshake": "0001-01-01T00:00:00Z",
+      "last_received": "2025-10-24T10:00:02.005Z"
+    }
+  ]
+}

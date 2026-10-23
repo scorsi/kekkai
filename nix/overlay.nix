@@ -1,4 +1,4 @@
-# overlays.default (0022): the four packages, so modules can use `mkPackageOption pkgs`.
+# overlays.default (0022): the packages, so modules can use `mkPackageOption pkgs`.
 { inputs, ... }:
 {
   flake.overlays.default =
@@ -12,5 +12,11 @@
       kekkai-lighthouse = rust "kekkai-lighthouse";
       kekkai-relay = rust "kekkai-relay";
       kekkai = final.callPackage ./packages/kekkai.nix { };
+      # The Rust CLI, built beside the Go one until ADR 0033 replaces it.
+      kekkai-cli = final.callPackage ./packages/rust-bin.nix {
+        inherit craneLib;
+        pname = "kekkai-cli";
+        mainProgram = "kekkai";
+      };
     };
 }

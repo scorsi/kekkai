@@ -113,10 +113,19 @@ func status(socket string) error {
 	if err != nil {
 		return err
 	}
-	out, err := protojson.MarshalOptions{Multiline: true, UseProtoNames: true}.Marshal(reply)
+	out, err := formatStatus(reply)
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(out))
-	return nil
+	_, err = io.WriteString(os.Stdout, out)
+	return err
+}
+
+// formatStatus is what `status --json` prints, checked against the Rust CLI by status_test.go.
+func formatStatus(reply *controlv1.GetStatusResponse) (string, error) {
+	out, err := protojson.MarshalOptions{Multiline: true, UseProtoNames: true}.Marshal(reply)
+	if err != nil {
+		return "", err
+	}
+	return string(out) + "\n", nil
 }

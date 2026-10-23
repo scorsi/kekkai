@@ -1,0 +1,13 @@
+{
+  "node": {
+    "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+    "addresses": [
+      "10.0.0.1/32",
+      "fd00::1/128"
+    ],
+    "version": "0.0.0",
+    "wire_version": 1,
+    "uptime": "3725.500s",
+    "listen_port": 4802
+  }
+}
