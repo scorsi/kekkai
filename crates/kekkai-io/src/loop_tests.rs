@@ -25,6 +25,8 @@ impl Tunnel for UnixDatagram {
     }
 }
 
+const ADDRS: [[u8; 4]; 2] = [[10, 0, 0, 1], [10, 0, 0, 2]];
+
 fn key(seed: u8) -> StaticKey {
     StaticKey::from_bytes([seed; 32]).clamped()
 }
@@ -39,10 +41,10 @@ fn ipv4(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
     p
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn two_loops_carry_a_packet_each_way() {
+/// Two node loops with keys `key(1)` and `key(2)` that know each other's loopback endpoint,
+/// peer `i` named `host{i}`: their tunnels' outer ends, their states and their UDP ports.
+fn two_loops() -> (Vec<UnixDatagram>, Vec<Arc<Mutex<State>>>, Vec<u16>) {
     let keys = [key(1), key(2)];
-    let addrs: [IpAddr; 2] = ["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
     let sockets = [udp::bind(0).unwrap(), udp::bind(0).unwrap()];
     let ports: Vec<u16> = sockets
         .iter()
@@ -58,7 +60,7 @@ async fn two_loops_carry_a_packet_each_way() {
             keys[i].clone(),
             vec![PeerConfig {
                 public_key: peer_key,
-                addresses: vec![addrs[other]],
+                addresses: vec![IpAddr::from(ADDRS[other])],
                 allow_inbound: vec![kekkai_core::firewall::Rule::Any],
                 endpoints: vec![endpoint.into()],
             }],
@@ -76,17 +78,16 @@ async fn two_loops_carry_a_packet_each_way() {
         outsides.push(outside);
         states.push(state);
     }
+    (outsides, states, ports)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn two_loops_carry_a_packet_each_way() {
+    let (outsides, states, ports) = two_loops();
+    let keys = [key(1), key(2)];
     let timeout = Duration::from_secs(5);
     for (from, to) in [(0, 1), (1, 0)] {
-        let src = match addrs[from] {
-            IpAddr::V4(v4) => v4.octets(),
-            IpAddr::V6(_) => unreachable!(),
-        };
-        let dst = match addrs[to] {
-            IpAddr::V4(v4) => v4.octets(),
-            IpAddr::V6(_) => unreachable!(),
-        };
-        let packet = ipv4(src, dst, b"hello through the overlay");
+        let packet = ipv4(ADDRS[from], ADDRS[to], b"hello through the overlay");
         outsides[from].send(&packet).await.unwrap();
         let mut buf = [0u8; 2048];
         let n = tokio::time::timeout(timeout, outsides[to].recv(&mut buf))
@@ -334,5 +335,38 @@ fn a_lighthouse_never_logs_a_send_destination() {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("udp-send-failed"), "{lines:?}");
         assert_eq!(lines[0].contains("127.0.0.1"), log_peers, "{lines:?}");
+    }
+}
+
+/// v0.6 finding 3: an event is logged by the step that produced it, not by the next tick. A
+/// handshake completes on a received datagram, a few milliseconds before the packet that
+/// started it comes out of the other tunnel; the next tick is up to a second later.
+#[test]
+fn a_handshake_is_logged_when_it_completes() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let lines = capture_events(|| {
+        runtime.block_on(async {
+            let (outsides, _, _) = two_loops();
+            // Both loops run their first tick before the handshake starts.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let packet = ipv4(ADDRS[0], ADDRS[1], b"first packet");
+            outsides[0].send(&packet).await.unwrap();
+            let mut buf = [0u8; 2048];
+            tokio::time::timeout(Duration::from_secs(5), outsides[1].recv(&mut buf))
+                .await
+                .expect("packet delivered within 5 s")
+                .unwrap();
+        });
+    });
+    for (peer, initiator) in [("host1", true), ("host0", false)] {
+        assert!(
+            lines.iter().any(|l| l.contains("handshake-completed")
+                && l.contains(&format!("peer={peer} "))
+                && l.contains(&format!("initiator={initiator} "))),
+            "{peer}: {lines:?}"
+        );
     }
 }

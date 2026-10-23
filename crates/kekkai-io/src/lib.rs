@@ -67,7 +67,7 @@ pub struct State {
     pub log_peers: bool,
     /// Datagrams and tunnel packets the core dropped, by `DropReason` name (ADR 0019).
     pub drops: BTreeMap<&'static str, u64>,
-    /// What `log_events` saw of each party at the last tick; follows the lists (§4.1).
+    /// What `log_events` saw of each party at its last check; follows the lists (§4.1).
     seen: HashMap<PublicKey, Seen>,
 }
 
@@ -171,7 +171,7 @@ impl Tunnel for NoTunnel {
     }
 }
 
-/// What `log_events` remembers of a peer between two ticks.
+/// What `log_events` remembers of a peer between two checks.
 #[derive(Debug, Default)]
 struct Seen {
     path: &'static str,
@@ -233,6 +233,9 @@ pub async fn run(
                                 guard.count_drop(reason);
                                 trace!(event = "datagram-dropped", reason = reason.as_str());
                             }
+                            // Handshakes, endpoints and paths change on received datagrams:
+                            // logged now, not at the next tick (v0.6 finding 3).
+                            log_events(&mut guard);
                             output
                         }
                         Err(reason) => {
@@ -303,7 +306,7 @@ async fn send_datagrams(
     }
 }
 
-/// ADR 0019 `info` events, checked at every tick (at least once a second): handshake
+/// ADR 0019 `info` events, checked after every received datagram and every tick: handshake
 /// completed, path change, endpoint change, direct-path failure, lighthouse and relay
 /// session state.
 fn log_events(state: &mut State) {
@@ -327,7 +330,7 @@ fn log_events(state: &mut State) {
             path: "none",
             ..Seen::default()
         });
-        // shortcut: two handshakes within one tick log once, initiator wins; counters are exact.
+        // shortcut: two handshakes between two checks log once, initiator wins; counters are exact.
         let initiated = c.handshakes_initiated != b.counters.handshakes_initiated;
         if initiated || c.handshakes_responded != b.counters.handshakes_responded {
             info!(
