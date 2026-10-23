@@ -1101,8 +1101,12 @@ the next change of the collection, or the triggers of §12.5, recover.
 
 A **rediscovery** of peer `B` is: send `lighthouse_query { B }` to every lighthouse with a
 live session (§13.2), then run §12.2 (and §12.3 when applicable) with a fresh in-flight
-handshake, keeping an in-flight one if it exists and merely widening its candidates. It is
-triggered by any of:
+handshake, keeping an in-flight one if it exists and merely widening its candidates. A
+rediscovery that started while no lighthouse session could send (typically a node's first
+packets after its start, before its lighthouse handshake completes) sends its query to the
+first lighthouse whose session can send while it runs, right after the register of §13.1
+(v0.6 finding 1: without it the window ends with no candidate and the attempt falls back to
+the relay). It is triggered by any of:
 
 1. an IP packet towards `B` while `B` has no live `current` session;
 2. a message 1 towards `B` unanswered after its first `REKEY_TIMEOUT`: the retransmit

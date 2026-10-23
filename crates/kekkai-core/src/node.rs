@@ -145,6 +145,8 @@ struct Link {
     discovery: Option<Duration>,
     /// A lighthouse answered "unknown" during the running rediscovery.
     unknown: bool,
+    /// The running rediscovery queried no lighthouse: none had a session that could send.
+    unqueried: bool,
     /// When a rediscovery or punch handshake refused by the §7.9 pacing may start.
     deferred: Option<Duration>,
     failure: Option<PathFailure>,
@@ -196,6 +198,7 @@ impl Link {
     fn end_discovery(&mut self) {
         self.discovery = None;
         self.unknown = false;
+        self.unqueried = false;
     }
 
     /// A handshake completed or the attempt sequence was abandoned (§7.9, §12.2).
@@ -548,9 +551,12 @@ impl Node {
             peer.counters.rx_bytes += datagram.len() as u64;
             let link = self.links.get_mut(&key).expect("links follow peers");
             // §13.1 after a handshake with the lighthouse, which may be how a move shows.
-            if link.register_due && peer.can_send(now) && self.register(now, wall, key, &mut sends)
-            {
-                self.rediscover_live(now, wall, &mut sends);
+            if link.register_due && peer.can_send(now) {
+                let moved = self.register(now, wall, key, &mut sends);
+                self.query_unqueried(now, wall, key, &mut sends);
+                if moved {
+                    self.rediscover_live(now, wall, &mut sends);
+                }
             }
         }
         output.datagrams = self.route(now, wall, sends);
@@ -937,14 +943,46 @@ impl Node {
                 .filter(|(_, l)| l.role == Role::Lighthouse)
                 .map(|(k, _)| *k)
                 .collect();
+            let mut unqueried = true;
             for lh in lighthouses {
                 let peer = self.peers.get_mut(&lh).expect("links follow peers");
                 let out = peer.send_inner(&mut ctx!(self, now, wall), &query);
+                unqueried &= out.is_empty();
                 sends.extend(out.into_iter().map(|d| (lh, None, d)));
             }
+            self.links
+                .get_mut(&target)
+                .expect("links follow peers")
+                .unqueried = unqueried;
         }
         if handshake {
             self.initiate(now, wall, target, sends);
+        }
+    }
+
+    /// §12.5: a running rediscovery that could query no lighthouse queries `lh` once its
+    /// session can send (v0.6 finding 1: a node's first packets after its start).
+    fn query_unqueried(
+        &mut self,
+        now: Duration,
+        wall: Tai64n,
+        lh: PublicKey,
+        sends: &mut Vec<Send>,
+    ) {
+        let targets: Vec<PublicKey> = self
+            .links
+            .iter()
+            .filter(|(_, l)| l.unqueried)
+            .map(|(k, _)| *k)
+            .collect();
+        for target in targets {
+            let query = Inner::LighthouseQuery { pubkey: target }.encode();
+            let peer = self.peers.get_mut(&lh).expect("links follow peers");
+            let out = peer.send_inner(&mut ctx!(self, now, wall), &query);
+            if !out.is_empty() {
+                self.links.get_mut(&target).expect("listed").unqueried = false;
+            }
+            sends.extend(out.into_iter().map(|d| (lh, None, d)));
         }
     }
 

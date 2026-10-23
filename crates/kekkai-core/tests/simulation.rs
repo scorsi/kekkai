@@ -206,6 +206,8 @@ struct Sim {
     relay_key: Option<StaticKey>,
     /// Datagrams sent per link, the `n` of `mix(seed, link, n)`.
     link_counts: Vec<u64>,
+    /// The nodes' keys, to restart them.
+    node_keys: Vec<StaticKey>,
 }
 
 fn address(host: usize) -> IpAddr {
@@ -246,6 +248,7 @@ impl Sim {
     fn new(seed: u64, n: usize, link: Link) -> Self {
         let keys: Vec<StaticKey> = (0..n).map(|_| StaticKey::generate()).collect();
         let publics: Vec<PublicKey> = keys.iter().map(StaticKey::public).collect();
+        let node_keys = keys.clone();
         let hosts = keys
             .into_iter()
             .enumerate()
@@ -287,6 +290,7 @@ impl Sim {
             lighthouse_key: None,
             relay_key: None,
             link_counts: vec![0; n * n],
+            node_keys,
         }
     }
 
@@ -2055,4 +2059,79 @@ fn relay_silence_and_unlisted_destinations() {
         .filter(|(t, f, to, _)| *t >= start && *f == r && *to == 2)
         .count();
     assert_eq!(to_2, 0);
+}
+
+/// v0.6 finding 1, as deployed: host 0 is the public entry point, with the lighthouse and
+/// the relay; host 1 sits behind a cone NAT and has host 0's endpoint configured, so host 1
+/// initiates and the pair is direct. Then host 0's node restarts (fresh core, same key and
+/// configuration) and, `delay` after the restart, its tunnel hands it one packet for host 1
+/// (a TCP retransmission of a connection that crossed the restart), then one a second from
+/// 3.5 s on. With `lighthouse_restarted` the lighthouse restarts at the same instant. Returns
+/// host 0's path to host 1 at each second of the 70 s after the restart: `D` direct, `R`
+/// relayed, `-` none.
+fn restart_the_public_node(seed: u64, delay: Duration, lighthouse_restarted: bool) -> String {
+    let mut sim = Sim::discovery(seed, 2);
+    let relay = sim.add_relay(&[0, 1], None);
+    let nat = sim.add_nat(Ipv4Addr::new(198, 51, 100, 1), NatKind::Cone);
+    sim.place(1, ep(192, 168, 1, 2, 4802), Some(nat));
+    let to_0 = sim.peer_config(0);
+    sim.hosts[1].node.set_peers(vec![to_0]);
+    sim.run_until(secs(2));
+    sim.stream(1, 0, secs(1), secs(10));
+    sim.stream(0, 1, secs(1), secs(20));
+    assert!(matches!(sim.status(0, 1).path, Some(Path::Direct(_))));
+    assert!(matches!(sim.status(1, 0).path, Some(Path::Direct(_))));
+    let lh = sim.lighthouse();
+    let service = |sim: &Sim, i: usize| LighthouseConfig {
+        public_key: sim.hosts[i].key,
+        endpoints: vec![sim.addr(i)],
+    };
+    let to_1 = PeerConfig {
+        endpoints: Vec::new(),
+        ..sim.peer_config(1)
+    };
+    let mut node = Node::new(sim.node_keys[0].clone(), vec![to_1]);
+    node.set_lighthouses(vec![service(&sim, lh)]);
+    node.set_relays(vec![service(&sim, relay)]);
+    node.set_local_endpoints(vec![sim.addr(0)]);
+    sim.hosts[0].node = node;
+    if lighthouse_restarted {
+        let key = sim.lighthouse_key.clone().expect("discovery sim");
+        let keys = vec![sim.hosts[0].key, sim.hosts[1].key];
+        sim.hosts[lh].node = Node::lighthouse(key, keys);
+    }
+    let restarted = sim.now;
+    sim.run_until(restarted + delay);
+    let _ = sim.send_ip(0, 1);
+    let mut paths = String::new();
+    while sim.now < restarted + secs(70) {
+        if sim.now >= restarted + ms(3500) {
+            let _ = sim.send_ip(0, 1);
+        }
+        let next = sim.now + secs(1);
+        sim.run_until(next);
+        paths.push(match sim.status(0, 1).path {
+            Some(Path::Direct(_)) => 'D',
+            Some(Path::Relayed(_)) => 'R',
+            None => '-',
+        });
+    }
+    paths
+}
+
+/// v0.6 finding 1, §12.5: the restarted node's first packet for the NATed peer starts a
+/// rediscovery before its lighthouse session is up. Its query must leave once that session
+/// can send; otherwise the window ends with no candidate, the attempt falls back to the
+/// relay and the pair stays relayed until the direct retry (60 s). A packet that comes once
+/// the lighthouse session is up (the second real run) queries at once. A restarted
+/// lighthouse knows the peer only after it registers again: relayed until the retry, by
+/// design (§12.3, §12.6 `lighthouse_unknown`).
+#[test]
+fn a_restarted_public_node_reaches_a_natted_peer_directly() {
+    let direct = "D".repeat(70);
+    assert_eq!(restart_the_public_node(100, ms(0), false), direct);
+    assert_eq!(restart_the_public_node(101, ms(100), false), direct);
+    let paths = restart_the_public_node(102, ms(0), true);
+    assert!(paths[3..60].bytes().all(|p| p == b'R'), "{paths}");
+    assert!(paths.ends_with("DDDDD"), "{paths}");
 }
