@@ -38,5 +38,6 @@ Statuses: **Accepted** (decided on 2026-10-13 unless noted), **Proposed**, **Ope
 | 0030 | Lighthouse status, logs and metrics                     | Accepted |
 | 0031 | Relay status, logs, metrics and rate limits             | Accepted |
 | 0032 | Keepalive on a change of local addresses                | Accepted |
+| 0033 | The CLI in Rust                                         | Proposed |
 
 Deployment-specific values (overlay prefixes, peers, public keys, which host carries which role, accepted host-level risks) are not recorded here: see 0025.
