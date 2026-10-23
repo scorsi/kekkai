@@ -234,8 +234,9 @@ pub async fn run(
                                 trace!(event = "datagram-dropped", reason = reason.as_str());
                             }
                             // Handshakes, endpoints and paths change on received datagrams:
-                            // logged now, not at the next tick (v0.6 finding 3).
-                            log_events(&mut guard);
+                            // logged now, not at the next tick (v0.6 finding 3). Only the
+                            // sender: a full check per datagram costs ~60 ns per listed peer.
+                            log_events(&mut guard, output.from);
                             output
                         }
                         Err(reason) => {
@@ -287,7 +288,7 @@ fn tick(state: &mut State, poll_at: &mut Duration) -> node::Output {
     }
     let output = state.node.tick(clock::monotonic(), clock::wall());
     *poll_at = clock::monotonic() + MAX_SLEEP;
-    log_events(state);
+    log_events(state, None);
     output
 }
 
@@ -306,15 +307,21 @@ async fn send_datagrams(
     }
 }
 
-/// ADR 0019 `info` events, checked after every received datagram and every tick: handshake
-/// completed, path change, endpoint change, direct-path failure, lighthouse and relay
-/// session state.
-fn log_events(state: &mut State) {
+/// ADR 0019 `info` events: handshake completed, path change, endpoint change, direct-path
+/// failure, lighthouse and relay session state. Every party at a tick; `only` the sender of a
+/// received datagram, whose changes to other parties wait for the next tick.
+fn log_events(state: &mut State, only: Option<PublicKey>) {
     if !state.log_peers {
         return;
     }
     let seen = &mut state.seen;
-    for (key, peer) in &state.peers {
+    let all = only
+        .is_none()
+        .then(|| state.peers.iter())
+        .into_iter()
+        .flatten();
+    let one = only.and_then(|k| state.peers.get_key_value(&k));
+    for (key, peer) in all.chain(one) {
         let Some(status) = state.node.status(key) else {
             continue;
         };
@@ -359,7 +366,8 @@ fn log_events(state: &mut State) {
         }
     }
     let services = (state.lighthouses.iter().map(|l| (l, true)))
-        .chain(state.relays.iter().map(|r| (r, false)));
+        .chain(state.relays.iter().map(|r| (r, false)))
+        .filter(|((key, _), _)| only.is_none_or(|k| k == *key));
     for ((key, endpoint), lighthouse) in services {
         let Some(status) = state.node.status(key) else {
             continue;
