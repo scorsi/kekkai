@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-24
 
+Amended — 2026-10-24, after the first deployment: `--json` is optional (`kekkai status` prints the same protojson, its only format), and a closed stdout (`kekkai status | head`) ends the command quietly with exit code 1, as SIGPIPE did for the Go CLI, instead of a Rust panic.
+
 Amends 0002 (Go for the CLI), 0015 (Go client generated and committed, keygen vectors shared
 by a Rust and a Go suite), 0023 (a new workspace member) and 0029 (new crates).
 

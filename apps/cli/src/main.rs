@@ -1,6 +1,6 @@
 //! kekkai — the CLI (ADR 0015, 0033): `keygen` and `pubkey` run locally with kekkai-core's key
-//! code, `status --json` is a thin gRPC client of a daemon's control socket. Same commands,
-//! messages and exit codes as the Go CLI it replaced.
+//! code, `status` is a thin gRPC client of a daemon's control socket. Same commands, messages
+//! and exit codes as the Go CLI it replaced, except that `--json` is optional (the only format).
 
 use std::error::Error;
 use std::io::{Read, Write};
@@ -21,7 +21,7 @@ use tonic::transport::{Endpoint, Uri};
 const USAGE: &str = "usage:
   kekkai keygen [FILE]   write a new private key to stdout, or to FILE in mode 0400
   kekkai pubkey          read a private key on stdin, print its public key
-  kekkai status --json [--socket PATH]
+  kekkai status [--json] [--socket PATH]
                          print the node's status (protojson); --socket reads another
                          daemon's control socket, e.g. /run/kekkai-lighthouse/control.sock
   kekkai --version";
@@ -47,16 +47,23 @@ fn main() -> ExitCode {
 fn run(args: &[&str]) -> Result<(), String> {
     match args {
         [] => Err(format!("missing command\n{USAGE}")),
-        ["--version", ..] => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
+        ["--version", ..] => out(concat!(env!("CARGO_PKG_VERSION"), "\n")),
         ["keygen"] => keygen(None),
         ["keygen", file] => keygen(Some(file)),
         ["pubkey"] => pubkey(),
-        ["status", "--json"] => status(CONTROL_SOCKET),
-        ["status", "--json", "--socket", socket] => status(socket),
+        ["status"] | ["status", "--json"] => status(CONTROL_SOCKET),
+        ["status", "--socket", socket] | ["status", "--json", "--socket", socket] => status(socket),
         [command, ..] => Err(format!("unknown command {command:?}\n{USAGE}")),
+    }
+}
+
+/// Writes to stdout. A closed reader (`kekkai status | head`) ends the command quietly, as
+/// SIGPIPE did for the Go CLI, instead of the panic of `print!`; still a failure, so that
+/// `keygen | …` never reports a key nobody received.
+fn out(text: &str) -> Result<(), String> {
+    match std::io::stdout().write_all(text.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(1),
+        result => result.map_err(|e| lower(&e)),
     }
 }
 
@@ -72,9 +79,7 @@ fn lower(e: &dyn Error) -> String {
 fn keygen(file: Option<&str>) -> Result<(), String> {
     let line = StaticKey::generate().to_text() + "\n";
     let Some(path) = file else {
-        return std::io::stdout()
-            .write_all(line.as_bytes())
-            .map_err(|e| lower(&e));
+        return out(&line);
     };
     // create_new: never overwrite an existing key.
     std::fs::OpenOptions::new()
@@ -97,8 +102,7 @@ fn pubkey() -> Result<(), String> {
             _ => lower(&e),
         })?;
     let key = StaticKey::from_file_text(text).ok_or("not a base64 32-byte key")?;
-    println!("{}", public_key_to_text(&key.public()));
-    Ok(())
+    out(&(public_key_to_text(&key.public()) + "\n"))
 }
 
 fn status(socket: &str) -> Result<(), String> {
@@ -111,8 +115,7 @@ fn status(socket: &str) -> Result<(), String> {
             tokio::time::timeout(Duration::from_secs(5), get_status(socket.to_string())).await
         })
         .map_err(|_| "context deadline exceeded".to_string())??;
-    print!("{}", format_status(&reply)?);
-    Ok(())
+    out(&format_status(&reply)?)
 }
 
 async fn get_status(socket: String) -> Result<GetStatusResponse, String> {
@@ -252,19 +255,23 @@ mod tests {
         std::fs::remove_file(&socket).unwrap();
         let want = std::fs::read_to_string(format!("{GOLDENS}/relay.json")).unwrap();
         assert_eq!(format_status(&reply.unwrap()).unwrap(), want);
-        let missing = run(&["status", "--json", "--socket", "/nonexistent/kekkai.sock"]);
-        assert_eq!(
-            missing.unwrap_err(),
-            "dial unix /nonexistent/kekkai.sock: no such file or directory"
-        );
+        for args in [
+            &["status", "--json", "--socket", "/nonexistent/kekkai.sock"][..],
+            &["status", "--socket", "/nonexistent/kekkai.sock"],
+        ] {
+            assert_eq!(
+                run(args).unwrap_err(),
+                "dial unix /nonexistent/kekkai.sock: no such file or directory"
+            );
+        }
     }
 
     #[test]
-    fn arguments_follow_the_go_cli() {
+    fn bad_arguments_are_refused() {
         for args in [
             &[][..],
-            &["status"],
-            &["status", "--socket", "x"],
+            &["status", "--socket"],
+            &["status", "--socket", "x", "--json"],
             &["pubkey", "x"],
             &["keygen", "a", "b"],
         ] {
