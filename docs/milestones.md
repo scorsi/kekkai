@@ -10,6 +10,14 @@ v0.0 skeleton → v0.1 spec + core → v0.2 first tunnel (Linux) → v0.3 macOS 
                   ↑ review gate 1                    ↑ review gate 2
 ```
 
+Order of v1 (0034):
+
+```
+v1.0 certificates in the handshake → v1.1 discovery by certificate → v1.2 groups
+→ v1.3 migration of the deployment
+                                              ↑ review gate 3
+```
+
 ## External dependencies
 
 | Dependency                                              | Blocks                                   |
@@ -229,6 +237,68 @@ Not exercised on the real network, covered only by `nixosTest reload` or not at 
 
 ---
 
+## v1.0 — Certificates in the handshake
+
+**Objective**: a node listed in no configuration reaches a node that trusts its CA, and an expired, foreign or revoked certificate is refused (0034).
+
+**Deliverables**: spec first (certificate format, §4 identity function, §7.6 and §7.7 with the initiator verifying message 2, constants, registries) and the threat model; `certificate.json` vectors including Ed25519 edge cases; in the core, the certificate codec, strict verification (`ed25519-dalek`, 0028) and a bounded peer table; `[pki]` configuration with reload (0016, 0026); `kekkai ca keygen`, `cert sign`, `cert show` in the CLI (0017: CA key age-encrypted, offline); status and log additions (expiry warning and metric); a fuzz target for the codec. The amendments 0034 lists (0004, 0007, 0011, 0012, 0016, 0017, 0021, 0028) are noted in those ADRs as each lands.
+
+**Acceptance criteria**
+
+- `nixosTest certificates`: C, listed nowhere, initiates to A and pings it; an expired certificate, one from another CA, one with a foreign key and a revoked one are refused silently; adding C to A's deny list and reloading cuts C at once.
+- A node without `[pki]` behaves as in v0: every existing test unchanged and green.
+- Simulation: expiry cuts a live session within `REJECT_AFTER_TIME`.
+
+**Dependencies**: v0.7, ADR 0034.
+
+---
+
+## v1.1 — Discovery by certificate
+
+**Objective**: a new node joins with only its own configuration.
+
+**Deliverables**: lighthouse and relay admission by certificate, certificate storage, lighthouse query by overlay address, certificate in the reply and the punch; the overlay prefixes routed to the tunnel.
+
+**Acceptance criteria**
+
+- `nixosTest cert-discovery`: D joins with no change on A, B, the lighthouse or the relay; A pings D's address and D pings A, behind the NATs of `nat-direct`, then through the relay as in `nat-relayed`.
+- Simulation: a lighthouse returning a certificate of another CA, of another address or a revoked one gets no handshake.
+
+**Dependencies**: v1.0.
+
+---
+
+## v1.2 — Groups in the firewall
+
+**Objective**: inbound rules by group or certificate name instead of per-peer lists (0011).
+
+**Deliverables**: `[[firewall.inbound]]` rules on the receiving node, computed at admission and reload; per-peer `allow_inbound` kept for static peers. Review gate 3 (0021) over v1.0 to v1.2.
+
+**Acceptance criteria**
+
+- `nixosTest firewall-groups`: a peer in `admin` reaches `tcp/22`, a peer outside it does not, a renewed certificate without the group loses access at the next handshake.
+- Review gate 3 passed. No deployed host carries `[pki]` before it.
+
+**Dependencies**: v1.1.
+
+---
+
+## v1.3 — Migration of the deployment
+
+**Objective**: the deployment runs on certificates and drops its static peer lists.
+
+**Acceptance criteria** (manual, recorded)
+
+- Every host on certificates, static peer lists removed; only lighthouse and relay keys, the CA keys and the deny list remain.
+- A new node added without touching any other host's configuration.
+- A revocation applied by reload; a renewal applied by reload without restart.
+
+**Dependencies**: v1.2 and review gate 3.
+
+**Excluded** from v1: online CA, CRL protocol, hardware CA key, the iOS app itself, multi-lighthouse, lighthouse query policy, everything else in 0027.
+
+---
+
 ## Open questions
 
 Decided and closed on 2026-10-13: Noise hash (BLAKE2s), TLV encoding and critical bit, TAI64N precision, concurrent initiations, UDP flow table bounds, ACME ownership (hanko issues, genkan loads files, annai serves the challenges).
@@ -241,7 +311,6 @@ Nothing blocks v0.1. Still open, with the milestone they block:
 | Nested virtualization in the CI VM, validated by `nix build nixpkgs#nixosTests.simple` | `nixosTest`s in CI from v0.0 | Fallback: run by hand until the laptop runner exists |
 | Scheduled fuzz job | nothing | Manual fuzzing in v0 (0020) |
 | Release method (branch, changelog) | nothing | Specified at the first tagged release |
-| v1 certificate format (home-grown minimal preferred over X.509), lifetime, groups | nothing in v0 | Decided after v0.7 (0027) |
 
 Note (owner, 2026-10-21): when two crossing handshakes complete, one direct and one relayed, each
 side may keep a different path until the next handshake (at most about 60 s). Accepted until after

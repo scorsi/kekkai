@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Superseded in part by [0034](0034-certificates-groups-expiry-and-revocation.md) — 2026-10-24: the first bullet (certificates, groups, expiry, revocation) is decided there; the constraints listed for it stay in force.
+
 ## Context
 
 Several features are explicitly out of v0 but must not be made impossible by a structural choice.

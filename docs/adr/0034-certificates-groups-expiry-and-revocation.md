@@ -1,8 +1,8 @@
 # ADR 0034 — Certificates, groups, expiry and revocation (v1)
 
-Status: Proposed — 2026-10-24
+Status: Accepted — 2026-10-24
 
-Opens v1. Once accepted, supersedes the first bullet of 0027 ("Certificates, groups, expiry,
+Opens v1. Supersedes the first bullet of 0027 ("Certificates, groups, expiry,
 revocation") and amends 0004 (a second use of the wall clock), 0007 (the identity function
 returns a peer, the initiator verifies message 2), 0011 (group rules), 0012 (admission by
 certificate, query by address), 0016 (configuration), 0017 (the CA key), 0021 (review gate 3)
@@ -108,7 +108,7 @@ certificate (Nebula's model; the receiver keeps its policy); rules embedded in t
 certificate (the CA decides what a node may reach everywhere, the wrong owner); a central
 policy pushed by the lighthouse (a new trust role).
 
-## Decision (proposed)
+## Decision
 
 ### Certificate format
 
@@ -231,7 +231,9 @@ lighthouse, the bounded peer table, the amended threat model (CA compromise, lig
 learning names and groups). One gate at the end of v1.2, before any certificate is
 accepted on the real network; until it passes, deployed hosts carry no `[pki]` section.
 
-## Questions for the owner
+## Questions decided
+
+The owner answered yes to all twelve on 2026-10-24.
 
 1. **Format**: the TLV certificate above, signed over a context string, at most 960
    bytes? *Recommended: yes.*
@@ -262,7 +264,7 @@ accepted on the real network; until it passes, deployed hosts carry no `[pki]` s
     keeps only lighthouse and relay keys, the CA keys and the deny list? *Recommended:
     yes.*
 
-## Proposed milestones (to be copied into `docs/milestones.md` once accepted)
+## Milestones (copied into `docs/milestones.md`)
 
 ```
 v1.0 certificates in the handshake → v1.1 discovery by certificate → v1.2 groups
