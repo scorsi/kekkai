@@ -464,6 +464,10 @@ proptest! {
                 }
                 Op::Advance(ms) => now += Duration::from_millis(ms),
             }
+            for node in &mut nodes {
+                let uncached = node.next_deadline_uncached();
+                prop_assert_eq!(node.next_deadline(), uncached, "the deadline cache is current");
+            }
         }
     }
 }

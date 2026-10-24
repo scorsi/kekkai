@@ -356,3 +356,22 @@ fn a_former_relay_relays_nothing() {
         assert!(net.parties[0].0.status(&b).unwrap().handshake_in_flight);
     }
 }
+
+/// The deadline cache (§9): a timer set, shortened or removed after `next_deadline` ran is
+/// what the next call returns.
+#[test]
+fn next_deadline_follows_later_changes() {
+    let mut a = Node::new(key(1), vec![peer(2, 2)]);
+    assert_eq!(a.next_deadline(), None);
+    a.send_packet(T, wall(T), &udp(1, 2)).expect("routed");
+    let retransmit = a.next_deadline().expect("message 1 in flight");
+    assert!(retransmit > T + crate::REKEY_TIMEOUT / 2, "{retransmit:?}");
+    // A lighthouse with no session: its handshake is due at once (§9 last row).
+    a.set_lighthouses(vec![LighthouseConfig {
+        public_key: key(9).public(),
+        endpoints: vec![ep(9, 4802)],
+    }]);
+    assert_eq!(a.next_deadline(), Some(Duration::ZERO));
+    a.set_lighthouses(Vec::new());
+    assert_eq!(a.next_deadline(), Some(retransmit));
+}

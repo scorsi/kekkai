@@ -564,7 +564,7 @@ impl Sim {
             if let Some(Reverse(e)) = self.queue.peek() {
                 next = next.min(e.at.max(self.now));
             }
-            for h in &self.hosts {
+            for h in &mut self.hosts {
                 // A sleeping host's deadlines wait for its wake-up.
                 match h.asleep_until.filter(|t| self.now < *t) {
                     Some(wake) => next = next.min(wake),

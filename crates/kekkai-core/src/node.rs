@@ -4,8 +4,10 @@
 //! peer, the endpoint, candidates and session paths of §12. A party is a node, a lighthouse
 //! ([`Node::lighthouse`], §13.2) or a relay ([`Node::relay`], §14.2).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::{Entry, IterMut};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ops::Deref;
 use std::time::Duration;
 
 use crate::firewall::{Firewall, FirewallStatus, Rule};
@@ -228,8 +230,11 @@ pub struct Node {
     public_key: PublicKey,
     mac1: Mac1Key,
     indices: IndexTable,
-    peers: HashMap<PublicKey, Peer>,
-    links: HashMap<PublicKey, Link>,
+    peers: Tracked<Peer>,
+    links: Tracked<Link>,
+    /// Each party's earliest deadline, as of the last [`Node::next_deadline`].
+    deadlines: BTreeSet<(Duration, PublicKey)>,
+    deadline_by_key: HashMap<PublicKey, Duration>,
     routes: HashMap<IpAddr, PublicKey>,
     rules: HashMap<PublicKey, Vec<Rule>>,
     firewall: Firewall,
@@ -272,8 +277,10 @@ impl Node {
             key,
             public_key,
             indices: IndexTable::new(),
-            peers: HashMap::new(),
-            links: HashMap::new(),
+            peers: Tracked::default(),
+            links: Tracked::default(),
+            deadlines: BTreeSet::new(),
+            deadline_by_key: HashMap::new(),
             routes: HashMap::new(),
             rules: HashMap::new(),
             firewall: Firewall::default(),
@@ -408,7 +415,7 @@ impl Node {
         if was_relay {
             // §4.1: a session relayed by this key loses its path; the direct retry of §12.3
             // starts at the next tick instead of `DIRECT_RETRY_INTERVAL` later.
-            for (k, link) in &mut self.links {
+            for (k, link) in self.links.iter_mut() {
                 let orphaned = (self.peers.get(k).and_then(Peer::current))
                     .is_some_and(|s| link.relayed.get(&s.local_index) == Some(key));
                 if orphaned {
@@ -1218,39 +1225,76 @@ impl Node {
         out
     }
 
-    /// The earliest pending deadline over every peer (§9, §12.5, §13).
-    pub fn next_deadline(&self) -> Option<Duration> {
+    /// The earliest pending deadline over every peer (§9, §12.5, §13). Only the parties
+    /// whose peer or link was mutably borrowed since the last call are recomputed, so a
+    /// datagram costs the same with 2 peers as with 200.
+    pub fn next_deadline(&mut self) -> Option<Duration> {
+        let mut touched = std::mem::take(&mut self.peers.touched);
+        touched.extend(self.links.touched.drain());
+        for key in touched.drain() {
+            let (old, new) = (
+                self.deadline_by_key.get(&key).copied(),
+                self.party_deadline(&key),
+            );
+            if old == new {
+                continue;
+            }
+            if let Some(old) = old {
+                self.deadline_by_key.remove(&key);
+                self.deadlines.remove(&(old, key));
+            }
+            if let Some(new) = new {
+                self.deadline_by_key.insert(key, new);
+                self.deadlines.insert((new, key));
+            }
+        }
+        // Back in place, empty: its capacity is kept across calls.
+        self.peers.touched = touched;
         let changed = self.locals_changed.then_some(Duration::ZERO);
-        let mut next = self
-            .peers
-            .values()
-            .filter_map(Peer::next_deadline)
+        let next = (self.deadlines.first().map(|(d, _)| *d))
+            .into_iter()
             .chain(changed)
             .min();
-        for (key, link) in &self.links {
-            let peer = &self.peers[key];
-            let discovery = link.discovery.map(|s| s + DIRECT_PATH_TIMEOUT);
-            let retry = (link.role != Role::Peer
-                && peer.current().is_none()
-                && !peer.has_in_flight_handshake())
-            .then(|| {
-                peer.last_init_sent()
-                    .map_or(Duration::ZERO, |t| t + REKEY_TIMEOUT)
-            });
-            let register = link.register_at.filter(|_| peer.current().is_some());
-            next = [
-                next,
-                discovery,
-                retry,
-                register,
-                link.deferred,
-                link.retry_at,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
-        }
+        debug_assert_eq!(
+            next,
+            self.next_deadline_uncached(),
+            "a mutation bypassed `Tracked`"
+        );
         next
+    }
+
+    /// One party's earliest deadline: its sessions' (§9) and its link's (§12.5, §13).
+    fn party_deadline(&self, key: &PublicKey) -> Option<Duration> {
+        let (peer, link) = (self.peers.get(key)?, self.links.get(key)?);
+        let discovery = link.discovery.map(|s| s + DIRECT_PATH_TIMEOUT);
+        let retry = (link.role != Role::Peer
+            && peer.current().is_none()
+            && !peer.has_in_flight_handshake())
+        .then(|| {
+            peer.last_init_sent()
+                .map_or(Duration::ZERO, |t| t + REKEY_TIMEOUT)
+        });
+        let register = link.register_at.filter(|_| peer.current().is_some());
+        [
+            peer.next_deadline(),
+            discovery,
+            retry,
+            register,
+            link.deferred,
+            link.retry_at,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// [`Node::next_deadline`] recomputed over every party, ignoring the cache.
+    pub(crate) fn next_deadline_uncached(&self) -> Option<Duration> {
+        let changed = self.locals_changed.then_some(Duration::ZERO);
+        (self.peers.keys())
+            .filter_map(|k| self.party_deadline(k))
+            .chain(changed)
+            .min()
     }
 
     #[cfg(test)]
@@ -1285,6 +1329,52 @@ impl Node {
         let out = peer.send_inner(&mut ctx!(self, now, wall), inner);
         let sends = out.into_iter().map(|d| (key, None, d)).collect();
         self.route(now, wall, sends)
+    }
+}
+
+/// A per-party map that records every key mutably borrowed, so that [`Node::next_deadline`]
+/// recomputes those parties only: no mutation can bypass it, reads go through `Deref`.
+struct Tracked<V> {
+    map: HashMap<PublicKey, V>,
+    touched: HashSet<PublicKey>,
+}
+
+impl<V> Default for Tracked<V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            touched: HashSet::new(),
+        }
+    }
+}
+
+impl<V> Deref for Tracked<V> {
+    type Target = HashMap<PublicKey, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<V> Tracked<V> {
+    fn get_mut(&mut self, key: &PublicKey) -> Option<&mut V> {
+        self.touched.insert(*key);
+        self.map.get_mut(key)
+    }
+
+    fn entry(&mut self, key: PublicKey) -> Entry<'_, PublicKey, V> {
+        self.touched.insert(key);
+        self.map.entry(key)
+    }
+
+    fn remove(&mut self, key: &PublicKey) -> Option<V> {
+        self.touched.insert(*key);
+        self.map.remove(key)
+    }
+
+    fn iter_mut(&mut self) -> IterMut<'_, PublicKey, V> {
+        self.touched.extend(self.map.keys());
+        self.map.iter_mut()
     }
 }
 
