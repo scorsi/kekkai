@@ -39,5 +39,6 @@ Statuses: **Accepted** (decided on 2026-10-13 unless noted), **Proposed**, **Ope
 | 0031 | Relay status, logs, metrics and rate limits             | Accepted |
 | 0032 | Keepalive on a change of local addresses                | Accepted |
 | 0033 | The CLI in Rust                                         | Accepted |
+| 0034 | Certificates, groups, expiry and revocation (v1)        | Proposed |
 
 Deployment-specific values (overlay prefixes, peers, public keys, which host carries which role, accepted host-level risks) are not recorded here: see 0025.
