@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the `kekkai` CLI is a Rust binary of the workspace, no longer the Go CLI; its commands and its use of the control socket are unchanged.
+
 ## Context
 
 Discovery and relaying need a reachable host on the public Internet. The author will start with one VPS and may add a second entry point on another continent later. Discovery and relaying must not be an open service.

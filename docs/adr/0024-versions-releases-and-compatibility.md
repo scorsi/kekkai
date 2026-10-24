@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: there is no Go module any more; `versions-identical` requires the CLI and the three daemons to take the Cargo workspace version.
+
 ## Context
 
 One repository, three daemons and a CLI deployed from a single commit by the deployment repository. The wire format evolves independently of the software version. An iOS app will later break the single-commit assumption.

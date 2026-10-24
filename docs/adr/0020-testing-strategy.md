@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: with the CLI in Rust, the shared keygen vectors are loaded by Rust test suites only; the CLI's `status --json` is checked against committed protojson goldens.
+
 ## Context
 
 A cryptographic state machine, NAT behaviour and two infrastructure roles must be proven before touching real hosts. The author's CI runs on Forgejo runners; `nixosTest` needs KVM.

@@ -2,6 +2,8 @@
 
 Status: Accepted — 2026-10-13
 
+Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the CLI is in Rust and calls `kekkai-core`'s key code; the shared keygen vectors are checked by the core's and the CLI's Rust tests, no longer by Go.
+
 ## Context
 
 Identity in v0 is a static key per node, listed in configuration. Hosts include an impermanent VM (root on tmpfs) and a headless Mac whose `/var/run` is on disk. Certificates come in v1.
