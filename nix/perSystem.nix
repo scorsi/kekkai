@@ -485,6 +485,12 @@
           lighthouseModule = inputs.self.nixosModules.lighthouse;
           relayModule = inputs.self.nixosModules.relay;
         };
+        certificates = import ./tests/certificates.nix {
+          inherit pkgs;
+          nodeModule = inputs.self.nixosModules.node;
+          validateLogs = inputs.nisshi.lib.validateLogs.${system};
+          validateMetrics = inputs.masu.lib.validateMetrics.${system};
+        };
         relay-upgrade = import ./tests/relay-upgrade.nix {
           inherit pkgs;
           nodeModule = inputs.self.nixosModules.node;
