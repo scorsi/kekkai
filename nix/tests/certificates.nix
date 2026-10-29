@@ -210,7 +210,7 @@ pkgs.testers.nixosTest {
 
 
       def listed(m, key):
-          return [p for p in status(m)["peers"] if p["public_key"] == key]
+          return [p for p in status(m).get("peers", []) if p["public_key"] == key]
 
 
       def pid(m):
