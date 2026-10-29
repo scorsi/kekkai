@@ -4,7 +4,7 @@ Status: Accepted — 2026-10-13
 
 Amended by [0033](0033-the-cli-in-rust.md) — 2026-10-24: the CLI is in Rust and calls `kekkai-core`'s key code; the shared keygen vectors are checked by the core's and the CLI's Rust tests, no longer by Go.
 
-Amended by [0034](0034-certificates-groups-expiry-and-revocation.md) — 2026-10-29: in v1 a CA's Ed25519 key signs node certificates. It is kept offline, encrypted at rest with `age` to the operator's identity only, never to a host key. `kekkai ca keygen` writes the new key (the 32-byte RFC 8032 seed, key text form) to stdout only, to be piped into `age -e`, and its public key to stderr; `kekkai cert sign` reads it on stdin from `age -d`. The CLI never encrypts, decrypts or stores it, so no `age` code enters kekkai. Node keys are unchanged.
+Amended by [0034](0034-certificates-groups-expiry-and-revocation.md) — 2026-10-29: in v1 a CA's Ed25519 key signs node certificates. It is kept offline, encrypted at rest with `age` to the operator's identity only, never to a host key. `kekkai ca keygen` writes the new key (the 32-byte RFC 8032 seed, key text form) to stdout only, to be piped into `age -e`, and its public key to stderr; `kekkai cert sign` and `kekkai ca pubkey` (which prints the public key again) read it on stdin from `age -d`. The CLI never encrypts, decrypts or stores it, so no `age` code enters kekkai. Node keys are unchanged.
 
 ## Context
 

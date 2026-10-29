@@ -17,7 +17,9 @@ use kekkai_core::cert::Revoked;
 use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::PublicKey;
 use kekkai_core::node::{LighthouseConfig, Node, PeerConfig, PeerStatus};
-use kekkai_core::{KEEPALIVE_FAILURES_BEFORE_REREGISTER, PERSISTENT_KEEPALIVE};
+use kekkai_core::{
+    CERTIFICATE_EXPIRY_WARNING, KEEPALIVE_FAILURES_BEFORE_REREGISTER, PERSISTENT_KEEPALIVE,
+};
 use kekkai_io::config::{DEFAULT_PATH, NodeConfig};
 use kekkai_io::{Locals, PeerInfo, Route, State, clock, systemd, udp};
 use tracing::{error, info, warn};
@@ -292,12 +294,13 @@ struct Reload<'a> {
 }
 
 /// Every `MAX_SLEEP`, a [`reresolve_pass`] with the system clock and resolver; on `SIGHUP`,
-/// a [`reload`] (ADR 0026).
+/// a [`reload`] (ADR 0026); at start and once a day, [`warn_expiring`].
 async fn maintain(
     state: Arc<Mutex<State>>,
     mut r: Reload<'_>,
     mut hangup: tokio::signal::unix::Signal,
 ) {
+    let mut daily = tokio::time::interval(Duration::from_secs(86_400));
     loop {
         tokio::select! {
             () = tokio::time::sleep(kekkai_io::MAX_SLEEP) => {
@@ -305,7 +308,29 @@ async fn maintain(
                 reresolve_pass(&state, &mut lists.configs, &mut lists.named, clock::monotonic, resolve).await;
             }
             _ = hangup.recv() => reload(&state, &mut r).await,
+            _ = daily.tick() => warn_expiring(&state.lock().expect("no poison")),
         }
+    }
+}
+
+/// ADR 0034, spec §4.2: from `CERTIFICATE_EXPIRY_WARNING` before the own `not_after`, a
+/// `certificate-expiring` warning (still logged once expired, with a negative remainder).
+fn warn_expiring(state: &State) {
+    let Some(own) = state.node.own_certificate() else {
+        return;
+    };
+    let remaining = metrics::remaining(&own, clock::wall().unix_seconds());
+    if remaining < CERTIFICATE_EXPIRY_WARNING.as_secs() as i64 {
+        let not_after = prost_types::Timestamp {
+            seconds: i64::try_from(own.fields.not_after).unwrap_or(i64::MAX),
+            nanos: 0,
+        };
+        warn!(
+            event = "certificate-expiring",
+            not_after = %not_after,
+            remaining_seconds = remaining,
+            "renew this node's certificate"
+        );
     }
 }
 
@@ -349,6 +374,8 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
             if let Some(pki) = pki {
                 guard.node.set_pki(clock::wall(), pki);
             }
+            // A renewal reloads: say at once whether it was enough.
+            warn_expiring(&guard);
             drop(guard);
             r.lists = next;
             r.running = effective;

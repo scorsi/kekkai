@@ -504,6 +504,17 @@ impl Node {
         self.certs.get(key).map(|c| &c.record)
     }
 
+    /// The certificate peer table (§4.4), in no order.
+    pub fn certificate_peers(&self) -> impl Iterator<Item = (&PublicKey, &Record)> {
+        self.certs.iter().map(|(k, c)| (k, &c.record))
+    }
+
+    /// The party's own certificate (§4.2), `None` without `[pki]`. The IO layer checked it at
+    /// start and reload, so only its validity can fail since.
+    pub fn own_certificate(&self) -> Option<Record> {
+        self.pki.as_ref()?.check_own(&self.public_key).ok()
+    }
+
     /// §4.4 admission (§7.6 step 3a): a full table evicts, as a removed key, the entry with
     /// the oldest verification among those with no live session and no handshake in flight.
     fn admit(&mut self, now: Duration, key: PublicKey, record: Record) -> Result<(), DropReason> {

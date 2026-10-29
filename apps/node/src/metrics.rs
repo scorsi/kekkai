@@ -3,10 +3,13 @@
 
 use std::fmt::Write as _;
 
-use kekkai_io::State;
+use kekkai_core::cert::Record;
 use kekkai_io::metrics::{drops, family, label};
+use kekkai_io::{State, clock};
 
-/// The exposition. Series: 1 + 6 per peer + one per drop reason seen (at most 24).
+/// The exposition. Series: 1 + 6 per configured peer + 1 with `[pki]` + one per drop reason
+/// seen (at most 34, ten of them `certificate_<reason>`). Certificate peers get no per-peer
+/// series: up to `pki.max_peers` of them would exceed masu's 500-series budget.
 pub fn render(state: &State) -> String {
     let mut peers: Vec<_> = state
         .peers
@@ -84,8 +87,24 @@ pub fn render(state: &State) -> String {
             s.counters.tx_bytes
         );
     }
+    if let Some(own) = state.node.own_certificate() {
+        family(
+            &mut out,
+            "kekkai_certificate_remaining_seconds",
+            "gauge",
+            "Seconds until this node's certificate expires, negative once expired.",
+        );
+        let remaining = remaining(&own, clock::wall().unix_seconds());
+        let _ = writeln!(out, "kekkai_certificate_remaining_seconds {remaining}");
+    }
     drops(&mut out, state);
     out
+}
+
+/// Seconds from `wall` (Unix) to the certificate's `not_after` (ADR 0034).
+pub fn remaining(record: &Record, wall: u64) -> i64 {
+    let not_after = i64::try_from(record.fields.not_after).unwrap_or(i64::MAX);
+    not_after.saturating_sub(i64::try_from(wall).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

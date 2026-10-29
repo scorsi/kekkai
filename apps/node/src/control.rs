@@ -5,9 +5,10 @@ use std::time::{Duration, SystemTime};
 
 use kekkai_control::v1::control_service_server::{ControlService, ControlServiceServer};
 use kekkai_control::v1::{
-    DirectPathFailure, FirewallStatus, GetStatusRequest, GetStatusResponse, LighthouseStatus,
-    NodeStatus, Path, PeerStatus, RelayStatus, SessionState,
+    Certificate, DirectPathFailure, FirewallStatus, GetStatusRequest, GetStatusResponse,
+    LighthouseStatus, NodeStatus, Path, PeerStatus, RelayStatus, SessionState,
 };
+use kekkai_core::cert::Record;
 use kekkai_core::keys::{PublicKey, public_key_to_text};
 use kekkai_core::node::{self, PathFailure};
 use kekkai_io::config::NodeConfig;
@@ -31,8 +32,8 @@ impl Control {
                 addresses: config.node.addresses.clone(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 wire_version: kekkai_core::WIRE_VERSION.into(),
-                uptime: None,
                 listen_port: config.node.listen_port.into(),
+                ..NodeStatus::default()
             },
         }
     }
@@ -56,19 +57,33 @@ impl Control {
         let state = state.lock().expect("no panic while holding the state");
         let mut node = self.node.clone();
         node.uptime = prost_types::Duration::try_from(now.saturating_sub(self.started)).ok();
+        node.certificate = state.node.own_certificate().as_ref().map(certificate);
         let at = |t: Duration| -> prost_types::Timestamp { (wall - now.saturating_sub(t)).into() };
+        // Configured peers, then certificate peers (spec §4.4), as name, addresses and
+        // `allow_inbound` as written.
+        let configured = (state.peers.iter())
+            .map(|(key, info)| (key, info.name.clone(), info.addresses.clone(), None));
+        let admitted = state.node.certificate_peers().map(|(key, record)| {
+            let f = &record.fields;
+            let addresses = (f.addresses.iter())
+                .map(|a| format!("{a}/{}", if a.is_ipv4() { 32 } else { 128 }))
+                .collect();
+            (key, f.name.clone(), addresses, Some(record))
+        });
         // By name: the order of the module's file (an attribute set), whatever reloads did.
-        let mut configured: Vec<_> = state.peers.iter().collect();
-        configured.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-        let peers = configured
+        let mut listed: Vec<_> = configured.chain(admitted).collect();
+        listed.sort_by(|a, b| a.1.cmp(&b.1));
+        let peers = listed
             .into_iter()
-            .filter_map(|(key, info)| {
+            .filter_map(|(key, name, addresses, record)| {
                 let status = state.node.status(key)?;
+                let info = state.peers.get(key);
                 Some(PeerStatus {
                     public_key: public_key_to_text(key),
                     // Same source as the metrics `peer` label (ADR 0019).
-                    name: info.name.clone(),
-                    addresses: info.addresses.clone(),
+                    name,
+                    addresses,
+                    certificate: record.map(certificate),
                     // §12.1: the current session's path.
                     path: match status.path {
                         Some(node::Path::Direct(_)) => Path::Direct,
@@ -94,7 +109,7 @@ impl Control {
                     rx_packets: status.counters.rx_packets,
                     tx_packets: status.counters.tx_packets,
                     replay_rejections: status.counters.replay_rejections,
-                    allow_inbound: info.allow_inbound.clone(),
+                    allow_inbound: info.map(|i| i.allow_inbound.clone()).unwrap_or_default(),
                     firewall_drops: status.counters.firewall_drops,
                     receiver_index: status.current_index,
                     session_created: status.current_created.map(at),
@@ -143,6 +158,22 @@ impl Control {
     }
 }
 
+fn certificate(record: &Record) -> Certificate {
+    // protojson's Timestamp ends at 9999-12-31T23:59:59Z; a signed u64 may lie beyond.
+    let time = |secs: u64| prost_types::Timestamp {
+        seconds: secs.min(253_402_300_799) as i64,
+        nanos: 0,
+    };
+    let f = &record.fields;
+    Certificate {
+        name: f.name.clone(),
+        fingerprint: public_key_to_text(&record.fingerprint),
+        not_before: Some(time(f.not_before)),
+        not_after: Some(time(f.not_after)),
+        groups: f.groups.clone(),
+    }
+}
+
 fn failure(f: PathFailure) -> DirectPathFailure {
     match f {
         PathFailure::NoCandidates => DirectPathFailure::NoCandidates,
@@ -171,6 +202,66 @@ mod tests {
     use kekkai_io::PeerInfo;
 
     use super::*;
+
+    /// ADR 0034: the own certificate in `status`, and the gauge of its remaining seconds.
+    #[test]
+    fn status_and_metrics_show_the_own_certificate() {
+        use kekkai_core::cert::{self, CaKey, Fields, Pki, Prefix};
+        use kekkai_core::tai64n::Tai64n;
+
+        let config =
+            NodeConfig::parse("[node]\nprivate_key_file = \"/k\"\naddresses = [\"10.0.0.1/32\"]\n")
+                .unwrap();
+        let key = StaticKey::from_bytes([1; 32]).clamped();
+        let seed = [7; 32];
+        let mut fields = Fields {
+            name: "host-1".into(),
+            public_key: key.public(),
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            groups: vec!["admin".into()],
+            not_before: 1_800_000_000,
+            not_after: u64::MAX,
+        };
+        let pki = |certificate| Pki {
+            ca_keys: vec![CaKey::from_bytes(&cert::ca_public(&seed)).unwrap()],
+            certificate,
+            revoked: Vec::new(),
+            prefixes: vec![Prefix::new("10.0.0.0".parse().unwrap(), 8).unwrap()],
+            max_peers: 1,
+        };
+        let certificate = cert::sign(&seed, &fields).unwrap();
+        let mut node = Node::new(key, Vec::new());
+        let mut control = Control::new(&config, *node.public_key(), clock::monotonic());
+        node.set_pki(Tai64n::from_unix(0, 0), pki(certificate.clone()));
+        let state = Arc::new(Mutex::new(State::new(node, HashMap::new())));
+        control.state = Some(state.clone());
+        let at = |seconds| Some(prost_types::Timestamp { seconds, nanos: 0 });
+        assert_eq!(
+            control.status().node.unwrap().certificate,
+            Some(Certificate {
+                name: "host-1".into(),
+                fingerprint: public_key_to_text(&cert::fingerprint(&certificate)),
+                not_before: at(1_800_000_000),
+                // Clamped to protojson's last instant.
+                not_after: at(253_402_300_799),
+                groups: vec!["admin".into()],
+            })
+        );
+        let own = state.lock().unwrap().node.own_certificate().unwrap();
+        assert_eq!(crate::metrics::remaining(&own, 10), i64::MAX - 10);
+        // Expired: negative, and the gauge says so.
+        (fields.not_before, fields.not_after) = (0, 1_000);
+        let expired = cert::sign(&seed, &fields).unwrap();
+        (state.lock().unwrap().node).set_pki(Tai64n::from_unix(0, 0), pki(expired));
+        let own = state.lock().unwrap().node.own_certificate().unwrap();
+        assert_eq!(crate::metrics::remaining(&own, 1_500), -500);
+        let text = crate::metrics::render(&state.lock().unwrap());
+        assert!(text.contains("# TYPE kekkai_certificate_remaining_seconds gauge\n"));
+        assert!(
+            text.contains("\nkekkai_certificate_remaining_seconds -"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn status_names_each_peer_from_the_configuration() {

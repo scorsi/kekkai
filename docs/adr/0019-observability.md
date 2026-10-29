@@ -64,3 +64,23 @@ v0" line is lifted and the log format is fixed.
   nisshi and masu are test-only flake inputs; the package and the modules do not use them.
   Unit tests pin the line format (timestamp, escaping, reserved names) and the exposition.
 - The darwin LaunchDaemon writes the same lines to its log file.
+
+## Amendment — 2026-10-29: certificates (ADR 0034)
+
+With `[pki]` only; a node without it exposes and logs exactly what it did before.
+
+- **Log**: `certificate-expiring{not_after,remaining_seconds}` at `warn` (`not_after` UTC
+  RFC 3339), from 30 days before the own certificate's `not_after` (spec §4.2): at start, after
+  each reload and once a day, and still once it has expired (negative `remaining_seconds`).
+  Refused handshakes stay silent on the wire and are not logged at `info` (drops are `trace`
+  and counted), as before. The per-peer events (`handshake-completed`, `path-change`, …) still
+  name configured peers only; certificate peers are seen through the status.
+- **Metrics**: the gauge `kekkai_certificate_remaining_seconds` (negative once expired), and
+  the certificate rejects of spec §18.7 as `kekkai_dropped_packets_total{reason}` with
+  `reason` = `certificate_<reason>` (`certificate_expired`, `certificate_bad_signature`, …),
+  kekkai-core's `DropReason` names as before: at most 34 drop series. Certificate peers get
+  no per-peer series (`pki.max_peers` of them would exceed masu's 500-series budget); their
+  traffic stays in the status.
+- **Status** (0015): `node.certificate` (name, fingerprint, `not_before`, `not_after`,
+  groups) and, for each peer admitted by certificate, `peers[].certificate`, the peer's
+  `name` and `addresses` then being the certificate's.

@@ -1,7 +1,7 @@
 //! kekkai — the CLI (ADR 0015, 0033): `keygen` and `pubkey` run locally with kekkai-core's key
 //! code, `status` is a thin gRPC client of a daemon's control socket. Same commands, messages
 //! and exit codes as the Go CLI it replaced, except that `--json` is optional (the only format).
-//! `ca keygen`, `cert sign` and `cert show` (ADR 0034) run offline with kekkai-core's
+//! `ca keygen`, `ca pubkey`, `cert sign` and `cert show` (ADR 0034) run offline with kekkai-core's
 //! certificate code; the CA private key only ever passes through pipes, to and from `age`.
 
 use std::error::Error;
@@ -30,13 +30,16 @@ const USAGE: &str = "usage:
                          daemon's control socket, e.g. /run/kekkai-lighthouse/control.sock
   kekkai ca keygen       write a new CA private key to stdout (pipe it to age -e), its
                          public key to stderr
+  kekkai ca pubkey       read a CA private key on stdin (from age -d), print its public
+                         key
   kekkai cert sign --key PUBKEY --name NAME --address ADDR... [--group GROUP]...
                    [--days DAYS]
                          read the CA private key on stdin (from age -d), print a
                          certificate valid DAYS days (default 365), back-dated an hour
   kekkai cert show --ca CAKEY...
-                         read a certificate on stdin, print its fields, fingerprint and
-                         deny-list entries, and verify it against CAKEY now
+                         read a certificate on stdin, print its fields (dates in UTC,
+                         RFC 3339), fingerprint and deny-list entries, and verify it
+                         against CAKEY now
   kekkai --version";
 
 /// The node's control socket (ADR 0015).
@@ -65,6 +68,10 @@ fn run(args: &[&str]) -> Result<(), String> {
         ["keygen", file] => keygen(Some(file)),
         ["pubkey"] => pubkey(),
         ["ca", "keygen"] => ca_keygen(),
+        ["ca", "pubkey"] => {
+            let seed = ca_key(&read_stdin()?)?;
+            out(&(public_key_to_text(&cert::ca_public(&seed)) + "\n"))
+        }
         ["cert", "sign", options @ ..] => {
             let seed = read_stdin()?;
             out(&cert_sign(options, &seed, unix_now())?)
@@ -166,6 +173,11 @@ fn ca_seed() -> Result<[u8; 32], String> {
     Ok(seed)
 }
 
+/// The CA private key read on stdin: the seed in the key text form.
+fn ca_key(text: &str) -> Result<[u8; 32], String> {
+    Ok(public_key_from_text(text).ok_or("stdin: not a base64 32-byte CA key")?)
+}
+
 /// `cert sign`: the certificate's text form and a newline. The signer's rules are the core's
 /// (spec §4.2); `not_before` is `now` minus an hour, `not_after` `now` plus the lifetime.
 fn cert_sign(options: &[&str], seed: &str, now: u64) -> Result<String, String> {
@@ -196,7 +208,7 @@ fn cert_sign(options: &[&str], seed: &str, now: u64) -> Result<String, String> {
             _ => return Err(format!("unknown option {option:?}\n{USAGE}")),
         }
     }
-    let seed = public_key_from_text(seed).ok_or("stdin: not a base64 32-byte CA key")?;
+    let seed = ca_key(seed)?;
     let fields = Fields {
         public_key: key.ok_or("--key is required")?,
         name: name.ok_or("--name is required")?,
@@ -209,6 +221,12 @@ fn cert_sign(options: &[&str], seed: &str, now: u64) -> Result<String, String> {
             .ok_or("--days: too large")?,
     };
     Ok(cert::to_text(&cert::sign(&seed, &fields)?) + "\n")
+}
+
+/// Unix seconds as UTC RFC 3339 (protojson's form, as `status` prints times).
+fn rfc3339(secs: u64) -> String {
+    let seconds = i64::try_from(secs).unwrap_or(i64::MAX);
+    prost_reflect::prost_types::Timestamp { seconds, nanos: 0 }.to_string()
 }
 
 /// `cert show`: the fields, the fingerprint, the two deny-list entries (spec §4.3 step 1) and
@@ -252,8 +270,8 @@ fn cert_show(
         public_key_to_text(&fields.public_key),
         list(fields.addresses.iter().map(IpAddr::to_string).collect()),
         list(fields.groups.clone()),
-        fields.not_before,
-        fields.not_after,
+        rfc3339(fields.not_before),
+        rfc3339(fields.not_after),
         public_key_to_text(&fingerprint),
         public_key_to_text(&fields.public_key),
         public_key_to_text(&fingerprint),
@@ -491,6 +509,12 @@ mod tests {
         assert_ne!(seeds[0], seeds[1]);
         let (seed, ca_public) = ca_of(seeds[0]);
         let seed = seed + "\n";
+        // `ca pubkey`: what `ca keygen` printed on stderr.
+        assert_eq!(
+            public_key_to_text(&cert::ca_public(&ca_key(&seed).unwrap())),
+            ca_public
+        );
+        assert!(ca_key("not a key").is_err());
         let node = StaticKey::generate().public();
         let node_text = public_key_to_text(&node);
         let extra = ["--address", "fd00::1", "--group", "b", "--group", "a"];
@@ -505,9 +529,9 @@ mod tests {
             shown,
             format!(
                 "name: host-1\npublic_key: {node_text}\naddresses: 10.0.0.1 fd00::1\n\
-                 groups: a b\nnot_before: {}\nnot_after: {year}\nfingerprint: {fingerprint}\n\
-                 deny_key: key:{node_text}\ndeny_cert: cert:{fingerprint}\n",
-                NOW - 3600
+                 groups: a b\nnot_before: 2027-01-15T07:00:00Z\nnot_after: 2028-01-15T08:00:00Z\n\
+                 fingerprint: {fingerprint}\n\
+                 deny_key: key:{node_text}\ndeny_cert: cert:{fingerprint}\n"
             )
         );
         let pki = Pki {
@@ -538,7 +562,10 @@ mod tests {
         // Lifetime, then the show verdicts: expired, another CA, not a certificate.
         let short = cert_sign(&sign_args(&node_text, &["--days", "2"]), &seed, NOW).unwrap();
         let (shown, verdict) = cert_show(&["--ca", &ca_public], &short, NOW + 2 * 86_400).unwrap();
-        assert!(shown.contains(&format!("not_after: {}\n", NOW + 2 * 86_400)));
+        assert!(
+            shown.contains("not_after: 2027-01-17T08:00:00Z\n"),
+            "{shown}"
+        );
         assert_eq!(verdict, Err(Reject::Expired));
         let (_, other) = ca_of([9; 32]);
         assert_eq!(

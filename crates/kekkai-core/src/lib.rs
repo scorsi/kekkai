@@ -104,3 +104,5 @@ pub const MAX_CERTIFICATE_GROUPS: usize = 16;
 pub const MAX_CA_KEYS: usize = 2;
 /// Default bound of the certificate peer table (`pki.max_peers`, §4.4).
 pub const MAX_CERTIFICATE_PEERS: usize = 256;
+/// From this long before its own `not_after`, a party warns (`certificate-expiring`, §4.2).
+pub const CERTIFICATE_EXPIRY_WARNING: Duration = Duration::from_secs(30 * 86_400);

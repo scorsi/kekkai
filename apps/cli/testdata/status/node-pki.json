@@ -1,0 +1,39 @@
+{
+  "node": {
+    "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+    "addresses": [
+      "10.0.0.1/32"
+    ],
+    "version": "0.0.0",
+    "wire_version": 1,
+    "listen_port": 4802,
+    "certificate": {
+      "name": "host-1",
+      "fingerprint": "ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+      "not_before": "2027-01-15T07:00:00Z",
+      "not_after": "2028-01-15T08:00:00Z"
+    }
+  },
+  "peers": [
+    {
+      "public_key": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=",
+      "addresses": [
+        "10.0.0.2/32",
+        "fd00::2/128"
+      ],
+      "path": "PATH_DIRECT",
+      "endpoint": "192.0.2.7:4802",
+      "name": "host-2",
+      "certificate": {
+        "name": "host-2",
+        "fingerprint": "HZekfj15ogjJcYSkT1dubjBB7Twk+3P6/n+fHFl14Ho=",
+        "not_before": "1970-01-01T00:00:00Z",
+        "not_after": "9999-12-31T23:59:59Z",
+        "groups": [
+          "admin",
+          "build"
+        ]
+      }
+    }
+  ]
+}

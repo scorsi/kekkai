@@ -103,6 +103,20 @@ message NodeStatus {
   uint32 wire_version = 4;
   google.protobuf.Duration uptime = 5;
   uint32 listen_port = 6;
+  // The node's own certificate (spec section 4.2); unset without `[pki]`. Logged as
+  // `certificate-expiring` from 30 days before its `not_after` (ADR 0034).
+  Certificate certificate = 7;
+}
+
+// A certificate this party verified (spec sections 4.2, 4.3).
+message Certificate {
+  string name = 1;
+  // BLAKE2s-256 of the certificate, standard base64: a `cert:` entry of the deny list
+  // revokes it (spec section 4.3).
+  string fingerprint = 2;
+  google.protobuf.Timestamp not_before = 3;
+  google.protobuf.Timestamp not_after = 4;
+  repeated string groups = 5;
 }
 
 // How a peer is reached (0013, spec section 12.1).
@@ -144,8 +158,8 @@ message PeerStatus {
   repeated string allow_inbound = 13;
   // Packets from this peer refused by the inbound firewall (spec section 15).
   uint64 firewall_drops = 14;
-  // The name this node's configuration gives the peer; a local label, never sent over the
-  // overlay (identity is the public key until v1 certificates, 0027).
+  // The name this node's configuration gives the peer, or its certificate's name; a local
+  // label in the configuration, never sent over the overlay.
   string name = 15;
   // Local index of the `current` session (spec section 7.5), the `receiver_index` the peer
   // puts in its packets to this node; unset without one. Unchanged by a reload that keeps
@@ -155,4 +169,7 @@ message PeerStatus {
   // 8.1): its age drives the rekeys (section 8.6). Unset without one. `last_handshake` can
   // be a newer, not yet confirmed session.
   google.protobuf.Timestamp session_created = 17;
+  // Set for a peer admitted by its certificate (spec section 4.4), listed in no
+  // configuration: `name` and `addresses` are the certificate's, `allow_inbound` is empty.
+  Certificate certificate = 18;
 }
