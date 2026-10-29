@@ -20,6 +20,12 @@ impl Tai64n {
         Self(bytes)
     }
 
+    /// The wall clock in whole Unix seconds (§4.3 step 8), as encoded by [`Self::from_unix`].
+    pub fn unix_seconds(&self) -> u64 {
+        let seconds = u64::from_be_bytes(self.0[..8].try_into().expect("8 bytes"));
+        seconds.wrapping_sub(TAI64_OFFSET)
+    }
+
     /// Responder rule: a message 1 is accepted only if its timestamp is bytewise strictly
     /// greater than the last accepted one from the same static key.
     pub fn is_newer_than(&self, last_accepted: &Tai64n) -> bool {

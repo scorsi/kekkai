@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::cert;
 use crate::handshake::{self, Initiator, SessionKeys};
 use crate::inner::{Endpoint, Inner};
 use crate::keys::{PublicKey, StaticKey, public_key_from_text, public_key_to_text};
@@ -741,7 +742,7 @@ fn handshake() {
         assert_eq!(pending.initiator_static, init_pub);
         assert_eq!(pending.timestamp, timestamp);
         assert_eq!(pending.remote_index, init_index);
-        let (datagram_2, resp_keys) = pending.respond(resp_index);
+        let (datagram_2, resp_keys) = pending.respond(resp_index, None);
         let mac1_key_2 = Mac1Key::for_receiver(&init_pub);
         v.message_2 = describe_message(&datagram_2, 12, &[], &mac1_key_2);
         assert_eq!(datagram_2.len(), 92);
@@ -752,7 +753,7 @@ fn handshake() {
         };
         resp.verify_mac1(&mac1_key_2).unwrap();
         assert_eq!(resp.receiver_index, init_index);
-        let init_keys = initiator.finish(&resp).unwrap();
+        let (init_keys, _) = initiator.finish(&resp, &vec![resp_pub]).unwrap();
         assert_eq!(init_keys.handshake_hash, resp_keys.handshake_hash);
         assert_eq!(init_keys.send, resp_keys.recv);
         assert_eq!(init_keys.recv, resp_keys.send);
@@ -911,4 +912,225 @@ fn describe_message(
         mac1: hex(&datagram[covered..covered + 16]),
         datagram: hex(datagram),
     }
+}
+
+// --- certificate.json (§4.2, §4.3) ---
+
+#[derive(Serialize, Deserialize)]
+struct CertificateFile {
+    description: String,
+    context: String,
+    max_certificate: usize,
+    cas: Vec<CaVector>,
+    sign: Vec<SignCase>,
+    verify: VerifySection,
+    ca_keys: Vec<CaKeyCase>,
+    revoked_entries: Vec<RevokedCase>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CaVector {
+    name: String,
+    seed: String,
+    public: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SignCase {
+    name: String,
+    ca: String,
+    fields: SignFields,
+    body: String,
+    signature: String,
+    certificate: String,
+    text: String,
+    fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SignFields {
+    name: String,
+    public_key: String,
+    addresses: Vec<String>,
+    groups: Vec<String>,
+    #[serde(with = "decimal")]
+    not_before: u64,
+    #[serde(with = "decimal")]
+    not_after: u64,
+    extra: Vec<ExtraTlv>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExtraTlv {
+    #[serde(rename = "type")]
+    ty: u8,
+    value: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerifySection {
+    trusted: Vec<String>,
+    prefixes: Vec<PrefixVector>,
+    #[serde(rename = "static")]
+    statics: Vec<String>,
+    revoked: Vec<String>,
+    cases: Vec<VerifyCase>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PrefixVector {
+    address: String,
+    length: u8,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VerifyCase {
+    name: String,
+    note: String,
+    static_public: String,
+    #[serde(with = "decimal")]
+    now: u64,
+    certificate: Option<String>,
+    result: String,
+    peer: Option<PeerRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PeerRecord {
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    addresses: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    not_after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CaKeyCase {
+    name: String,
+    note: String,
+    public: String,
+    result: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RevokedCase {
+    name: String,
+    entry: String,
+    result: String,
+}
+
+fn result_name<T>(r: &Result<T, cert::Reject>) -> String {
+    r.as_ref().map_or_else(|e| e.as_str(), |_| "ok").to_owned()
+}
+
+#[test]
+fn certificate() {
+    vector("certificate.json", |mut v: CertificateFile| {
+        v.context = hex(crate::CERTIFICATE_CONTEXT);
+        v.max_certificate = crate::MAX_CERTIFICATE;
+        for ca in &mut v.cas {
+            ca.public = hex(&cert::ca_public(&arr(&ca.seed)));
+        }
+        for case in &mut v.sign {
+            let seed: [u8; 32] = arr(&v.cas.iter().find(|c| c.name == case.ca).unwrap().seed);
+            let f = &case.fields;
+            let fields = cert::Fields {
+                name: f.name.clone(),
+                public_key: arr(&f.public_key),
+                addresses: f.addresses.iter().map(|a| cert::address(arr(a))).collect(),
+                groups: f.groups.clone(),
+                not_before: f.not_before,
+                not_after: f.not_after,
+            };
+            let mut body = cert::encode_body(&fields);
+            let extra: Vec<Vec<u8>> = f.extra.iter().map(|e| unhex(&e.value)).collect();
+            let extra: Vec<Tlv> = (f.extra.iter().zip(&extra))
+                .map(|(e, value)| Tlv { ty: e.ty, value })
+                .collect();
+            tlv::encode(&extra, &mut body);
+            let certificate = cert::sign_body(&seed, &body);
+            if extra.is_empty() {
+                assert_eq!(
+                    cert::sign(&seed, &fields).as_ref(),
+                    Ok(&certificate),
+                    "{}",
+                    case.name
+                );
+            }
+            assert_eq!(
+                cert::parse_body(&body).as_ref(),
+                Some(&fields),
+                "{}",
+                case.name
+            );
+            case.body = hex(&body);
+            case.signature = hex(&certificate[body.len()..]);
+            case.certificate = hex(&certificate);
+            case.text = cert::to_text(&certificate);
+            case.fingerprint = hex(&cert::fingerprint(&certificate));
+            assert_eq!(cert::from_text(&case.text), Some(certificate));
+        }
+        let s = &v.verify;
+        let pki = cert::Pki {
+            ca_keys: (s.trusted.iter())
+                .map(|k| cert::CaKey::from_bytes(&unhex(k)).unwrap())
+                .collect(),
+            certificate: Vec::new(),
+            revoked: s.revoked.iter().map(|e| e.parse().unwrap()).collect(),
+            prefixes: (s.prefixes.iter())
+                .map(|p| cert::Prefix::new(IpAddr::V6(arr::<16>(&p.address).into()), p.length))
+                .collect::<Option<_>>()
+                .unwrap(),
+            max_peers: crate::MAX_CERTIFICATE_PEERS,
+        };
+        let statics: Vec<PublicKey> = s.statics.iter().map(|k| arr(k)).collect();
+        for case in &mut v.verify.cases {
+            let key: PublicKey = arr(&case.static_public);
+            let certificate = case.certificate.as_deref().map(unhex);
+            let verdict = pki.verify(
+                &key,
+                certificate.as_deref(),
+                statics.contains(&key),
+                case.now,
+            );
+            case.result = result_name(&verdict);
+            case.peer = verdict.ok().map(|v| match v.record {
+                None => PeerRecord {
+                    source: "static".into(),
+                    name: None,
+                    addresses: None,
+                    groups: None,
+                    not_after: None,
+                    fingerprint: None,
+                },
+                Some(r) => PeerRecord {
+                    source: "certificate".into(),
+                    name: Some(r.fields.name.clone()),
+                    addresses: Some(
+                        r.fields
+                            .addresses
+                            .iter()
+                            .map(|a| hex(&cert::octets(*a)))
+                            .collect(),
+                    ),
+                    groups: Some(r.fields.groups.clone()),
+                    not_after: Some(r.fields.not_after.to_string()),
+                    fingerprint: Some(hex(&r.fingerprint)),
+                },
+            });
+        }
+        for case in &mut v.ca_keys {
+            case.result = result_name(&cert::CaKey::from_bytes(&unhex(&case.public)));
+        }
+        for case in &mut v.revoked_entries {
+            case.result = result_name(&case.entry.parse::<cert::Revoked>());
+        }
+        v
+    });
 }

@@ -25,3 +25,9 @@ The same protocol must run under tokio on Linux and macOS, under `NEPacketTunnel
 
 - Hole punching, relay fallback and roaming are first proven in simulated-network tests (0020) before any `nixosTest`.
 - The core's memory use is bounded by configuration, a requirement of the iOS Network Extension (0027).
+
+## Amendment — 2026-10-29: the wall clock's second use (ADR 0034)
+
+Landed in `kekkai-core` (v1.0): with `[pki]` the core also reads the wall clock for
+certificate validity (spec §4.3 step 8), as whole Unix seconds of the `Tai64n` the IO layer
+already passes with every call. No new clock input, timer, async runtime or socket.

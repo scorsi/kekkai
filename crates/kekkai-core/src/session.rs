@@ -88,6 +88,9 @@ pub struct Session {
     pub role: Role,
     pub last_sent: Option<Duration>,
     pub last_received: Option<Duration>,
+    /// With a PKI, the fingerprint of the certificate the peer sent in the handshake that
+    /// made the session (§8.1).
+    pub fingerprint: Option<[u8; 32]>,
 }
 
 impl Session {
@@ -111,6 +114,7 @@ impl Session {
             role,
             last_sent: None,
             last_received: None,
+            fingerprint: None,
         }
     }
 

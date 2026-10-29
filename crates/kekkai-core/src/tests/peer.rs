@@ -59,6 +59,7 @@ impl Party {
             wall: wall(now),
             local: &self.key,
             indices: &mut self.indices,
+            certificate: None,
         };
         self.peer.send_ip(&mut ctx, PACKET)
     }
@@ -69,6 +70,7 @@ impl Party {
             wall: wall(now),
             local: &self.key,
             indices: &mut self.indices,
+            certificate: None,
         };
         self.peer.tick(&mut ctx)
     }
@@ -81,6 +83,7 @@ impl Party {
             wall: wall(now),
             local: &self.key,
             indices: &mut self.indices,
+            certificate: None,
         };
         match wire::parse(datagram)? {
             Outer::HandshakeInit(init) => {
@@ -95,7 +98,8 @@ impl Party {
                     ctx.indices.owner(resp.receiver_index),
                     Some(&self.peer.remote_static)
                 );
-                Ok((None, self.peer.handle_resp(&mut ctx, &resp)?))
+                let identity = vec![self.peer.remote_static];
+                Ok((None, self.peer.handle_resp(&mut ctx, &resp, &identity)?.0))
             }
             Outer::Data(data) => {
                 assert_eq!(
@@ -516,6 +520,7 @@ fn simultaneous_open_with_one_lost_response(stale_wall: bool) {
             wall: wall(t0 + secs(3600)),
             local: &ahead.key,
             indices: &mut ahead.indices,
+            certificate: None,
         };
         let msg1 = ahead.peer.send_ip(&mut ctx, PACKET).remove(0);
         b.receive_ok(t0, &msg1);

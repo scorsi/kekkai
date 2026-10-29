@@ -9,6 +9,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
+use kekkai_core::cert::{self, CaKey, Pki, Prefix, Reject, Revoked};
 use kekkai_core::firewall::Rule;
 use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::{PublicKey, StaticKey};
@@ -2134,4 +2135,270 @@ fn a_restarted_public_node_reaches_a_natted_peer_directly() {
     let paths = restart_the_public_node(102, ms(0), true);
     assert!(paths[3..60].bytes().all(|p| p == b'R'), "{paths}");
     assert!(paths.ends_with("DDDDD"), "{paths}");
+}
+
+// --- Certificates (§4.2 to §4.4, v1.0) ---
+
+const CA_SEED: [u8; 32] = [0x5a; 32];
+const YEAR: u64 = EPOCH as u64 + 365 * 86_400;
+
+/// A certificate for `key` at host `host`'s overlay address, back-dated an hour (§4.2).
+fn certificate(ca: &[u8; 32], key: PublicKey, host: usize, not_after: u64) -> Vec<u8> {
+    let fields = cert::Fields {
+        name: format!("host-{host}"),
+        public_key: key,
+        addresses: vec![address(host)],
+        groups: Vec::new(),
+        not_before: EPOCH as u64 - 3600,
+        not_after,
+    };
+    cert::sign(ca, &fields).expect("valid fields")
+}
+
+fn pki(certificate: Vec<u8>, revoked: Vec<Revoked>) -> Pki {
+    Pki {
+        ca_keys: vec![CaKey::from_bytes(&cert::ca_public(&CA_SEED)).expect("valid CA key")],
+        certificate,
+        revoked,
+        prefixes: vec![Prefix::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)), 24).expect("prefix")],
+        max_peers: kekkai_core::MAX_CERTIFICATE_PEERS,
+    }
+}
+
+impl Sim {
+    fn set_pki(&mut self, host: usize, certificate: Vec<u8>, revoked: Vec<Revoked>) {
+        let wall = self.hosts[host].wall(self.now);
+        self.hosts[host]
+            .node
+            .set_pki(wall, pki(certificate, revoked));
+    }
+
+    /// Host `from` pings host `to` (ICMP passes the default firewall of §15).
+    fn ping(&mut self, from: usize, to: usize) {
+        let seq = self.hosts[from].next_seq;
+        self.hosts[from].next_seq += 1;
+        let mut packet = ip_packet(address(from), address(to), seq);
+        packet[9] = 1;
+        packet[20..28].copy_from_slice(&[8, 0, 0, 0, 0, 0, 0, 0]);
+        let _ = self.send_raw(from, &packet);
+    }
+
+    fn pings(&mut self, from: usize, to: usize, end: Duration) {
+        while self.now < end {
+            self.ping(from, to);
+            let next = self.now + secs(1);
+            self.run_until(next.min(end));
+        }
+    }
+
+    fn certificate_drops(&self, host: usize, reason: Reject) -> usize {
+        self.drops(host, DropReason::Certificate(reason)).len()
+    }
+}
+
+/// A (0) lists B (1); B lists A; C (2) and the next hosts list A, and A does not list them.
+/// All have `[pki]` with valid certificates for their overlay address.
+fn pki_sim(seed: u64, n: usize) -> Sim {
+    let mut sim = Sim::new(seed, n, PERFECT);
+    let a = sim.peer_config(0);
+    let b = sim.peer_config(1);
+    sim.hosts[0].node.set_peers(vec![b]);
+    for i in 1..n {
+        sim.hosts[i].node.set_peers(vec![a.clone()]);
+    }
+    for i in 0..n {
+        let own = certificate(&CA_SEED, sim.hosts[i].key, i, YEAR);
+        sim.set_pki(i, own, Vec::new());
+    }
+    sim
+}
+
+fn sent_between(sim: &Sim, from: usize, to: usize) -> usize {
+    (sim.emitted.iter())
+        .filter(|(_, f, t, _)| *f == from && *t == to)
+        .count()
+}
+
+#[test]
+fn a_node_listed_nowhere_reaches_a_by_certificate() {
+    let mut sim = pki_sim(71, 3);
+    sim.pings(2, 0, secs(5));
+    assert_eq!(unique(&sim.received(0, 2, secs(0))), 5);
+    let c = sim.hosts[2].key;
+    let record = sim.hosts[0].node.certificate_peer(&c).expect("admitted");
+    assert_eq!(record.fields.addresses, [address(2)]);
+    // A answers C: C's certificate address is routed to it (§4.4).
+    sim.send_ip(0, 2).unwrap();
+    sim.run_until(secs(6));
+    assert_eq!(sim.received(2, 0, secs(0)).len(), 1);
+
+    // C restarts: A's next packets start a handshake towards C, and C's message 2 carries
+    // its certificate, which A verifies as the initiator (§7.7 step 3).
+    let to_a = sim.peer_config(0);
+    sim.hosts[2].node = Node::new(sim.node_keys[2].clone(), vec![to_a]);
+    sim.set_pki(2, certificate(&CA_SEED, c, 2, YEAR), Vec::new());
+    let restarted = sim.now;
+    sim.stream(0, 2, secs(1), secs(40));
+    assert!(!sim.received(2, 0, restarted).is_empty());
+    assert!(sim.hosts[0].node.certificate_peer(&c).is_some());
+
+    // Refused silently: expired, another CA, another node's certificate, revoked.
+    let reasons = [
+        Reject::Expired,
+        Reject::BadSignature,
+        Reject::WrongKey,
+        Reject::Revoked,
+    ];
+    for (seed, reason) in reasons.into_iter().enumerate() {
+        let mut sim = pki_sim(72 + seed as u64, 3);
+        let (a, b, c) = (sim.hosts[0].key, sim.hosts[1].key, sim.hosts[2].key);
+        let (presented, revoked) = match reason {
+            Reject::Expired => (certificate(&CA_SEED, c, 2, EPOCH as u64 - 1), vec![]),
+            Reject::BadSignature => (certificate(&[0x77; 32], c, 2, YEAR), vec![]),
+            Reject::WrongKey => (certificate(&CA_SEED, b, 2, YEAR), vec![]),
+            _ => (certificate(&CA_SEED, c, 2, YEAR), vec![Revoked::Key(c)]),
+        };
+        sim.set_pki(2, presented, Vec::new());
+        let own = certificate(&CA_SEED, a, 0, YEAR);
+        sim.set_pki(0, own, revoked);
+        sim.pings(2, 0, secs(20));
+        assert!(sim.received(0, 2, secs(0)).is_empty(), "{reason:?}");
+        assert_eq!(sent_between(&sim, 0, 2), 0, "{reason:?}: no answer at all");
+        assert!(sim.certificate_drops(0, reason) > 0, "{reason:?}");
+        assert!(sim.hosts[0].node.certificate_peer(&c).is_none());
+    }
+}
+
+#[test]
+fn certificate_expiry_cuts_a_live_session_within_reject_after_time() {
+    let mut sim = pki_sim(73, 3);
+    let c = sim.hosts[2].key;
+    let not_after = 100;
+    sim.set_pki(
+        2,
+        certificate(&CA_SEED, c, 2, EPOCH as u64 + not_after),
+        Vec::new(),
+    );
+    sim.pings(2, 0, secs(400));
+    let received = sim.received(0, 2, secs(0));
+    let last = (sim.hosts[0].received.iter())
+        .filter(|(_, from, _)| *from == 2)
+        .map(|(t, ..)| *t)
+        .max()
+        .expect("traffic before expiry");
+    assert!(received.len() > 100, "{} packets", received.len());
+    assert!(
+        last < secs(not_after) + REJECT_AFTER_TIME,
+        "last packet at {last:?}"
+    );
+    assert!(sim.certificate_drops(0, Reject::Expired) > 0);
+}
+
+#[test]
+fn revocation_by_reload_cuts_at_once() {
+    let mut sim = pki_sim(74, 3);
+    let (a, b, c) = (sim.hosts[0].key, sim.hosts[1].key, sim.hosts[2].key);
+    // A initiates to B (B's message 2 carries B's certificate), C to A.
+    sim.stream(0, 1, secs(1), secs(5));
+    sim.pings(2, 0, secs(10));
+    assert!(!sim.received(1, 0, secs(0)).is_empty());
+    assert!(!sim.received(0, 2, secs(0)).is_empty());
+
+    // `key:` entry: C is a removed key at once.
+    let own = certificate(&CA_SEED, a, 0, YEAR);
+    sim.set_pki(0, own.clone(), vec![Revoked::Key(c)]);
+    assert!(sim.hosts[0].node.status(&c).is_none());
+    assert!(sim.hosts[0].node.certificate_peer(&c).is_none());
+    let reload = sim.now;
+    sim.pings(2, 0, secs(40));
+    assert!(sim.received(0, 2, reload).is_empty());
+    assert!(sim.certificate_drops(0, Reject::Revoked) > 0);
+
+    // `cert:` entry of the certificate B, a configured peer, presented: its sessions go at
+    // once, B stays listed, and its next handshake is refused.
+    let b_cert = certificate(&CA_SEED, b, 1, YEAR);
+    let revoked = vec![Revoked::Key(c), Revoked::Cert(cert::fingerprint(&b_cert))];
+    sim.stream(0, 1, secs(1), secs(45));
+    assert!(sim.status(0, 1).sessions > 0);
+    let before = sim.certificate_drops(0, Reject::Revoked);
+    sim.set_pki(0, own, revoked);
+    assert_eq!(sim.status(0, 1).sessions, 0);
+    let reload = sim.now;
+    sim.stream(0, 1, secs(1), secs(60));
+    sim.stream(1, 0, secs(1), secs(80));
+    assert!(sim.received(1, 0, reload).is_empty());
+    assert!(sim.received(0, 1, reload).is_empty());
+    assert!(sim.certificate_drops(0, Reject::Revoked) > before);
+}
+
+#[test]
+fn certificate_peer_table_bound_and_address_precedence() {
+    let mut sim = pki_sim(75, 4);
+    let (b, d) = (sim.hosts[1].key, sim.hosts[3].key);
+    // D claims B's address (static), C's (later `not_before` than C's) and its own.
+    let fields = cert::Fields {
+        name: "host-3".into(),
+        public_key: d,
+        addresses: vec![address(1), address(2), address(3)],
+        groups: Vec::new(),
+        not_before: EPOCH as u64 - 1800,
+        not_after: YEAR,
+    };
+    sim.set_pki(3, cert::sign(&CA_SEED, &fields).unwrap(), Vec::new());
+    sim.pings(2, 0, secs(3));
+    sim.pings(3, 0, secs(6));
+    let t = sim.now;
+    sim.send_ip(0, 2).unwrap();
+    sim.send_ip(0, 1).unwrap();
+    sim.run_until(secs(7));
+    assert_eq!(sim.received(3, 0, t).len(), 1, "10.0.0.3 goes to D");
+    assert!(sim.received(2, 0, t).is_empty());
+    assert_eq!(sim.received(1, 0, t).len(), 1, "10.0.0.2 stays B's");
+    let spoofed = ip_packet(address(1), address(0), 0);
+    sim.send_raw(3, &spoofed).unwrap();
+    sim.run_until(secs(8));
+    assert_eq!(sim.drops(0, DropReason::SourceNotPeer).len(), 1);
+    assert!(sim.hosts[0].node.status(&b).is_some());
+
+    // A table of one: D is refused while C holds a session, admitted once C's are gone.
+    let mut sim = pki_sim(76, 4);
+    let (a, c, d) = (sim.hosts[0].key, sim.hosts[2].key, sim.hosts[3].key);
+    let wall = sim.hosts[0].wall(sim.now);
+    let own = certificate(&CA_SEED, a, 0, YEAR);
+    let small = Pki {
+        max_peers: 1,
+        ..pki(own, Vec::new())
+    };
+    sim.hosts[0].node.set_pki(wall, small);
+    sim.pings(2, 0, secs(5));
+    sim.pings(3, 0, secs(10));
+    assert!(sim.received(0, 3, secs(0)).is_empty());
+    assert!(sim.certificate_drops(0, Reject::PeerTableFull) > 0);
+    assert_eq!(sent_between(&sim, 0, 3), 0);
+    sim.partitions.extend([(0, 2), (2, 0)]);
+    sim.pings(3, 0, secs(300));
+    assert!(
+        sim.hosts[0].node.certificate_peer(&c).is_none(),
+        "C evicted"
+    );
+    assert!(sim.hosts[0].node.certificate_peer(&d).is_some());
+    assert!(!sim.received(0, 3, secs(200)).is_empty());
+}
+
+#[test]
+fn a_party_without_pki_skips_the_certificate() {
+    // B has no `[pki]`: A's certificate in both messages is skipped (§4.5).
+    let mut sim = Sim::new(77, 2, PERFECT);
+    let a = sim.hosts[0].key;
+    sim.set_pki(0, certificate(&CA_SEED, a, 0, YEAR), Vec::new());
+    sim.stream(0, 1, secs(1), secs(5));
+    sim.stream(1, 0, secs(1), secs(10));
+    assert_eq!(unique(&sim.received(1, 0, secs(0))), 5);
+    assert_eq!(unique(&sim.received(0, 1, secs(0))), 5);
+    let lengths: Vec<usize> = (sim.sent.iter())
+        .filter(|(_, from, _, d)| *from == 0 && d[0] <= 2)
+        .map(|(.., d)| d.len())
+        .collect();
+    let extra = 3 + certificate(&CA_SEED, a, 0, YEAR).len();
+    assert!(lengths.contains(&(151 + extra)), "{lengths:?}");
 }

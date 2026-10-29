@@ -6,7 +6,8 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use crate::handshake::{Initiator, Pending};
+use crate::cert::Record;
+use crate::handshake::{Identity, Initiator, Pending};
 use crate::inner::{self, Inner};
 use crate::keys::{self, PublicKey, StaticKey};
 use crate::session::{Role, Session};
@@ -72,12 +73,14 @@ fn jitter() -> Duration {
 }
 
 /// What every call needs from the party (ADR 0004): the monotonic instant, the wall clock
-/// already encoded (read only to build message 1, §7.4), the static key and the index table.
+/// already encoded (read to build message 1, §7.4), the static key, the index table and,
+/// with a PKI, the party's own certificate, sent in every handshake message (§7.3).
 pub struct Ctx<'a> {
     pub now: Duration,
     pub wall: Tai64n,
     pub local: &'a StaticKey,
     pub indices: &'a mut IndexTable,
+    pub certificate: Option<&'a [u8]>,
 }
 
 struct InFlight {
@@ -220,17 +223,20 @@ impl Peer {
             return Err(DropReason::TimestampNotNewer);
         }
         let (remote_index, timestamp) = (pending.remote_index, pending.timestamp);
+        let fingerprint = pending.verified.fingerprint;
         let local_index = ctx.indices.allocate(self.remote_static);
-        let (datagram, keys) = pending.respond(local_index);
+        let (datagram, keys) = pending.respond(local_index, ctx.certificate);
         Self::retire(&mut self.next, ctx.indices);
-        self.next = Some(Session::new(
+        let mut session = Session::new(
             keys,
             Role::Responder,
             local_index,
             remote_index,
             ctx.now,
             false,
-        ));
+        );
+        session.fingerprint = fingerprint;
+        self.next = Some(session);
         self.last_timestamp = timestamp;
         self.last_handshake = Some(ctx.now);
         self.counters.handshakes_responded += 1;
@@ -238,25 +244,27 @@ impl Peer {
         Ok(datagram)
     }
 
-    /// §7.7. The caller did §5.6 and routed by `receiver_index`. Returns the staged packets
-    /// or a keepalive on the new session.
+    /// §7.7. The caller did §5.6 and routed by `receiver_index`; `identity` verifies the
+    /// responder with a PKI (step 3). Returns the staged packets or a keepalive on the new
+    /// session, and the certificate record of a certificate peer.
     pub fn handle_resp(
         &mut self,
         ctx: &mut Ctx<'_>,
         resp: &HandshakeResp<'_>,
-    ) -> Result<Vec<Vec<u8>>, DropReason> {
+        identity: &dyn Identity,
+    ) -> Result<(Vec<Vec<u8>>, Option<Record>), DropReason> {
         self.expire(ctx);
         let flight = self
             .in_flight
             .as_mut()
             .filter(|f| f.initiator.sender_index == resp.receiver_index);
-        let keys = flight
+        let (keys, verified) = flight
             .ok_or(DropReason::UnknownIndex)?
             .initiator
-            .finish(resp)?;
+            .finish(resp, identity)?;
         let flight = self.in_flight.take().expect("checked above");
         // The handshake's index becomes the session's local index: no release.
-        let session = Session::new(
+        let mut session = Session::new(
             keys,
             Role::Initiator,
             flight.initiator.sender_index,
@@ -264,14 +272,17 @@ impl Peer {
             ctx.now,
             true,
         );
+        session.fingerprint = verified.fingerprint;
         self.promote(session, ctx);
         self.last_handshake = Some(ctx.now);
         self.counters.handshakes_initiated += 1;
         self.after_authenticated_receive();
-        if self.staged.is_empty() {
-            return Ok(self.send_keepalive(ctx));
-        }
-        Ok(self.send_staged(ctx))
+        let out = if self.staged.is_empty() {
+            self.send_keepalive(ctx)
+        } else {
+            self.send_staged(ctx)
+        };
+        Ok((out, verified.record))
     }
 
     /// §8.2 steps 1 to 5 and the responder rekey rule (§8.6). Returns the inner plaintext
@@ -381,6 +392,17 @@ impl Peer {
         self.staged.clear();
     }
 
+    /// §4.1 on reload: discards every session whose recorded certificate fingerprint is
+    /// revoked (§8.1); the in-flight handshake and staged packets stay.
+    pub fn discard_sessions(&mut self, indices: &mut IndexTable, revoked: &[[u8; 32]]) {
+        for slot in [&mut self.current, &mut self.previous, &mut self.next] {
+            let fingerprint = slot.as_ref().and_then(|s| s.fingerprint);
+            if fingerprint.is_some_and(|f| revoked.contains(&f)) {
+                Self::retire(slot, indices);
+            }
+        }
+    }
+
     /// §4.1: the peer lost an address its staged packets may be for; sessions and the
     /// in-flight handshake stay.
     pub fn drop_staged(&mut self) {
@@ -454,7 +476,13 @@ impl Peer {
     /// Builds a fresh message 1 (new ephemeral, timestamp and index) and arms the retransmit timer.
     fn send_message_1(&mut self, ctx: &mut Ctx<'_>, attempts: u32) -> Vec<u8> {
         let index = ctx.indices.allocate(self.remote_static);
-        let (initiator, datagram) = Initiator::new(ctx.local, &self.remote_static, index, ctx.wall);
+        let (initiator, datagram) = Initiator::with_certificate(
+            ctx.local,
+            &self.remote_static,
+            index,
+            ctx.wall,
+            ctx.certificate,
+        );
         self.in_flight = Some(InFlight {
             initiator,
             attempts,

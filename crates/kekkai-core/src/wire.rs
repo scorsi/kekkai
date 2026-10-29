@@ -1,5 +1,6 @@
 //! Outer messages (§5): the common header, the per-type layouts and the drop order of §5.6.
 
+use crate::cert::Reject;
 use crate::mac1::{MAC_SLOTS_LEN, Mac1Key};
 use crate::tlv::TlvError;
 use crate::{MAX_DATAGRAM, WIRE_VERSION};
@@ -15,6 +16,8 @@ pub enum DropReason {
     NoiseFailure,
     Tlv(TlvError),
     IdentityRejected,
+    /// §4.3, §4.4: the identity function with a PKI rejected the handshake.
+    Certificate(Reject),
     TimestampMissing,
     TimestampNotNewer,
     UnknownIndex,
@@ -51,6 +54,20 @@ impl DropReason {
             DropReason::Tlv(TlvError::UnknownCritical) => "tlv_unknown_critical",
             DropReason::Tlv(TlvError::BadLength) => "tlv_bad_length",
             DropReason::IdentityRejected => "identity_rejected",
+            DropReason::Certificate(r) => match r {
+                Reject::Revoked => "certificate_revoked",
+                Reject::NoCertificate => "certificate_no_certificate",
+                Reject::BadLength => "certificate_bad_length",
+                Reject::BadSignature => "certificate_bad_signature",
+                Reject::Malformed => "certificate_malformed",
+                Reject::WrongKey => "certificate_wrong_key",
+                Reject::NotYetValid => "certificate_not_yet_valid",
+                Reject::Expired => "certificate_expired",
+                Reject::AddressOutsidePrefixes => "certificate_address_outside_prefixes",
+                Reject::PeerTableFull => "certificate_peer_table_full",
+                Reject::BadCaKey => "certificate_bad_ca_key",
+                Reject::BadRevokedEntry => "certificate_bad_revoked_entry",
+            },
             DropReason::TimestampMissing => "timestamp_missing",
             DropReason::TimestampNotNewer => "timestamp_not_newer",
             DropReason::UnknownIndex => "unknown_index",

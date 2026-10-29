@@ -27,3 +27,9 @@ A compromised node is a legitimate peer (0006). Without a filter, it reaches eve
 
 - The deployment's shared peer list carries the rules; exposing a service on the overlay is an explicit decision.
 - The UDP flow table is the only connection state in v0 and is bounded (0027, iOS memory).
+
+## Amendment — 2026-10-29: certificate peers (ADR 0034)
+
+Landed in `kekkai-core` (v1.0): a peer admitted by certificate (spec §4.4) has no
+`allow_inbound`; the default of this ADR applies to it (ICMP and replies to flows the node
+opened). Group rules are v1.2.

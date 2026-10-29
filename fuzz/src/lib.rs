@@ -60,6 +60,28 @@ pub fn firewall(data: &[u8]) {
     assert!(fw.status().entries <= 2);
 }
 
+/// §4.2, §4.3 on arbitrary bytes: a body that parses re-encodes to one that parses to the
+/// same fields; the identity function and the configuration parsers never panic.
+pub fn certificate(data: &[u8]) {
+    use kekkai_core::cert::{self, CaKey, Pki, Revoked};
+    if let Some(fields) = cert::parse_body(data) {
+        assert_eq!(cert::parse_body(&cert::encode_body(&fields)), Some(fields));
+    }
+    let ca = CaKey::from_bytes(data.get(..32).unwrap_or(data));
+    let pki = Pki {
+        ca_keys: ca.into_iter().collect(),
+        certificate: Vec::new(),
+        revoked: Vec::new(),
+        prefixes: Vec::new(),
+        max_peers: 1,
+    };
+    let _ = pki.verify(&[0; 32], Some(data), false, 0);
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = text.parse::<Revoked>();
+        let _ = CaKey::from_text(text);
+    }
+}
+
 /// `nix flake check` replays the committed corpus deterministically (ADR 0020).
 #[cfg(test)]
 mod replay {
@@ -106,6 +128,11 @@ mod replay {
     #[test]
     fn firewall() {
         replay("firewall", super::firewall);
+    }
+
+    #[test]
+    fn certificate() {
+        replay("certificate", super::certificate);
     }
 
     #[test]

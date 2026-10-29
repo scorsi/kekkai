@@ -4,12 +4,14 @@
 //! It owns no socket, thread, timer or file: the IO layer feeds datagrams and the two clocks
 //! in and gets datagrams and deadlines out. Monotonic time is a [`Duration`] elapsed since an
 //! arbitrary origin fixed by the IO layer (suspend-aware); the wall clock enters only as a
-//! [`tai64n::Tai64n`] when a handshake is initiated (§7.4).
+//! [`tai64n::Tai64n`], read to build message 1 (§7.4) and, with a PKI, to check certificate
+//! validity (§4.3 step 8, ADR 0034).
 
 #![forbid(unsafe_code)]
 
 use std::time::Duration;
 
+pub mod cert;
 pub mod firewall;
 pub mod handshake;
 pub mod inner;
@@ -89,3 +91,16 @@ pub const MAX_ENDPOINTS: usize = 16;
 pub const MAX_LOCAL_ENDPOINTS: usize = 8;
 /// IP packets staged per peer while a handshake is in flight (§8.7).
 pub const MAX_STAGED_PACKETS: usize = 128;
+
+/// Prefixed to a certificate body before signing (§4.2).
+pub const CERTIFICATE_CONTEXT: &[u8] = b"kekkai certificate v1";
+/// Largest certificate, body and signature (§4.2, §17).
+pub const MAX_CERTIFICATE: usize = 960;
+/// Most addresses in one certificate (§4.2).
+pub const MAX_CERTIFICATE_ADDRESSES: usize = 4;
+/// Most groups in one certificate (§4.2).
+pub const MAX_CERTIFICATE_GROUPS: usize = 16;
+/// Most trusted CA keys per party (§4.2).
+pub const MAX_CA_KEYS: usize = 2;
+/// Default bound of the certificate peer table (`pki.max_peers`, §4.4).
+pub const MAX_CERTIFICATE_PEERS: usize = 256;

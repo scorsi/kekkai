@@ -4,6 +4,7 @@
 use snow::{Builder, HandshakeState};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::cert::Verified;
 use crate::keys::{PublicKey, StaticKey};
 use crate::mac1::Mac1Key;
 use crate::resolver::Resolver;
@@ -12,22 +13,54 @@ use crate::tlv::{self, Tlv, TlvError};
 use crate::wire::{self, DropReason, HandshakeInit, HandshakeResp};
 use crate::{MAX_DATAGRAM, NOISE_PATTERN, PROLOGUE, PSK};
 
-// §18.3 Handshake TLV types. `certificate` (2) is reserved for v1: a v0 receiver skips it as
-// an unknown non-critical TLV, which is the same outcome.
+// §18.3 Handshake TLV types. Without a PKI, `certificate` (2) is skipped as an unknown
+// non-critical TLV, never parsed or hashed (§4.5).
 pub const TLV_TIMESTAMP: u8 = 1;
+pub const TLV_CERTIFICATE: u8 = 2;
 pub const MESSAGE_1_KNOWN_TLVS: &[u8] = &[TLV_TIMESTAMP];
 pub const MESSAGE_2_KNOWN_TLVS: &[u8] = &[];
+/// With a PKI (§7.3): the certificate in both messages.
+pub const MESSAGE_1_PKI_TLVS: &[u8] = &[TLV_TIMESTAMP, TLV_CERTIFICATE];
+pub const MESSAGE_2_PKI_TLVS: &[u8] = &[TLV_CERTIFICATE];
 
-/// Identity verification (§4, ADR 0007): consulted by the responder with the initiator's
-/// static key and the message 1 TLVs. v0: "is this key in the list"; v1: certificates.
+/// Identity verification (§4, ADR 0007): the responder's on message 1 (§7.6 step 2) and,
+/// with a PKI, the initiator's on message 2 (§7.7 step 3). v0: "is this key in the list";
+/// v1.0: §4.3.
 pub trait Identity {
-    fn verify(&self, static_public: &PublicKey, tlvs: &[Tlv<'_>]) -> bool;
+    /// With a PKI the `certificate` TLV is read and message 2 is verified (§4.5).
+    fn reads_certificate(&self) -> bool {
+        false
+    }
+    fn verify(&self, static_public: &PublicKey, tlvs: &[Tlv<'_>]) -> Result<Verified, DropReason>;
 }
 
 impl Identity for Vec<PublicKey> {
-    fn verify(&self, static_public: &PublicKey, _tlvs: &[Tlv<'_>]) -> bool {
-        self.contains(static_public)
+    fn verify(&self, static_public: &PublicKey, _tlvs: &[Tlv<'_>]) -> Result<Verified, DropReason> {
+        if self.contains(static_public) {
+            Ok(Verified::default())
+        } else {
+            Err(DropReason::IdentityRejected)
+        }
     }
+}
+
+/// The value of the `certificate` TLV, if any (§4.3).
+pub fn certificate<'a>(tlvs: &[Tlv<'a>]) -> Option<&'a [u8]> {
+    tlvs.iter()
+        .find(|t| t.ty == TLV_CERTIFICATE)
+        .map(|t| t.value)
+}
+
+/// A TLV list of the given TLVs, with the party's certificate last when it has one (§7.3).
+fn payload(tlvs: &[Tlv<'_>], certificate: Option<&[u8]>) -> Vec<u8> {
+    let mut all = tlvs.to_vec();
+    all.extend(certificate.map(|value| Tlv {
+        ty: TLV_CERTIFICATE,
+        value,
+    }));
+    let mut out = Vec::new();
+    tlv::encode(&all, &mut out);
+    out
 }
 
 /// The two transport keys of `Split()` (§7.1), oriented for their owner. The handshake hash
@@ -88,6 +121,22 @@ impl Initiator {
         Self::with_ephemeral(local, remote, sender_index, timestamp, None)
     }
 
+    /// [`Self::new`] with the party's certificate after the timestamp (§7.3), if any.
+    pub fn with_certificate(
+        local: &StaticKey,
+        remote: &PublicKey,
+        sender_index: u32,
+        timestamp: Tai64n,
+        certificate: Option<&[u8]>,
+    ) -> (Self, Vec<u8>) {
+        let timestamp = [Tlv {
+            ty: TLV_TIMESTAMP,
+            value: &timestamp.0,
+        }];
+        let payload = payload(&timestamp, certificate);
+        Self::with_payload(local, remote, sender_index, &payload, None)
+    }
+
     pub(crate) fn with_ephemeral(
         local: &StaticKey,
         remote: &PublicKey,
@@ -134,14 +183,28 @@ impl Initiator {
     }
 
     /// §7.7 steps 2 to 4. The caller did §5.6 and matched `receiver_index` (step 1). On a
-    /// Noise failure the state is unchanged and the handshake stays in flight.
-    pub fn finish(&mut self, resp: &HandshakeResp<'_>) -> Result<SessionKeys, DropReason> {
+    /// Noise failure the state is unchanged and the handshake stays in flight. With a PKI,
+    /// `identity` verifies the responder (step 3); a rejection is a TLV failure.
+    pub fn finish(
+        &mut self,
+        resp: &HandshakeResp<'_>,
+        identity: &dyn Identity,
+    ) -> Result<(SessionKeys, Verified), DropReason> {
         let mut payload = vec![0u8; resp.noise.len()];
         let len = self
             .state
             .read_message(resp.noise, &mut payload)
             .map_err(|_| DropReason::NoiseFailure)?;
-        tlv::decode(&payload[..len], MESSAGE_2_KNOWN_TLVS)?;
+        let verified = if identity.reads_certificate() {
+            let tlvs = tlv::decode(&payload[..len], MESSAGE_2_PKI_TLVS)?;
+            let remote: PublicKey = (self.state.get_remote_static())
+                .and_then(|s| s.try_into().ok())
+                .ok_or(DropReason::NoiseFailure)?;
+            identity.verify(&remote, &tlvs)?
+        } else {
+            tlv::decode(&payload[..len], MESSAGE_2_KNOWN_TLVS)?;
+            Verified::default()
+        };
         let (mut i2r, mut r2i) = self.state.dangerously_get_raw_split();
         let keys = SessionKeys {
             send: i2r,
@@ -150,7 +213,7 @@ impl Initiator {
         };
         i2r.zeroize();
         r2i.zeroize();
-        Ok(keys)
+        Ok((keys, verified))
     }
 }
 
@@ -161,6 +224,8 @@ pub struct Pending {
     pub initiator_static: PublicKey,
     pub timestamp: Tai64n,
     pub remote_index: u32,
+    /// What the identity function returned (§7.6 step 2).
+    pub verified: Verified,
 }
 
 /// §7.6 steps 1 to 3: Noise `read_message`, TLV parse, identity, timestamp presence. The
@@ -190,10 +255,13 @@ pub(crate) fn read_init_with(
         .get_remote_static()
         .and_then(|s| s.try_into().ok())
         .ok_or(DropReason::NoiseFailure)?;
-    let tlvs = tlv::decode(&payload[..len], MESSAGE_1_KNOWN_TLVS)?;
-    if !identity.verify(&initiator_static, &tlvs) {
-        return Err(DropReason::IdentityRejected);
-    }
+    let known = if identity.reads_certificate() {
+        MESSAGE_1_PKI_TLVS
+    } else {
+        MESSAGE_1_KNOWN_TLVS
+    };
+    let tlvs = tlv::decode(&payload[..len], known)?;
+    let verified = identity.verify(&initiator_static, &tlvs)?;
     let timestamp = tlvs
         .iter()
         .find(|t| t.ty == TLV_TIMESTAMP)
@@ -209,17 +277,23 @@ pub(crate) fn read_init_with(
         initiator_static,
         timestamp,
         remote_index: init.sender_index,
+        verified,
     })
 }
 
 impl Pending {
-    /// §7.6 steps 4 and 5: message 2 with an empty TLV list, `mac1` keyed on the initiator's
-    /// static key, then the transport keys. Returns the datagram to send.
-    pub fn respond(mut self, sender_index: u32) -> (Vec<u8>, SessionKeys) {
+    /// §7.6 steps 4 and 5: message 2 with an empty TLV list, or the party's certificate
+    /// (§7.3), `mac1` keyed on the initiator's static key, then the transport keys. Returns
+    /// the datagram to send.
+    pub fn respond(
+        mut self,
+        sender_index: u32,
+        certificate: Option<&[u8]>,
+    ) -> (Vec<u8>, SessionKeys) {
         let mut noise = vec![0u8; MAX_DATAGRAM];
         let len = self
             .state
-            .write_message(&[], &mut noise)
+            .write_message(&payload(&[], certificate), &mut noise)
             .expect("message 2 fits a datagram");
         noise.truncate(len);
         let datagram = wire::encode_handshake_resp(

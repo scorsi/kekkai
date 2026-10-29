@@ -70,3 +70,17 @@ can be fixed from outside `snow`:
   replaced by this amendment for X25519; random bytes still come from that resolver.
 - `noise_ikpsk2.json` and `handshake.json` must reproduce unchanged through the kekkai
   resolver; that is its correctness check.
+
+## Amendment — 2026-10-29: `ed25519-dalek` for certificates (ADR 0034)
+
+- `kekkai-core` depends on **`ed25519-dalek`** 2.2 with `default-features = false` and the
+  features `fast` (precomputed tables of `curve25519-dalek`) and `zeroize`, for certificate
+  signatures (spec §4.2) and their strict verification, `VerifyingKey::verify_strict` (§4.3
+  step 5). The `legacy_compatibility` feature is never enabled: it accepts a non-canonical
+  `S`. `ed25519-dalek` accepts non-canonical CA key encodings, so the CA-key check of §4.2
+  (RFC 8032 §5.1.3 decoding, not of small order) is kekkai's own, through the
+  `curve25519-dalek` already in the core.
+- `Cargo.lock` gains `ed25519-dalek`, `ed25519` and `signature`; `sha2` and `subtle` were
+  already in the dependency set. The direct dependency list of `kekkai-core` becomes:
+  `snow`, `curve25519-dalek`, `blake2`, `chacha20poly1305`, `zeroize`, `base64`,
+  `ed25519-dalek`.

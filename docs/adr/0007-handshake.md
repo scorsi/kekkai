@@ -36,3 +36,11 @@ above: with `snow` 0.10 a message 1 that passes `mac1` costs the responder three
 multiplications before `verify` (its own static public key, recomputed when the state is
 built, then `es` and `ss`), and three more to answer a listed key (ephemeral, `ee`, `se`).
 The accepted risk is unchanged; threat model §4.1 carries the count.
+
+## Amendment — 2026-10-29: the identity function returns a peer (ADR 0034)
+
+Landed in `kekkai-core` (v1.0): `verify` returns a record (source `static`, or `certificate`
+with the certificate's fields and fingerprint) or a reject reason (spec §4.3, §18.7); with
+`[pki]` the initiator calls it on message 2 too (§7.7 step 3), and every session records the
+fingerprint of the certificate its handshake carried (§8.1). Without `[pki]` the handshake is
+v0, byte for byte.

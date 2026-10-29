@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Deref;
 use std::time::Duration;
 
+use crate::cert::{Pki, Record, Reject, Revoked, Verified};
 use crate::firewall::{Firewall, FirewallStatus, Rule};
 use crate::handshake::{self, Identity};
 use crate::inner::{Endpoint, Inner};
@@ -246,14 +247,44 @@ pub struct Node {
     registry: Option<Registry>,
     /// `Some` for a relay (§14.2).
     forwarder: Option<Forwarder>,
+    /// `[pki]` (§4.2); `None` is v0 (§4.5).
+    pki: Option<Pki>,
+    /// The certificate peer table (§4.4): its keys also have a `Peer` and a `Link`.
+    certs: HashMap<PublicKey, CertPeer>,
+    /// The configured peers' routes (§11); `routes` adds the certificate peers' (§4.4).
+    static_routes: HashMap<IpAddr, PublicKey>,
+    /// The lists as last given, applied again when the deny list changes (§4.1).
+    lists: (Vec<PeerConfig>, Vec<LighthouseConfig>, Vec<RelayConfig>),
 }
 
-/// v0 identity (§4): the key is in the peer list.
-struct Listed<'a>(&'a HashMap<PublicKey, Peer>);
+/// One entry of the certificate peer table (§4.4).
+struct CertPeer {
+    record: Record,
+    /// Last successful verification.
+    verified: Duration,
+}
+
+/// The identity function (§4): the configured lists; with a PKI, §4.3.
+struct Listed<'a> {
+    links: &'a HashMap<PublicKey, Link>,
+    certs: &'a HashMap<PublicKey, CertPeer>,
+    pki: Option<&'a Pki>,
+    now: u64,
+}
 
 impl Identity for Listed<'_> {
-    fn verify(&self, static_public: &PublicKey, _tlvs: &[Tlv<'_>]) -> bool {
-        self.0.contains_key(static_public)
+    fn reads_certificate(&self) -> bool {
+        self.pki.is_some()
+    }
+
+    fn verify(&self, key: &PublicKey, tlvs: &[Tlv<'_>]) -> Result<Verified, DropReason> {
+        let listed = self.links.contains_key(key) && !self.certs.contains_key(key);
+        match self.pki {
+            Some(pki) => (pki.verify(key, handshake::certificate(tlvs), listed, self.now))
+                .map_err(DropReason::Certificate),
+            None if listed => Ok(Verified::default()),
+            None => Err(DropReason::IdentityRejected),
+        }
     }
 }
 
@@ -265,6 +296,19 @@ macro_rules! ctx {
             wall: $wall,
             local: &$self.key,
             indices: &mut $self.indices,
+            certificate: $self.pki.as_ref().map(|p| p.certificate.as_slice()),
+        }
+    };
+}
+
+/// The identity function of a call, borrowing only the fields it reads.
+macro_rules! identity {
+    ($self:ident, $wall:expr) => {
+        Listed {
+            links: &$self.links,
+            certs: &$self.certs,
+            pki: $self.pki.as_ref(),
+            now: $wall.unix_seconds(),
         }
     };
 }
@@ -288,6 +332,10 @@ impl Node {
             locals_changed: false,
             registry: None,
             forwarder: None,
+            pki: None,
+            certs: HashMap::new(),
+            static_routes: HashMap::new(),
+            lists: Default::default(),
         };
         node.set_peers(peers);
         node
@@ -333,25 +381,18 @@ impl Node {
     /// (§8.5), a kept one keeps them, the routing table and the firewall rules are rebuilt,
     /// and the firewall entries of an address that left the table or changed peer go (§15).
     pub fn set_peers(&mut self, peers: Vec<PeerConfig>) {
-        let old = std::mem::take(&mut self.routes);
+        self.lists.0 = peers.clone();
+        let peers = self.unrevoked(peers, |c| c.public_key);
+        self.static_routes.clear();
         self.rules.clear();
         for config in &peers {
             for address in &config.addresses {
-                self.routes.insert(*address, config.public_key);
+                self.static_routes.insert(*address, config.public_key);
             }
             self.rules
                 .insert(config.public_key, config.allow_inbound.clone());
         }
-        let routes = &self.routes;
-        self.firewall.forget(|ip| old.get(ip) != routes.get(ip));
-        // §4.1: a kept peer that lost an address may hold staged packets for it.
-        for (ip, key) in &old {
-            if routes.get(ip) != Some(key) {
-                if let Some(peer) = self.peers.get_mut(key) {
-                    peer.drop_staged();
-                }
-            }
-        }
+        self.apply_routes();
         let keep: Vec<PublicKey> = peers.iter().map(|c| c.public_key).collect();
         self.retain(Role::Peer, &keep);
         for config in peers {
@@ -359,17 +400,169 @@ impl Node {
         }
     }
 
+    /// The routing table (§11): the configured peers' addresses, then the certificate peers'
+    /// under the precedence of §4.4. The firewall entries of an address that left the table
+    /// or changed peer go (§15), and a kept peer that lost an address drops its staged
+    /// packets (§4.1).
+    fn apply_routes(&mut self) {
+        let own = self.own_addresses();
+        let old = std::mem::take(&mut self.routes);
+        let mut held: HashMap<IpAddr, (PublicKey, u64)> = HashMap::new();
+        for (key, c) in &self.certs {
+            let not_before = c.record.fields.not_before;
+            for address in &c.record.fields.addresses {
+                if own.contains(address) || self.static_routes.contains_key(address) {
+                    continue;
+                }
+                // The later `not_before` wins; on a tie the current holder keeps it (two
+                // newcomers: the smaller key, for determinism).
+                let wins = held.get(address).is_none_or(|&(other, other_before)| {
+                    not_before > other_before
+                        || not_before == other_before
+                            && (old.get(address) == Some(key)
+                                || old.get(address) != Some(&other) && *key < other)
+                });
+                if wins {
+                    held.insert(*address, (*key, not_before));
+                }
+            }
+        }
+        let mut routes = self.static_routes.clone();
+        routes.extend(held.into_iter().map(|(a, (k, _))| (a, k)));
+        self.firewall.forget(|ip| old.get(ip) != routes.get(ip));
+        for (ip, key) in &old {
+            if routes.get(ip) != Some(key) {
+                if let Some(peer) = self.peers.get_mut(key) {
+                    peer.drop_staged();
+                }
+            }
+        }
+        self.routes = routes;
+    }
+
+    /// The addresses of the node's own certificate, which equal its own (§4.2).
+    fn own_addresses(&self) -> Vec<IpAddr> {
+        let body = (self.pki.as_ref())
+            .and_then(|p| p.certificate.get(..p.certificate.len().checked_sub(64)?));
+        body.and_then(crate::cert::parse_body)
+            .map_or_else(Vec::new, |f| f.addresses)
+    }
+
+    /// The configured entries whose key is not a `key:` entry of the deny list (§4.1, §4.3
+    /// step 1). A certificate peer listed now leaves the table, as a role change (§4.1).
+    fn unrevoked<C>(&mut self, configs: Vec<C>, key: impl Fn(&C) -> PublicKey) -> Vec<C> {
+        let revoked = |k: &PublicKey| {
+            (self.pki.as_ref()).is_some_and(|p| p.revoked.contains(&Revoked::Key(*k)))
+        };
+        let configs: Vec<C> = configs.into_iter().filter(|c| !revoked(&key(c))).collect();
+        let moved: Vec<PublicKey> = (configs.iter().map(&key))
+            .filter(|k| self.certs.contains_key(k))
+            .collect();
+        for k in &moved {
+            self.remove(k);
+        }
+        if !moved.is_empty() {
+            self.apply_routes();
+        }
+        configs
+    }
+
+    /// Sets `[pki]` (§4.2, §4.3). The first call turns the PKI on for good (§4.1: on or off
+    /// needs a restart); a later one is the reload of §4.1 against `wall`: a `key:` entry
+    /// removes that key, a session made under a `cert:` entry is discarded, every certificate
+    /// peer is verified again and removed if it fails. The new own certificate goes out from
+    /// the next handshake message.
+    pub fn set_pki(&mut self, wall: Tai64n, pki: Pki) {
+        self.pki = Some(pki);
+        let (peers, lighthouses, relays) = self.lists.clone();
+        self.set_peers(peers);
+        self.set_lighthouses(lighthouses);
+        self.set_relays(relays);
+        let pki = self.pki.as_ref().expect("set above");
+        let now = wall.unix_seconds();
+        let failed: Vec<PublicKey> = (self.certs.iter())
+            .filter(|(k, c)| (pki.verify(k, Some(&c.record.certificate), false, now)).is_err())
+            .map(|(k, _)| *k)
+            .collect();
+        let revoked: Vec<[u8; 32]> = (pki.revoked.iter())
+            .filter_map(|r| match r {
+                Revoked::Cert(f) => Some(*f),
+                Revoked::Key(_) => None,
+            })
+            .collect();
+        for key in failed {
+            self.remove(&key);
+        }
+        for (_, peer) in self.peers.iter_mut() {
+            peer.discard_sessions(&mut self.indices, &revoked);
+        }
+        self.apply_routes();
+    }
+
+    /// The record of a certificate peer (§4.4).
+    pub fn certificate_peer(&self, key: &PublicKey) -> Option<&Record> {
+        self.certs.get(key).map(|c| &c.record)
+    }
+
+    /// §4.4 admission (§7.6 step 3a): a full table evicts, as a removed key, the entry with
+    /// the oldest verification among those with no live session and no handshake in flight.
+    fn admit(&mut self, now: Duration, key: PublicKey, record: Record) -> Result<(), DropReason> {
+        let max = self.pki.as_ref().map_or(0, |p| p.max_peers);
+        if self.certs.len() >= max {
+            let idle = |k: &PublicKey| {
+                let p = &self.peers[k];
+                !p.has_in_flight_handshake() && p.sessions().all(|s| !s.is_live(now))
+            };
+            let victim = (self.certs.iter())
+                .filter(|(k, _)| idle(k))
+                .min_by_key(|(_, c)| c.verified)
+                .map(|(k, _)| *k)
+                .ok_or(DropReason::Certificate(Reject::PeerTableFull))?;
+            self.remove(&victim);
+        }
+        self.insert(key, Role::Peer, Vec::new());
+        self.certs.insert(
+            key,
+            CertPeer {
+                record,
+                verified: now,
+            },
+        );
+        self.apply_routes();
+        Ok(())
+    }
+
+    /// §4.4 re-verification: the accepted record replaces the stored one; changed addresses
+    /// apply as changed fields (§4.1).
+    fn store_record(&mut self, now: Duration, key: PublicKey, record: Record) {
+        let Some(entry) = self.certs.get_mut(&key) else {
+            return;
+        };
+        let (old, new) = (&entry.record.fields, &record.fields);
+        let moved = old.addresses != new.addresses || old.not_before != new.not_before;
+        *entry = CertPeer {
+            record,
+            verified: now,
+        };
+        if moved {
+            self.apply_routes();
+        }
+    }
+
     /// Replaces the lighthouse list (§13.1; v0 configures at most one).
     pub fn set_lighthouses(&mut self, lighthouses: Vec<LighthouseConfig>) {
+        self.lists.1 = lighthouses.clone();
         self.set_services(Role::Lighthouse, lighthouses);
     }
 
     /// Replaces the relay list (§14.1; v0 configures at most one).
     pub fn set_relays(&mut self, relays: Vec<RelayConfig>) {
+        self.lists.2 = relays.clone();
         self.set_services(Role::Relay, relays);
     }
 
     fn set_services(&mut self, role: Role, configs: Vec<LighthouseConfig>) {
+        let configs = self.unrevoked(configs, |l| l.public_key);
         let keep: Vec<PublicKey> = configs.iter().map(|l| l.public_key).collect();
         self.retain(role, &keep);
         for l in configs {
@@ -394,7 +587,7 @@ impl Node {
         let gone: Vec<PublicKey> = self
             .links
             .iter()
-            .filter(|(k, l)| l.role == role && !keep.contains(k))
+            .filter(|(k, l)| l.role == role && !keep.contains(k) && !self.certs.contains_key(*k))
             .map(|(k, _)| *k)
             .collect();
         for key in gone {
@@ -405,6 +598,7 @@ impl Node {
     /// §4.1: the party's sessions, indices, handshake, staged packets and §12 state go
     /// (keys erased, §8.5), and so do its registration or relay sender state (§13.2, §14.2).
     fn remove(&mut self, key: &PublicKey) {
+        self.certs.remove(key);
         if let Some(mut peer) = self.peers.remove(key) {
             peer.forget(&mut self.indices);
         }
@@ -583,7 +777,6 @@ impl Node {
         sends: &mut Vec<Send>,
     ) -> Result<Output, DropReason> {
         let mut output = Output::default();
-        let mut ctx = ctx!(self, now, wall);
         let claim = |key: PublicKey| match claimed {
             Some(c) if c != key => Err(DropReason::NotAccepted),
             _ => Ok(()),
@@ -593,12 +786,24 @@ impl Node {
         let (key, index, plaintext, before, completed) = match wire::parse(datagram)? {
             Outer::HandshakeInit(init) => {
                 init.verify_mac1(&self.mac1)?;
-                let pending = handshake::read_init(&self.key, &init, &Listed(&self.peers))?;
+                let identity = identity!(self, wall);
+                let mut pending = handshake::read_init(&self.key, &init, &identity)?;
                 let key = pending.initiator_static;
                 claim(key)?;
+                let record = pending.verified.record.take();
+                if let Some(record) = record.as_ref().filter(|_| !self.certs.contains_key(&key)) {
+                    // §7.6 step 3 against an all-zero `last_timestamp`, then step 3a.
+                    if !pending.timestamp.is_newer_than(&Tai64n::default()) {
+                        return Err(DropReason::TimestampNotNewer);
+                    }
+                    self.admit(now, key, record.clone())?;
+                }
                 let peer = self.peers.get_mut(&key).expect("verify checked the list");
                 let before = peer.last_handshake;
-                let response = peer.accept_init(&mut ctx, pending)?;
+                let response = peer.accept_init(&mut ctx!(self, now, wall), pending)?;
+                if let Some(record) = record {
+                    self.store_record(now, key, record);
+                }
                 // §5.2: the responder's sender index is its new session's local index.
                 let index = u32::from_be_bytes(response[4..8].try_into().expect("message 2"));
                 // §12.2: message 2 goes back the way the accepted copy came.
@@ -607,27 +812,28 @@ impl Node {
             }
             Outer::HandshakeResp(resp) => {
                 resp.verify_mac1(&self.mac1)?;
-                let key = *ctx
-                    .indices
-                    .owner(resp.receiver_index)
-                    .ok_or(DropReason::UnknownIndex)?;
+                let key =
+                    *(self.indices.owner(resp.receiver_index)).ok_or(DropReason::UnknownIndex)?;
                 claim(key)?;
+                let identity = identity!(self, wall);
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
                 let before = peer.last_handshake;
-                let out = peer.handle_resp(&mut ctx, &resp)?;
+                let (out, record) =
+                    peer.handle_resp(&mut ctx!(self, now, wall), &resp, &identity)?;
+                if let Some(record) = record {
+                    self.store_record(now, key, record);
+                }
                 sends.extend(out.into_iter().map(|d| (key, None, d)));
                 (key, resp.receiver_index, None, before, true)
             }
             Outer::Data(data) => {
-                let key = *ctx
-                    .indices
-                    .owner(data.receiver_index)
-                    .ok_or(DropReason::UnknownIndex)?;
+                let key =
+                    *(self.indices.owner(data.receiver_index)).ok_or(DropReason::UnknownIndex)?;
                 claim(key)?;
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
                 let before = peer.last_handshake;
                 let current = peer.current().map(|s| s.local_index);
-                let (plaintext, out) = match peer.handle_data(&mut ctx, &data) {
+                let (plaintext, out) = match peer.handle_data(&mut ctx!(self, now, wall), &data) {
                     Err(DropReason::CounterRejected) => {
                         peer.counters.replay_rejections += 1;
                         return Err(DropReason::CounterRejected);
@@ -706,7 +912,14 @@ impl Node {
                     Some((source, _)) if self.routes.get(&source) != Some(&key) => {
                         Err(DropReason::SourceNotPeer)
                     }
-                    Some(_) if !self.firewall.inbound(now, &self.rules[&key], packet) => {
+                    // §4.4: a certificate peer has no `allow_inbound` in v1.0.
+                    Some(_)
+                        if !(self.firewall).inbound(
+                            now,
+                            self.rules.get(&key).map_or(&[], Vec::as_slice),
+                            packet,
+                        ) =>
+                    {
                         let peer = self.peers.get_mut(&key).expect("routes point at peers");
                         peer.counters.firewall_drops += 1;
                         Err(DropReason::Firewall)
