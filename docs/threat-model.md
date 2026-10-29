@@ -2,7 +2,9 @@
 
 Status: v0 draft, amended after review gate 1 (2026-10-21, ADR 0021) and for v0.5, the
 version submitted to review gate 2 (complete protocol: lighthouse, NAT traversal, relay),
-amended after it (2026-10-22, ADR 0021: sections 4.2 to 4.4 and 5); gate 2 passed.
+amended after it (2026-10-22, ADR 0021: sections 4.2 to 4.4 and 5); gate 2 passed. Amended
+for v1.0 (ADR 0034, certificates in the handshake: sections 2, 3, 4.1, 4.4, 4.6, 4.7, 5, 7
+and 10), to be reviewed at gate 3.
 Scope fixed by ADR 0006. Section references of the form §n point into [`docs/spec/protocol.md`](spec/protocol.md).
 
 This document is generic by policy (ADR 0025): it speaks of roles and of "a host whose
@@ -33,7 +35,8 @@ accepted risks apply to which host live in the private deployment repository.
 | Asset | Where | Protected by |
 | --- | --- | --- |
 | Confidentiality and integrity of tunnelled IP traffic | the wire | §7, §8 |
-| Peer authentication (only listed keys talk) | handshake | §4, §7.6 |
+| Peer authentication (only listed keys, or with `[pki]` keys certified by a trusted CA, talk) | handshake | §4, §4.3, §7.6, §7.7 |
+| CA private key (v1.0): forges any certificate identity | the operator's workstation, offline, encrypted to the operator only | custody, out of the protocol (ADR 0034) |
 | Initiator key privacy against observers who hold no candidate public keys | handshake | §7.1, §5.5 |
 | Static private keys | host memory and secrets files | host (ADR 0017, 0018), out of the protocol |
 | Unlinkability of a node's presence to strangers (silence) | every port | §16 |
@@ -75,6 +78,11 @@ Boundaries crossed by data in v0:
 6. **Relay → node**: a `relay_forwarded` is authenticated as the relay's; its payload is
    then authenticated on its own as the named peer's (§14.1), so the relay is trusted for
    nothing but delivery.
+7. **Certificate → core (v1.0)**: with `[pki]`, the `certificate` TLV of any handshake
+   message whose Noise read succeeded is hashed, length-checked, signature-verified and
+   only then parsed (§4.3); it is trusted only as far as a trusted CA signed it and it
+   binds the key the handshake authenticated. **CA → every party**: whoever holds a
+   trusted CA key decides which unlisted keys every `[pki]` party admits.
 
 ## 4. Attacker classes
 
@@ -128,7 +136,18 @@ Guarantees:
   parsing. `mac1` covers the whole handshake message before it.
 - **Reflection and amplification**: a `handshake_init` (151 bytes) earns at most one
   `handshake_resp` (92 bytes), and only from a listed key with a fresh timestamp. Nothing
-  is amplified.
+  is amplified. With `[pki]` (v1.0) both grow by the sender's certificate, so a message 2
+  (at most 1055 bytes) may be larger than the message 1 it answers (151 bytes from a party
+  without `[pki]`); it is still sent only for a message 1 that passed `verify` and the
+  timestamp rule, which a spoofed or replayed message 1 does not (section 5 for the
+  restart residual).
+- **Certificates (v1.0)**: a certificate reaches the parser only after a successful Noise
+  read, a length bound (`MAX_CERTIFICATE`, 960 bytes) and a strict Ed25519 verification
+  under a trusted CA key (§4.3 steps 4 and 5), so an oversized, truncated or malformed
+  certificate from a stranger costs at most `MAX_CA_KEYS` signature verifications and is
+  dropped silently; the body parser only ever sees CA-signed bytes. An expired, not yet
+  valid, foreign-CA, revoked or wrong-key certificate is dropped silently with no answer
+  (§16), exactly as an unlisted key in v0.
 
 Not guaranteed:
 
@@ -256,12 +275,87 @@ node's `verify` then rejects it and its sessions are discarded at reload or rest
 (§4). Until the redeploy it remains a legitimate peer: the window between detection and
 redeploy is accepted in v0.
 
+With certificates (v1.0): adding the node's key or certificate fingerprint to `[pki]
+revoked` and reloading cuts its sessions on that party at once (§4.1); a party the deny
+list has not reached yet still admits it until the certificate's `not_after` (one year by
+default), plus at most `REJECT_AFTER_TIME` for a session made just before (§4.4). The deny
+list beats a static entry. A compromised node holds one certificate for one key: it
+occupies one entry of a certificate peer table, and it can claim only the addresses and
+groups the CA signed for it, inside the verifier's prefixes, never an address of the
+verifier or of a configured peer (§4.4).
+
 ### 4.5 Local attacker on a host
 
 Not a protocol attacker; recorded for completeness. A process running with the node's
 privileges reads the key and the plaintext: out of scope (ADR 0006). An unprivileged local
 user sees only what the control socket's group grants, which is read-only state including
 public keys, endpoints and counters, never key material or payloads (§16).
+
+### 4.6 Compromise of the CA key (v1.0)
+
+Position: an attacker holds the private key of a CA that some parties trust (a copy taken
+from the operator's workstation or from the encrypted file and its age identity).
+
+Can: sign certificates for keys it generates, with any name, any groups and any addresses
+inside each verifier's prefixes, with any validity; every `[pki]` party that trusts that CA
+admits them as certificate peers (§4.3), reachable under the default firewall of §15 and,
+from v1.2, under the group rules those certificates claim. It can also re-sign the
+certificate of an existing node with other groups or addresses for a key it does not hold,
+which gains nothing (step 7 binds the Noise key).
+
+Cannot: impersonate a configured peer, lighthouse or relay (static entries win over
+certificates, §4.3 step 2, and configured addresses are never given to a certificate peer,
+§4.4); read or alter traffic of sessions between other parties (certificates carry no key
+material beyond the public key); make a party trust a second CA.
+
+Recovery: there is no CA expiry and no CA revocation message. The operator adds a new CA
+key beside the old one (two are trusted at once for that purpose), re-signs every
+certificate, removes the old key from every party's `[pki]` and reloads; until a party is
+reloaded it admits the attacker's certificates. Custody (offline, encrypted to the operator
+only, ADR 0034) is the only protection; a hardware key is a later option without format
+change.
+
+### 4.7 Certificate-specific threats (v1.0)
+
+- **Stolen certificate**: a certificate is public (it travels in every handshake and sits
+  in the deployment repository). Presented with any other static key it is `wrong_key`
+  (§4.3 step 7); presented by its own key it is the legitimate node. A certificate for a
+  foreign Noise key, whoever signed it, is refused the same way.
+- **Expired, not yet valid, foreign, revoked**: refused silently (§4.3, §16), counted per
+  reason. A live session made under a certificate that expires ends within
+  `REJECT_AFTER_TIME` of its `not_after` (§4.4); a revocation by reload ends it at once.
+- **Malleable signatures**: strict verification (§4.3 step 5) accepts exactly one encoding
+  of each valid signature, so a certificate has exactly one byte string and one
+  fingerprint. A verifier that accepted `S + L`, a non-canonical `R` or the cofactored
+  equation would let anyone derive a second valid encoding of a revoked certificate, with a
+  fingerprint absent from the deny list. The vectors pin each of these cases.
+- **Weak CA key encodings**: a small-order or non-canonically encoded CA key is refused at
+  configuration (`bad_ca_key`, §4.2); a small-order key would let anyone forge signatures,
+  a non-canonical one would accept signatures computed over its other encoding.
+- **Clock skew**: validity is judged on the verifier's wall clock (§4.3 step 8), with no
+  allowance. A verifier whose clock runs ahead refuses fresh certificates for up to the
+  skew beyond the signer's one-hour back-dating and refuses a certificate before its real
+  expiry; one whose clock runs behind accepts an expired certificate until NTP corrects it,
+  which the deny list covers for a compromised node. A wrong clock never affects
+  configured peers. An attacker who can shift a host's clock (unauthenticated NTP on the
+  path) can therefore extend an expired certificate's life on that host: revocation, not
+  expiry, is the answer to a known compromise.
+- **Oversized or malformed certificates**: bounded at 960 bytes before any other check;
+  parsed only after the signature; a parse error is silent (§4.3). The codec is fuzzed and
+  examined at gate 3 (ADR 0034).
+- **Peer-table exhaustion**: an entry is created only for a key whose message 1 passed the
+  Noise read, the full verification of a CA-signed certificate binding that key, and the
+  timestamp rule (§7.6). The table is bounded (`MAX_CERTIFICATE_PEERS`); a full table
+  evicts the least recently verified entry without a session, and refuses newcomers while
+  every entry is busy (`peer_table_full`). Filling it takes as many valid certificates and
+  keys as entries: a CA compromise (section 4.6) or that many compromised nodes, and then
+  costs only the admission of further certificate peers, never configured peers. An evicted
+  entry forgets its `last_timestamp`, so a message 1 of that peer captured before can be
+  replayed once, as after a restart (section 4.1).
+- **Address claims**: a certificate never takes an address of the verifier or of a
+  configured peer; between two certificates the later `not_before` wins (§4.4). A
+  compromised CA could therefore take over a certificate peer's address with a newer
+  certificate (section 4.6).
 
 ## 5. Accepted risks in v0
 
@@ -275,7 +369,11 @@ public keys, endpoints and counters, never key material or payloads (§16).
 | Some handshake secrets are not erased on drop: `snow`'s chaining key and handshake hash, its stack temporaries, the `blake2` hasher state (§8.5) | Defence in depth only (section 4.5 above); the resolver erases the static and ephemeral keys and cipher keys, and the sessions erase the transport keys | A Noise implementation that erases its symmetric state (future ADR) |
 | Wall clock going backwards blocks a node's own initiations until it catches up | Hosts run NTP; the node still answers its peers; a warning is logged after `REJECT_AFTER_TIME` | None planned; a persisted timestamp would be the alternative |
 | Traffic analysis, no padding | Not a goal for v0 | Padding is a format change (wire version) |
-| A compromised node keeps its access until redeploy | Static configuration is the source of truth | Certificates with expiry and revocation in v1 (ADR 0027) |
+| A compromised node keeps its access until redeploy | Static configuration is the source of truth | Certificates with expiry and revocation in v1 (ADR 0027); with `[pki]` (v1.0) a reload of the deny list on every party, or expiry |
+| A party the deny list has not reached admits a revoked certificate until its `not_after` (one year by default) | Revocation touches every host but is rare; no CRL protocol in v1 (ADR 0034) | Shorter lifetimes, or a signed CRL, later |
+| A stolen CA key forges certificate identities until every party drops that CA (section 4.6) | Offline custody by the operator; static peers, lighthouses and relays are not affected | Hardware CA key (ADR 0034) |
+| A wrong wall clock refuses valid or accepts expired certificates (section 4.7) | Hosts run NTP; configured peers are unaffected; revocation covers a known compromise | None planned |
+| An evicted certificate peer's captured message 1 is accepted once (section 4.7) | Same residual as a restart; the replayed session cannot be confirmed | None planned |
 | Any listed node may learn any other listed node's endpoints through the lighthouse | Small closed membership | Mutual-listing or group policy with v1 |
 | The relay's payload size bound (1313 bytes) and per-sender counters are the only quota by default | Only listed keys can relay; abuse means a compromised node | Per-sender rate limit, configurable (§14.2, `max_bytes_per_second`) |
 | A compromised lighthouse can make a node resend its in-flight message 1 to up to 16 addresses per punch, at any rate, or start an attempt sequence towards up to 32 candidates (one at a time, paced by §7.9) | The lighthouse is part of the trusted entry point; each copy is a 151-byte datagram the node would send anyway; recipients stay silent | A node-side punch budget, if ever needed |
@@ -305,7 +403,10 @@ controls the path or floods the link.
   gate 1 examine against this document and the vectors (§19).
 - The host's CSPRNG is sound (ephemeral keys, indices, jitter).
 - The suspend-aware monotonic clock does not go backwards. The wall clock may be wrong by
-  any amount.
+  any amount; the only effects are those of §7.4 and, with `[pki]`, certificate validity
+  (section 4.7).
+- With `[pki]`: the CA private key is held offline by the operator and every trusted CA
+  key passed the checks of §4.2.
 - The deployment repository, the secrets store and the operator's workstation are not
   compromised; a compromise there is a compromise of every key.
 - Private keys are generated by `kekkai keygen` from the host's CSPRNG and never reused
@@ -352,3 +453,14 @@ NAT traversal and relaying. The parts no published analysis covers, in order of 
 5. §12.2 and §12.5: candidate admission and the rediscovery triggers: bounded memory,
    bounded queries, and that only authenticated packets move an endpoint.
 6. §16 and §17: that the new drop conditions are listed and every new state is bounded.
+
+## 10. What reviewers should look at (gate 3, v1.0 part)
+
+1. §4.2: the certificate codec (canonical TLV, field rules, size bound), the CA key checks.
+2. §4.3: the order of the steps (deny list, static, length, signature before parsing, key
+   binding, validity, prefixes), that every reject is silent, and that strict Ed25519
+   verification is exactly what `certificate.json` requires.
+3. §7.6 and §7.7: the initiator's verification of message 2, and that a node without
+   `[pki]` is byte-identical to v0 (§4.5).
+4. §4.4 and §4.1: the bounded peer table, eviction, re-verification, address precedence,
+   reload of the deny list and CA keys, and the expiry bound on live sessions.

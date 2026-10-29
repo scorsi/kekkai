@@ -118,7 +118,7 @@ fn no_json_number_above_2_pow_53() {
             files += 1;
         }
     }
-    assert_eq!(files, 7, "every vector file is checked");
+    assert_eq!(files, 8, "every vector file is checked");
 }
 
 // --- keygen.json (§4) ---

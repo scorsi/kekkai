@@ -6,7 +6,8 @@ and for v0.5 (2026-10-21: §12.3 relay fallback and direct retry, §12.4, §13.2
 budget, §14, §16, §17), the version submitted to review gate 2, and after review gate 2
 (2026-10-22, ADR 0021: §12.2 validity, §12.3, §12.5, §13.1, §13.2, §17), which it passed,
 and for v0.6 finding 4 (2026-10-22, ADR 0032 proposed: §12.4 keepalives on a change of local
-addresses, §13.1).
+addresses, §13.1), and for v1.0 (ADR 0034: certificates in the handshake, §2, §3, §4.2 to
+§4.5, §7.3, §7.6, §7.7, §11, §16 to §19; not yet reviewed, review gate 3 at the end of v1.2).
 
 This document is the normative description of the protocol spoken by `kekkai-node`,
 `kekkai-lighthouse` and `kekkai-relay`. The code implements this document; a change to the
@@ -15,7 +16,7 @@ protocol is a change here first, then to the code, then to the vectors under
 [`docs/adr/`](../adr/); the attacker classes it answers are in
 [`docs/threat-model.md`](../threat-model.md).
 
-Sections marked **(v0.3)**, **(v0.4)** or **(v0.5)** describe behaviour whose
+Sections marked **(v0.3)**, **(v0.4)**, **(v0.5)** or **(v1.0)** describe behaviour whose
 implementation is accepted in a later milestone; the wire format and registries they use
 are frozen now so that the core never changes its parsers.
 
@@ -60,8 +61,9 @@ Contents
   by the 16-byte tag.
 - Time: **monotonic** time is a suspend-aware monotonic clock of the host; **wall** time is
   UTC as the host knows it. Every duration and deadline in this document is monotonic; the
-  wall clock is used for exactly one purpose, §7.4 (an implementation may sample it more
-  often, but no other decision depends on its value).
+  wall clock is used for exactly two purposes, the handshake timestamp (§7.4) and the
+  validity of certificates (§4.3, v1.0) (an implementation may sample it more often, but no
+  other decision depends on its value).
 - **MUST**, **MUST NOT**, **SHOULD**, **MAY** are used in the RFC 2119 sense.
 - **Drop silently** means: the datagram or packet is discarded, nothing is sent in reaction,
   no state changes except a counter (§16).
@@ -83,7 +85,8 @@ The complete list of primitives. Nothing else is used (ADR 0003).
 | Hash, HKDF, `mac1` | BLAKE2s (RFC 7693) |
 | `cookie_reply` (reserved, §5.6) | XChaCha20-Poly1305 |
 | Handshake timestamp | TAI64N |
-| Signatures | none in v0 (Ed25519 is reserved for v1 certificates) |
+| Signatures | Ed25519 (RFC 8032, pure, no prehash, no RFC 8032 context) with the strict verification of §4.3 step 5, for certificates only (v1.0) |
+| Certificate fingerprint | BLAKE2s-256 of the certificate (§4.2) |
 
 The Noise handshake is implemented by the `snow` crate. Everything outside Noise (`mac1`,
 the zero `mac2` slot, the TAI64N timestamp, the TLV codec, the outer and inner codecs, the
@@ -127,6 +130,14 @@ vectors (§19), because no published analysis covers it (ADR 0021).
 | `MAX_ENDPOINTS` | 16 | §10.5 |
 | `MAX_STAGED_PACKETS` | 128 per peer | §8.7 |
 | Default UDP ports | lighthouse 4800, relay 4801, node 4802 | ADR 0005 |
+| `CERTIFICATE_CONTEXT` | ASCII `kekkai certificate v1` (21 bytes), prefixed to the body before signing | §4.2 |
+| `MAX_CERTIFICATE` | 960 bytes, body and signature | §4.2, §17 |
+| `MAX_CERTIFICATE_ADDRESSES` | 4 | §4.2 |
+| `MAX_CERTIFICATE_GROUPS` | 16 | §4.2 |
+| `MAX_CA_KEYS` | 2 trusted CA keys per party (rotation) | §4.2 |
+| `MAX_CERTIFICATE_PEERS` | 256 by default, configurable (`pki.max_peers`, at least 1) | §4.4, §17 |
+| Certificate lifetime set by the signer | 365 days by default, `not_before` 3600 s before signing | §4.2 |
+| `CERTIFICATE_EXPIRY_WARNING` | 30 days before the party's own `not_after` | §4.2 |
 
 Timer values are WireGuard's (ADR 0008); they are copied so that WireGuard's analyses of
 their interplay apply.
@@ -148,10 +159,12 @@ options (amended 2026-10-21, ADR 0013 amendment of that date).
 - The core receives the private key as an opaque `StaticKey` value from the IO layer, never
   a path (ADR 0017).
 - **Identity verification** is a function `verify(static_public_key, handshake_tlvs) →
-  accept | reject` consulted by the handshake (§7.6). v0: accept iff the key is in the
-  party's configured list (a node: peers, lighthouses and relays; a lighthouse or a relay:
-  its peer list). The list is a replaceable value (ADR 0004): a reload replaces it without
-  touching existing sessions of keys that remain listed.
+  peer | reject` consulted by the handshake (§7.6, and with a PKI §7.7). Without a `[pki]`
+  section (v0 behaviour, §4.5): accept iff the key is in the party's configured list (a
+  node: peers, lighthouses and relays; a lighthouse or a relay: its peer list), and the peer
+  is that list entry. With `[pki]` (v1.0): §4.3, which may also admit a key listed nowhere
+  by its certificate. The lists are replaceable values (ADR 0004): a reload replaces them
+  without touching existing sessions of keys that remain listed.
 
 Vectors: [`vectors/keygen.json`](vectors/keygen.json).
 
@@ -234,12 +247,186 @@ Everything else in the file needs a **restart**; a reload that changes it logs
 | node | `[firewall] udp_flows_max` | resizing the table empties it (§15) |
 | lighthouse, relay | `[service]` (`private_key_file`, `listen_port`, the relay's `max_bytes_per_second`) | identity and socket, as above; the rate limit stays as set at start |
 | all | `[log]`, `[metrics]` | the log filter and the metrics listener are installed once |
+| node (v1.0) | the presence of `[pki]`, and `[pki] max_peers` | the identity function and the size of the certificate peer table (§4.4) are fixed at start |
+
+**`[pki]` (v1.0).** The CA keys, the party's own certificate, the deny list and the overlay
+prefixes reload. The new own certificate is sent from the next handshake message on. Then,
+against the new values and the wall clock at the reload:
+
+- a peer whose key is in the deny list, static or certificate peer, is a **removed key**
+  (above): its sessions are discarded at once;
+- every certificate peer (§4.4) is verified again with its stored certificate (§4.3 steps 1
+  and 4 to 9); one that fails is a removed key;
+- a key that became statically listed leaves the certificate peer table, as a role change;
+  a static key that left the lists may later be admitted by its certificate, as a new key.
 
 The Nix modules derive their triggers from this table (ADR 0026): a change of the lists
 alone reloads, any other change restarts. A successful reload logs
 `reloaded{peers,added,removed,changed}` at `info` (counts only, also on a lighthouse and a
 relay, ADR 0012); under systemd it is framed by `RELOADING=1` and `READY=1`. The bounds of
 §17 do not change: every per-key table follows the list.
+
+### 4.2 Certificates (v1.0)
+
+A certificate binds a static public key to a name, overlay addresses, groups and a
+validity interval, under the signature of a certification authority (CA) key (ADR 0034).
+
+```
+certificate = body || signature                       (65 to MAX_CERTIFICATE bytes)
+body        = TLV list (§6) against the certificate registry (§18.6)
+signature   = Ed25519-Sign(CA private key, CERTIFICATE_CONTEXT || body)    (64 bytes)
+fingerprint = BLAKE2s(certificate)                     (32 bytes)
+```
+
+The signature is always the last 64 bytes, `R (32) || S (32, little endian)` as in RFC
+8032; the body is everything before it. There is no version field (the context string
+versions the signature) and no issuer field: a verifier tries each trusted CA key.
+
+Fields (§18.6; every multi-byte integer big endian, §1):
+
+| Type | Field | Value | Required |
+| --- | --- | --- | --- |
+| 1 | `name` | 1 to 63 bytes from `[a-z0-9-]`, first and last byte not `-` | yes |
+| 2 | `public_key` | 32 bytes, the node's X25519 static public key (§4) | yes |
+| 3 | `addresses` | `n × 16` bytes, `1 ≤ n ≤ MAX_CERTIFICATE_ADDRESSES`, strictly increasing as 16-byte strings (no duplicate); an address in `::ffff:0:0/96` is the IPv4 address it maps (a `/32`), any other an IPv6 `/128` | yes |
+| 4 | `groups` | `len (1) \|\| group`, repeated, `1 ≤ count ≤ MAX_CERTIFICATE_GROUPS`; each group 1 to 32 bytes of the `name` charset and rule; strictly increasing (bytewise, a proper prefix sorts first) | no |
+| 5 | `not_before` | `u64` Unix seconds (8 bytes) | yes |
+| 6 | `not_after` | `u64` Unix seconds (8 bytes) | yes |
+
+**Parsing** a body follows §6 (canonical order, truncation, critical bit, a known type with
+a wrong value length) with the certificate registry. Beyond §6, the body is **malformed**
+when a required field is missing, when a field breaks the rule of its row (including a
+`groups` value that is empty or whose length byte is zero or runs past the value), or when
+it holds an unknown critical TLV. An unknown non-critical TLV, type 0 included, is skipped;
+it is still covered by the signature, so nobody but the CA can add or remove one. Nothing
+else is checked here: the relation between the fields and the verifier's clock, key and
+prefixes is §4.3.
+
+**CA keys.** A CA key is a 32-byte Ed25519 public key `A`, text form as keys (§4). A party
+trusts at most `MAX_CA_KEYS`, configured in `[pki]` (ADR 0016). The IO layer refuses, at
+start and at reload, a CA key that is not 32 bytes, that does not decode under RFC 8032
+§5.1.3 (which rejects `y ≥ p` and a zero `x` with the sign bit set), or whose point has small
+order (`[8]A` is the identity): `bad_ca_key` (§18.7). `ed25519-dalek`'s
+`VerifyingKey::from_bytes` accepts non-canonical encodings, so this check is the party's
+own; it is what makes step 5 of §4.3 reject a non-canonical `A`.
+
+**Signer** (`kekkai cert sign`, ADR 0034; the CA private key is the 32-byte RFC 8032 seed):
+writes the known fields only, in registry order, with sorted addresses and groups; sets
+`not_before` to the signing time minus 3600 s and `not_after` to the signing time plus the
+lifetime (365 days by default); refuses a field that breaks its rule, `not_before ≥
+not_after`, and a certificate above `MAX_CERTIFICATE`. RFC 8032 signatures are
+deterministic: the same body and CA key always give the same certificate. Text form of a
+certificate: standard base64 with padding, one line.
+
+**Own certificate.** A party with `[pki]` holds one certificate for its own static key and
+sends it in every handshake message (§7.3). The IO layer refuses, at start and at reload, an
+own certificate that fails §4.3 steps 4 to 7 and 9 against the party's own public key and
+CA keys, or, on a node, whose addresses are not exactly the node's own addresses. Its
+validity is not checked there: a party whose own certificate has expired still starts and
+serves its static peers; certificate peers refuse it. From `CERTIFICATE_EXPIRY_WARNING`
+before its `not_after` the party warns (`certificate-expiring`, ADR 0019, 0034).
+
+Vectors: [`vectors/certificate.json`](vectors/certificate.json).
+
+### 4.3 Identity function with a PKI (v1.0)
+
+With `[pki]`, `verify(key, tlvs)` returns a **peer record** or a **reject reason** (§18.7).
+A record has a `source`: `static` (the configured entry) or `certificate`, then also the
+certificate's `name`, `addresses`, `groups`, `not_after` and fingerprint. `tlvs` is the
+handshake TLV list already parsed against §18.3; `certificate` below is the value of its
+type 2 TLV, if any. The steps run in this order and the first that fails names the reason:
+
+1. **Deny list.** If `key` is in `[pki] revoked`, or a `certificate` is present and its
+   fingerprint, computed over the value as received before any other check, is in `[pki]
+   revoked`: `revoked`. Revocation beats a static entry and applies to any key presenting
+   a revoked certificate. Deny-list entries are 32-byte values in the key text form (§4);
+   one list holds both keys and fingerprints.
+2. **Static.** If `key` is in the party's configured lists: return its entry, source
+   `static`. The certificate is not looked at further.
+3. **Presence.** No `certificate`: `no_certificate`.
+4. **Length.** `65 ≤ len(certificate) ≤ MAX_CERTIFICATE`, else `bad_length`.
+5. **Signature.** With `body` and `signature = R || S` split as in §4.2, accept if the
+   strict verification holds under at least one trusted CA key `A`:
+   - `S`, read as a 256-bit little-endian integer, is below the group order `L`;
+   - `R` decodes under RFC 8032 §5.1.3 and its point is not of small order;
+   - `A` is not of small order (its encoding was checked at load, §4.2);
+   - with `k = SHA-512(R || A || CERTIFICATE_CONTEXT || body) mod L`, the encoding of
+     `[S]B − [k]A` equals the 32 bytes of `R` (the cofactorless equation).
+
+   Otherwise `bad_signature`. This is `ed25519-dalek` 2's `VerifyingKey::verify_strict`
+   without the `legacy_compatibility` feature; the cofactored equation, a reduced `S` alone
+   or a ZIP-215 decoding are not acceptable substitutes (the vectors include signatures each
+   of them accepts). A certificate of another CA and a forged one are indistinguishable:
+   both are `bad_signature`. The body reaches the parser only after its signature verified,
+   so the parser of §4.2 sees CA-signed bytes only.
+6. **Body.** Parse the body (§4.2): `malformed` on failure.
+7. **Key binding.** `public_key` MUST equal `key`, the static key the Noise handshake
+   authenticated: else `wrong_key`. A certificate is public; this step is what makes it
+   useless without the matching private key.
+8. **Validity.** With `now` the wall clock in whole Unix seconds (rounded down): `now <
+   not_before` is `not_yet_valid`; `now ≥ not_after` is `expired`. The interval is
+   `[not_before, not_after)`; an empty one is never valid. No skew allowance on the
+   verifier: the signer's one-hour back-dating absorbs it at the start, and nothing extends
+   the end.
+9. **Prefixes.** Every certificate address MUST lie inside one of the `[pki] prefixes`:
+   else `address_outside_prefixes`.
+10. Return the record, source `certificate`.
+
+The responder calls it on message 1 (§7.6 step 2), the initiator on message 2 (§7.7 step
+3). Every reject is silent (§16) and counted by reason; it logs at `debug` at most, never
+the certificate or its name. A message 1 whose Noise read succeeded costs at most
+`MAX_CA_KEYS` Ed25519 verifications beyond v0.
+
+v1.0 defines `[pki]` for nodes. Lighthouses and relays admit nodes by certificate with the
+same function from v1.1 (ADR 0034); until then they have no `[pki]` and behave as §4.5.
+
+### 4.4 Certificate peers (v1.0)
+
+- **Table.** A node with `[pki]` keeps the peers admitted by certificate in a table of at
+  most `MAX_CERTIFICATE_PEERS` entries keyed by static public key, beside its configured
+  lists. An entry holds the record, the certificate, the instant of its last successful
+  verification, and everything a configured peer has: the session slots, in-flight
+  handshake and staged packets of §7 and §8, the §12 state and `last_timestamp` (§7.4).
+- **Admission.** When `verify` accepts a message 1 with a certificate record for a key not
+  in the table, the key is admitted (§7.6 step 3a). If the table is full, the entry with the
+  oldest last verification among those with no session in any slot and no in-flight
+  handshake is evicted, as a **removed key** of §4.1 (its `last_timestamp` goes with it, so
+  its message 1 captured before can be replayed once, as after a restart). If every entry
+  has a session or a handshake, the message 1 is dropped silently (`peer_table_full`).
+  Only message 1 admits: an initiator talks only to keys it already has.
+- **Re-verification.** Every handshake verifies again, message 1 from the peer as message 2
+  of a handshake towards it. An accepted record replaces the stored one and the
+  certificate with it; changed `addresses` and `groups` apply as **kept key, changed
+  fields** of §4.1. A rejected handshake changes nothing in the entry.
+- **Expiry of live sessions.** No handshake completes once the verifier's wall clock has
+  reached `not_after` (step 8), and every session is discarded `REJECT_AFTER_TIME` after its
+  creation whatever it carries (§8.5). A session made under a certificate therefore ends at
+  most `REJECT_AFTER_TIME` after that certificate's `not_after` on the verifier's clock; the
+  rekey of §8.6 fails and the staged packets are dropped at abandonment (§7.9). No other
+  timer acts on `not_after`. A revocation acts at once through the reload (§4.1).
+- **Routing.** A certificate peer's addresses enter the routing table (§11) at admission
+  and leave it with the entry. An address that is one of the node's own or a configured
+  peer's is never given to a certificate peer (the peer is admitted all the same; its
+  packets from that address fail §11). Between two certificate peers claiming one address,
+  the one whose certificate has the later `not_before` holds it; on equal `not_before` the
+  current holder keeps it. A peer that loses an address loses it as in §4.1.
+- **Routes in the kernel.** A node with `[pki]` routes each of its `[pki] prefixes` to the
+  tunnel interface, at start and at reload, beside the host routes of its configured
+  peers; it adds no route per certificate peer. A packet for an address inside them that
+  no peer holds is dropped as §11 "no match" (discovery by address is v1.1).
+- **Firewall and roles.** A certificate peer is a "peer" for §10.2 (it may send
+  `ip_packet`), never a lighthouse or a relay. It has no `allow_inbound` in v1.0: the
+  default of §15 applies (ICMP and replies to flows the node opened); group rules are v1.2.
+
+### 4.5 A party without `[pki]`
+
+A party without a `[pki]` section behaves exactly as v0 on the wire and in its state:
+`verify` is the configured-list lookup, §7.7 does not call it, the party sends no
+`certificate` TLV (message 1 stays 151 bytes, message 2 92), treats a received one as an
+unknown non-critical TLV (skipped, never parsed or hashed), reads the wall clock only for
+§7.4, and has no certificate peer table. A party with `[pki]` sends its certificate to every
+peer, including those without `[pki]`, which skip it; a v0 party and a v1 party with each
+other's static keys interoperate (wire version 1, ADR 0024).
 
 ## 5. Outer messages
 
@@ -352,7 +539,8 @@ Vectors: [`vectors/wire.json`](vectors/wire.json) (`outer_headers`),
 
 ## 6. TLV encoding
 
-Used by handshake payloads (§7.3) and by the lighthouse messages (§10.5).
+Used by handshake payloads (§7.3), the lighthouse messages (§10.5) and certificate bodies
+(§4.2).
 
 ```
 type (1) | length (2) | value (length)
@@ -459,10 +647,13 @@ Both payloads are TLV lists (§6) against the handshake TLV registry (§18.3).
   without a timestamp TLV is rejected (responder-side rule, not a wire flag). The timestamp
   TLV is sent **without** the critical bit.
 - Message 2 in v0: the empty list (`enc_payload` is the 16-byte tag alone).
-- v1 will add a `certificate` TLV (type 2, **non-critical**) to both messages: a v0 receiver
-  skips it and authenticates on the static key alone; a v1 receiver's identity function
-  decides whether its absence is a rejection. Requiring a certificate is receiver policy,
-  never a wire flag (ADR 0007).
+- **(v1.0)** A party with `[pki]` adds its own certificate (§4.2) as the `certificate` TLV
+  (type 2, **non-critical**) to every message 1, after the timestamp, and to every message
+  2, where it is the only TLV. A party without `[pki]` never sends it and skips it on
+  receipt (§4.5); a party with `[pki]` hands it to `verify` (§4.3), which decides whether
+  its absence is a rejection. Requiring a certificate is receiver policy, never a wire flag
+  (ADR 0007). Sizes: message 1 is `151 + 3 + len(certificate)` bytes, message 2 `92 + 3 +
+  len(certificate)`, at most 1114 and 1055 (§17).
 
 ### 7.4 Timestamp and anti-replay of message 1
 
@@ -485,8 +676,8 @@ Responder rule: for each static key it has accepted a message 1 from, the respon
 `last_timestamp` (12 bytes, initially all zero). A message 1 whose timestamp is not
 **bytewise strictly greater** (`memcmp`) than `last_timestamp` for that key is dropped
 silently. `last_timestamp` is updated only when message 1 is fully accepted (§7.6 step 8).
-The table is bounded by the peer list (one entry per listed key) and survives session
-expiry; it is lost on restart, which only means a replayed message 1 captured before the
+The table is bounded by the peer list (one entry per listed key, and per certificate peer,
+§4.4) and survives session expiry; it is lost on restart, which only means a replayed message 1 captured before the
 restart is accepted once (WireGuard's accepted property).
 
 The receiver applies no range check to either field: the 12 bytes are an opaque sequence
@@ -525,11 +716,17 @@ After §5.6, for a message that arrived on path `P` (§12.1):
    (static decryption, payload decryption) drops silently.
 2. Call `verify(initiator_static, tlvs)` (§4) after parsing the TLV list against the
    handshake registry: a parse error, an unknown critical TLV or a rejection drops silently.
-   In v0 this is the peer-list lookup; an unlisted key gets no answer.
-3. The timestamp TLV MUST be present; apply the rule of §7.4. A failure drops silently.
+   Without `[pki]` this is the peer-list lookup and an unlisted key gets no answer; with
+   `[pki]` it is §4.3, and a certificate peer (§4.4) is verified again here.
+3. The timestamp TLV MUST be present; apply the rule of §7.4 (a key not yet in the
+   certificate peer table has an all-zero `last_timestamp`). A failure drops silently.
    Steps 2 and 3 run after step 1 because the static key is known only after decryption.
-4. Pick a `sender_index` (§7.5). Build message 2 (empty TLV list) with Noise
-   `write_message`, then `mac1` keyed on the initiator's static public key, zero `mac2`.
+   3a. **(v1.0)** If `verify` returned a certificate record for a key not in the
+   certificate peer table, admit it (§4.4); a full table with no evictable entry drops
+   silently (`peer_table_full`). Steps 4 to 8 cannot fail.
+4. Pick a `sender_index` (§7.5). Build message 2 (empty TLV list, or the party's
+   `certificate` TLV with `[pki]`, §7.3) with Noise `write_message`, then `mac1` keyed on
+   the initiator's static public key, zero `mac2`.
 5. `Split()`; create a session (§8.3) in the **next** slot of that peer with: receiving key
    `k_i2r`, sending key `k_r2i`, local index = our `sender_index`, remote index = the
    initiator's `sender_index`, `created = now`, `confirmed = false`, `role = responder`,
@@ -537,7 +734,8 @@ After §5.6, for a message that arrived on path `P` (§12.1):
 6. Send message 2 on `P` (directly to the datagram's source, or wrapped for the relay it
    came through, §14).
 7. If `P` is direct, set the peer's endpoint to the datagram's source address (§12.4).
-8. Store `last_timestamp` for this static key.
+8. Store `last_timestamp` for this static key; for a certificate peer, store the record
+   and certificate `verify` returned and the instant (§4.4).
 
 A responder does not retransmit message 2; if it is lost, the initiator's retransmission
 produces a new one. A message 1 is processed even when a confirmed session with that peer
@@ -557,8 +755,13 @@ After §5.6:
    successful Noise read leaves a Noise state that has consumed message 2 and can no longer
    complete; it produces no session and no output, and only the retransmission (a fresh
    message 1, §7.9) recovers.
-3. `verify` is not called again: the responder's identity is the configured static key the
-   handshake was built against and `IK` authenticates it.
+3. Without `[pki]`, `verify` is not called again: the responder's identity is the
+   configured static key the handshake was built against and `IK` authenticates it.
+   **(v1.0)** With `[pki]`, call `verify(responder_static, tlvs)` (§4.3): a configured
+   responder returns its entry (unless denied); a certificate peer's message 2 MUST carry a
+   certificate that verifies and binds that key, and its record replaces the stored one
+   (§4.4). A rejection is the TLV failure of step 2: no session, no output, only the
+   retransmission recovers.
 4. `Split()`; create a session in the **current** slot (the former current moves to
    **previous**, the former previous is discarded) with: sending key `k_i2r`, receiving key
    `k_r2i`, local index = our `sender_index`, remote index = the responder's
@@ -886,7 +1089,8 @@ datagrams they produced and the endpoint update of §12.4.
 | `relay_forward` | no | no | from any listed key, direct sessions only |
 | `relay_forwarded` | a configured relay, direct sessions only | no | no |
 
-"Peers" are entries of the node's `[[peers]]` list; a lighthouse or relay is not a peer
+"Peers" are entries of the node's `[[peers]]` list and, from v1.0, its certificate peers
+(§4.4); a lighthouse or relay is not a peer
 for `ip_packet` even when the same host also runs a node (it has its own key). Anything
 else in the table drops silently. A party configured as both peer and relay of another is
 not supported in v0.
@@ -943,7 +1147,8 @@ Vectors: [`vectors/wire.json`](vectors/wire.json) (`inner_messages`).
 
 - A node has a routing table `overlay prefix → peer`, built from the configuration: each
   peer's `addresses`, which are `/32` and `/128` only in v0. The node's own addresses are
-  not in the table.
+  not in the table. **(v1.0)** Certificate peers add their certificate addresses, under the
+  precedence of §4.4.
 - **Outbound**: an IP packet from the tunnel interface is looked up by destination. No
   match: drop (not silently towards the host: the IO layer MAY let the kernel generate the
   usual unreachable error; the core only reports the drop). Match: §15 records outbound UDP
@@ -1364,9 +1569,10 @@ ICMP error induced by the core, no state change other than a counter):
 - §5.6: datagram too short, too long, unknown version, unknown or reserved type, wrong
   length for the type, bad `mac1`.
 - §7.6: Noise failure in message 1, TLV parse error, unknown critical TLV, identity rejected
-  (unlisted key), missing or stale timestamp.
+  (unlisted key; with `[pki]`, every reject reason of §4.3), missing or stale timestamp, a
+  full certificate peer table (§4.4).
 - §7.7: unknown `receiver_index`, Noise failure in message 2, TLV parse error, unknown
-  critical TLV.
+  critical TLV, identity rejected (with `[pki]`, §4.3).
 - §8.2: unknown `receiver_index`, counter rejected by the window, AEAD failure.
 - §10: unassigned inner type, malformed body, inner type not accepted from this sender or
   on this path (§10.2), nested relaying.
@@ -1404,7 +1610,10 @@ Everything the core allocates is bounded by configuration (ADR 0027):
 | In-flight handshakes | 1 per peer |
 | Staged packets | `MAX_STAGED_PACKETS` = 128 per peer |
 | Replay window | 8192 bits per receiving session |
-| `last_timestamp` table | one entry per listed key |
+| `last_timestamp` table | one entry per listed key and per certificate peer |
+| Certificate (v1.0) | `MAX_CERTIFICATE` = 960 bytes; message 1 with it at most 1114 bytes, message 2 at most 1055, both under `MAX_RELAY_PAYLOAD` when relayed |
+| Certificate peers (v1.0) | `MAX_CERTIFICATE_PEERS` entries (§4.4), each with the per-peer bounds of this table; CA keys `MAX_CA_KEYS` |
+| Ed25519 verifications per message 1 or 2 | at most `MAX_CA_KEYS`, only after a successful Noise read (§4.3) |
 | Endpoints in a TLV | `MAX_ENDPOINTS` = 16; local endpoints sent: `MAX_LOCAL_ENDPOINTS` = 8 |
 | Candidates per in-flight handshake | static endpoints + 1 last known + `MAX_ENDPOINTS` from each lighthouse reply or punch, deduplicated, at most 32; admission rule in §12.2 |
 | Firewall table | `UDP_FLOWS_MAX` = 4096 entries (about 256 KB) |
@@ -1459,7 +1668,7 @@ No protocol-level fragmentation; TCP MSS is clamped on the interface by the IO l
 | Type | Name | Value | In |
 | --- | --- | --- | --- |
 | 1 | `timestamp` | TAI64N (12) | message 1, required in v0, non-critical |
-| 2 | `certificate` | reserved for v1 | both messages, non-critical |
+| 2 | `certificate` | a certificate (§4.2), 65 to `MAX_CERTIFICATE` bytes | both messages, non-critical; sent and read only with `[pki]` (v1.0, §4.5) |
 | 3–127 | — | unassigned | |
 | 128–255 | — | unassigned critical types; none assigned in v0, so all are unknown critical (§6). `t \| 0x80` is not a variant of `t` | |
 
@@ -1484,6 +1693,40 @@ No protocol-level fragmentation; TCP MSS is clamped on the interface by the IO l
 A new wire version is a new line here and a new prologue value; nodes with different wire
 versions ignore each other silently (ADR 0024).
 
+### 18.6 Certificate TLV types (v1.0)
+
+| Type | Name | Value | Required |
+| --- | --- | --- | --- |
+| 0 | — | never assigned; skipped as unknown non-critical (§6) | |
+| 1 | `name` | 1 to 63 bytes, `[a-z0-9-]`, no leading or trailing `-` | yes |
+| 2 | `public_key` | 32 bytes | yes |
+| 3 | `addresses` | `16 × n` bytes, `1 ≤ n ≤ 4`, strictly increasing | yes |
+| 4 | `groups` | `(len (1) \|\| group) × n`, `1 ≤ n ≤ 16`, strictly increasing | no |
+| 5 | `not_before` | `u64` Unix seconds | yes |
+| 6 | `not_after` | `u64` Unix seconds | yes |
+| 7–127 | — | unassigned, skipped (still signed) | |
+| 128–255 | — | unassigned critical types; a certificate holding one is `malformed` | |
+
+### 18.7 Certificate reject reasons (v1.0)
+
+The reasons `verify` (§4.3) and the admission of §4.4 return, in the order the steps check
+them, and the configuration error of §4.2. They are counter labels and vector `result`
+values; none is ever sent.
+
+| Reason | Step | Meaning |
+| --- | --- | --- |
+| `revoked` | §4.3 step 1 | the key, or the fingerprint of the presented certificate, is in the deny list |
+| `no_certificate` | step 3 | a key listed nowhere presented no certificate |
+| `bad_length` | step 4 | certificate shorter than 65 or longer than `MAX_CERTIFICATE` bytes |
+| `bad_signature` | step 5 | no trusted CA key verifies it strictly: another CA, a forged or altered certificate, a non-canonical or malleated signature, a small-order or non-canonical `R` |
+| `malformed` | step 6 | the signed body does not parse (§4.2) |
+| `wrong_key` | step 7 | `public_key` is not the Noise static key of the handshake |
+| `not_yet_valid` | step 8 | wall clock before `not_before` |
+| `expired` | step 8 | wall clock at or after `not_after` |
+| `address_outside_prefixes` | step 9 | an address outside every `[pki] prefixes` entry |
+| `peer_table_full` | §4.4 admission | the certificate peer table is full and no entry is evictable |
+| `bad_ca_key` | §4.2, configuration | a configured CA key of the wrong length, non-canonical, or of small order; the configuration is refused |
+
 ## 19. Test vectors
 
 JSON files under [`vectors/`](vectors/), byte strings as lowercase hex. **Exact integers**:
@@ -1503,6 +1746,7 @@ tests (`keygen.json`), both run by `nix flake check` (ADR 0020).
 | `handshake.json` | a complete kekkai handshake with fixed keys, indices and timestamp: both datagrams byte for byte, `mac1` keys and values, transport keys, the first data packets of both directions, and datagrams that must be rejected with the reason | §5, §7, §8.2 |
 | `wire.json` | outer header accept and drop cases, endpoint encoding, every inner message encoding, the registries | §5.6, §10, §18 |
 | `replay.json` | a counter sequence with the accept or reject outcome of each | §8.4 |
+| `certificate.json` | certificate encoding, text form and fingerprint from fixed CA seeds (`sign`); the identity function with a PKI in a fixed context, with the record or the reject reason of §18.7 (`verify`), including Ed25519 edge cases; the CA keys a configuration accepts (`ca_keys`) | §4.2, §4.3 |
 
 v0.5 adds no codec: `relay_forward` and `relay_forwarded` were frozen with the registries in
 v0.1 and their encodings are in `wire.json` (`inner_messages`). The token bucket of §13.2
@@ -1524,6 +1768,17 @@ published Noise vector is never regenerated.
 
 Rejection vectors name a `reason`; implementations are free in how they report it, but the
 packet MUST produce no output (§16).
+
+**`certificate.json` (v1.0)** was produced before any Rust certificate code by a separate
+implementation of §4.2 and §4.3 (Python 3 standard library only, Ed25519 from the RFC 8032
+§6 reference algorithm, self-checked against RFC 8032 §7.1 tests 1 and 2; kept out of the
+repository, ADR 0002), from seeds `BLAKE2s("kekkai certificate vectors " || label)` and the
+`keygen.json` node keys, twice with identical output. Each Ed25519 edge case was checked to
+be accepted by a permissive verifier (one of: `S` below `2^253` only, ZIP-215 decoding, the
+cofactored equation) and rejected by §4.3 step 5. The `verify` and `ca_keys` inputs,
+certificates included, are inputs: an implementation recomputes `result` and `peer` from
+them; `sign` outputs are recomputed from the seed and fields. Once the core loads the file,
+it is the generator of record as for the other files.
 
 **Independent reproduction.** Because the Rust suite is the generator of record, the glue
 vectors cannot by themselves detect a wrong implementation after a regeneration; the only
