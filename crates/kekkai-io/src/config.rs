@@ -395,8 +395,11 @@ impl NodeConfig {
     /// Spec §4.1: what a reload runs with, `new`'s lists and `[pki]` values with this file's
     /// restart-only sections, the presence of `[pki]` and its `max_peers` included, validated
     /// as at start (an address moved from the node to a peer, or an IPv6 peer under a
-    /// running MTU below 1280, is refused although `new` alone is valid).
-    pub fn with_lists(&self, new: Self) -> Result<Self, String> {
+    /// running MTU below 1280, is refused although `new` alone is valid), with the `[pki]`
+    /// to install. `new` is first checked whole, its own certificate included, so an invalid
+    /// file fails the reload even where only a restart would apply it (a `[pki]` turned on).
+    pub fn with_lists(&self, new: Self, own: &PublicKey) -> Result<(Self, Option<Pki>), String> {
+        new.own_pki(own)?;
         let pki = match (&self.pki, new.pki) {
             (Some(running), Some(new)) => Some(PkiSection {
                 max_peers: running.max_peers,
@@ -417,7 +420,8 @@ impl NodeConfig {
         effective
             .validate()
             .map_err(|e| format!("with the running restart-only sections: {e}"))?;
-        Ok(effective)
+        let pki = effective.own_pki(own)?;
+        Ok((effective, pki))
     }
 
     /// Parses and validates a node file: what `kekkai-node config check` runs.
@@ -576,6 +580,12 @@ pub fn prefix(text: &str) -> Result<Route, String> {
     let (ip, length) = text.split_once('/').ok_or_else(bad)?;
     let address: IpAddr = ip.parse().map_err(|_| bad())?;
     let length: u8 = length.parse().map_err(|_| bad())?;
+    // Containment is family-strict (§4.3 step 9): an IPv4 prefix is written as IPv4.
+    if matches!(address, IpAddr::V6(a) if a.to_ipv4_mapped().is_some()) {
+        return Err(format!(
+            "pki.prefixes: {text}: an IPv4-mapped prefix, write it as IPv4"
+        ));
+    }
     let (bits, width) = match address {
         IpAddr::V4(a) => (u128::from(u32::from(a)), 32),
         IpAddr::V6(a) => (u128::from(a), 128),
@@ -897,13 +907,13 @@ listen = "127.0.0.1:9481"
         let parse = |text: String| NodeConfig::parse(&text).unwrap();
         let running = parse(file("10.0.0.1/32", 1280, "10.0.0.2/32"));
         let moved = parse(file("10.0.0.9/32", 1280, "10.0.0.1/32"));
-        let err = running.with_lists(moved).unwrap_err();
+        let err = running.with_lists(moved, &own()).unwrap_err();
         assert!(err.contains("appears twice"), "{err}");
         let running = parse(file("10.0.0.1/32", 1200, "10.0.0.2/32"));
         let v6 = parse(file("10.0.0.1/32", 1280, "fd00::2/128"));
-        assert!(running.with_lists(v6).unwrap_err().contains("IPv6"));
+        assert!(running.with_lists(v6, &own()).unwrap_err().contains("IPv6"));
         let fine = parse(file("10.0.0.9/32", 1280, "10.0.0.3/32"));
-        let effective = running.with_lists(fine).unwrap();
+        let (effective, _) = running.with_lists(fine, &own()).unwrap();
         assert_eq!(
             effective.addresses(),
             running.addresses(),
@@ -1005,6 +1015,11 @@ listen = "127.0.0.1:9481"
             ("10.0.0.0/16".into(), "10.0.0.0/33".into(), "no host bit"),
             ("fd00::/64".into(), "fd00::".into(), "pki.prefixes"),
             (
+                "10.0.0.0/16".into(),
+                "::ffff:10.0.0.0/112".into(),
+                "IPv4-mapped prefix",
+            ),
+            (
                 good.clone(),
                 "not base64!".into(),
                 "pki.certificate: not standard base64",
@@ -1046,6 +1061,10 @@ listen = "127.0.0.1:9481"
         assert!(own_err(other_ca).contains("pki.certificate: bad_signature"));
         let outside = certificate(7, &["10.1.0.1", "fd00::1"], u64::MAX);
         assert!(own_err(outside).contains("address_outside_prefixes"));
+        // Family-strict (§4.3 step 9): `::/0` routes no IPv4, so it certifies none.
+        let v4_in_v6 = pki_file(&good, "").replace("\"10.0.0.0/16\", \"fd00::/64\"", "\"::/0\"");
+        let c = NodeConfig::parse(&v4_in_v6).unwrap();
+        assert!((c.own_pki(&own()).unwrap_err()).contains("address_outside_prefixes"));
         let fewer = certificate(7, &["10.0.0.1"], u64::MAX);
         assert!(own_err(fewer).contains("not exactly node.addresses"));
         assert!(own_err("AAAA".into()).contains("bad_length"));
@@ -1071,26 +1090,25 @@ listen = "127.0.0.1:9481"
         assert_eq!(on.restart_sections(&resized), ["pki"]);
         assert_eq!(plain.restart_sections(&on), ["pki"]);
         assert_eq!(on.restart_sections(&plain), ["pki"]);
-        let effective = on.with_lists(resized).unwrap();
+        let (effective, _) = on.with_lists(resized, &own()).unwrap();
         let section = effective.pki.unwrap();
         assert_eq!(
             (section.max_peers, section.revoked.len()),
             (256, 1),
             "max_peers kept, rest applied"
         );
-        assert!(
-            plain
-                .with_lists(on.with_lists(revoked).unwrap())
-                .unwrap()
-                .pki
-                .is_none(),
-            "stays off"
-        );
-        assert_eq!(
-            on.with_lists(parse(&plain_text())).unwrap().pki,
-            on.pki,
-            "stays on"
-        );
+        let (off, pki) = plain.with_lists(revoked, &own()).unwrap();
+        assert!(off.pki.is_none() && pki.is_none(), "stays off");
+        let (still, pki) = on.with_lists(parse(&plain_text()), &own()).unwrap();
+        assert_eq!(still.pki, on.pki, "stays on");
+        assert!(pki.is_some());
+        // §4.1: turning `[pki]` on with an invalid own certificate is an invalid file, even
+        // though the toggle itself waits for a restart: the peer change is not applied.
+        let peer = "[[peers]]\nname = \"b\"\npublic_key = \"PUB\"\naddresses = [\"10.0.0.2/32\"]\n";
+        let peer = peer.replace("PUB", PUB_A);
+        let bad = parse(&format!("{}{peer}", pki_file("AAAA", "")));
+        let err = plain.with_lists(bad, &own()).unwrap_err();
+        assert!(err.contains("pki.certificate: bad_length"), "{err}");
     }
 
     fn plain_text() -> String {

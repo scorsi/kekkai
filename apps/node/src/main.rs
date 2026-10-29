@@ -342,9 +342,8 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
     let result = async {
         let new = load(r.path)?;
         let restart = r.running.restart_sections(&new);
-        let effective = r.running.with_lists(new)?;
         let own = *state.lock().expect("no poison").node.public_key();
-        let pki = effective.own_pki(&own)?;
+        let (effective, pki) = r.running.with_lists(new, &own)?;
         let next = Lists::new(&effective).await?;
         let interface = r.interface;
         set_routes(&mut r.routes, &next.routes(), |route, add| {

@@ -1084,7 +1084,11 @@ fn certificate() {
             certificate: Vec::new(),
             revoked: s.revoked.iter().map(|e| e.parse().unwrap()).collect(),
             prefixes: (s.prefixes.iter())
-                .map(|p| cert::Prefix::new(IpAddr::V6(arr::<16>(&p.address).into()), p.length))
+                // A prefix in `::ffff:0:0/96` is the IPv4 prefix it maps, as an address (§4.2).
+                .map(|p| match cert::address(arr(&p.address)) {
+                    a @ IpAddr::V4(_) => cert::Prefix::new(a, p.length.checked_sub(96)?),
+                    a => cert::Prefix::new(a, p.length),
+                })
                 .collect::<Option<_>>()
                 .unwrap(),
             max_peers: crate::MAX_CERTIFICATE_PEERS,

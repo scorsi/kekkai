@@ -323,36 +323,33 @@ impl FromStr for Revoked {
     }
 }
 
-/// An overlay prefix of `[pki] prefixes`, held over 16-byte addresses: an IPv4 prefix is its
-/// IPv4-mapped form, so that certificate addresses compare in one space (§4.2).
+/// An overlay prefix of `[pki] prefixes`. Containment is family-strict (§4.3 step 9): an
+/// IPv4 address lies only in an IPv4 prefix, an IPv6 address only in an IPv6 prefix, as the
+/// kernel routes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prefix {
-    address: [u8; 16],
+    address: IpAddr,
     length: u8,
 }
 
 impl Prefix {
     /// `None` when `length` exceeds the family's width.
     pub fn new(address: IpAddr, length: u8) -> Option<Self> {
-        let length = match address {
-            IpAddr::V4(_) if length <= 32 => length + 96,
-            IpAddr::V6(_) if length <= 128 => length,
-            _ => return None,
-        };
-        Some(Self {
-            address: octets(address),
-            length,
-        })
+        let width = if address.is_ipv4() { 32 } else { 128 };
+        (length <= width).then_some(Self { address, length })
     }
 
     pub fn contains(&self, address: IpAddr) -> bool {
+        let (a, p, width) = match (address, self.address) {
+            (IpAddr::V4(a), IpAddr::V4(p)) => {
+                (u128::from(a.to_bits()), u128::from(p.to_bits()), 32)
+            }
+            (IpAddr::V6(a), IpAddr::V6(p)) => (a.to_bits(), p.to_bits(), 128),
+            _ => return false,
+        };
         let mask = u128::MAX
-            .checked_shl(128 - u32::from(self.length))
+            .checked_shl(width - u32::from(self.length))
             .unwrap_or(0);
-        let (a, p) = (
-            u128::from_be_bytes(octets(address)),
-            u128::from_be_bytes(self.address),
-        );
         a & mask == p & mask
     }
 }
@@ -461,5 +458,27 @@ impl Pki {
     /// steps 4 to 7 and 9; validity is not checked there.
     pub fn check_own(&self, own: &PublicKey) -> Result<Record, Reject> {
         self.check(&self.certificate, own, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prefix;
+
+    /// §4.3 step 9 is family-strict: `::/0` holds no IPv4 address, `0.0.0.0/0` no IPv6 one.
+    #[test]
+    fn prefix_containment_is_family_strict() {
+        let p = |a: &str, l| Prefix::new(a.parse().unwrap(), l).unwrap();
+        let ip = |a: &str| a.parse().unwrap();
+        assert!(!p("::", 0).contains(ip("10.0.0.1")));
+        assert!(!p("::ffff:0:0", 96).contains(ip("10.0.0.1")));
+        assert!(!p("0.0.0.0", 0).contains(ip("fd00::1")));
+        assert!(p("0.0.0.0", 0).contains(ip("10.0.0.1")));
+        assert!(p("10.1.0.0", 16).contains(ip("10.1.255.1")));
+        assert!(!p("10.1.0.0", 16).contains(ip("10.2.0.1")));
+        assert!(p("fd00:1::", 48).contains(ip("fd00:1::5")));
+        assert!(!p("fd00:1::", 48).contains(ip("fd00:2::5")));
+        assert!(p("::", 0).contains(ip("fd00::1")));
+        assert!(Prefix::new(ip("10.0.0.0"), 33).is_none());
     }
 }

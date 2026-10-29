@@ -320,7 +320,9 @@ own; it is what makes step 5 of §4.3 reject a non-canonical `A`.
 writes the known fields only, in registry order, with sorted addresses and groups; sets
 `not_before` to the signing time minus 3600 s and `not_after` to the signing time plus the
 lifetime (365 days by default); refuses a field that breaks its rule, `not_before ≥
-not_after`, and a certificate above `MAX_CERTIFICATE`. RFC 8032 signatures are
+not_after`, a `not_after` beyond 9999-12-31T23:59:59Z (253402300799, the last second RFC
+3339 writes), and a certificate above `MAX_CERTIFICATE`. A verifier accepts any `u64`;
+`kekkai cert show` prints a later value as raw Unix seconds, marked out of RFC 3339 range. RFC 8032 signatures are
 deterministic: the same body and CA key always give the same certificate. Text form of a
 certificate: standard base64 with padding, one line.
 
@@ -381,7 +383,10 @@ names the reason:
    verifier: the signer's one-hour back-dating absorbs it at the start, and nothing extends
    the end.
 9. **Prefixes.** Every certificate address MUST lie inside one of the `[pki] prefixes`:
-   else `address_outside_prefixes`.
+   else `address_outside_prefixes`. Containment is per family, as the kernel routes: an
+   IPv4 address lies only inside an IPv4 prefix, an IPv6 address only inside an IPv6
+   prefix (`::/0` holds no IPv4 address). The IO layer refuses, at start and at reload, a
+   prefix written in `::ffff:0:0/96`; an IPv4 prefix is written as IPv4.
 10. Return the record, source `certificate`.
 
 The responder calls it on message 1 (§7.6 step 2), the initiator on message 2 (§7.7 step

@@ -6,7 +6,7 @@
 
 use std::error::Error;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -218,14 +218,22 @@ fn cert_sign(options: &[&str], seed: &str, now: u64) -> Result<String, String> {
         not_after: days
             .checked_mul(86_400)
             .and_then(|l| now.checked_add(l))
-            .ok_or("--days: too large")?,
+            .filter(|t| *t <= RFC3339_MAX)
+            .ok_or("--days: not_after beyond 9999-12-31T23:59:59Z")?,
     };
     Ok(cert::to_text(&cert::sign(&seed, &fields)?) + "\n")
 }
 
-/// Unix seconds as UTC RFC 3339 (protojson's form, as `status` prints times).
+/// 9999-12-31T23:59:59Z, the last second RFC 3339 can write (spec §4.2 signer).
+const RFC3339_MAX: u64 = 253_402_300_799;
+
+/// Unix seconds as UTC RFC 3339 (protojson's form, as `status` prints times); a later value
+/// (another signer's) as the raw seconds, marked.
 fn rfc3339(secs: u64) -> String {
-    let seconds = i64::try_from(secs).unwrap_or(i64::MAX);
+    if secs > RFC3339_MAX {
+        return format!("{secs} (Unix seconds, out of RFC 3339 range)");
+    }
+    let seconds = i64::try_from(secs).expect("below RFC3339_MAX");
     prost_reflect::prost_types::Timestamp { seconds, nanos: 0 }.to_string()
 }
 
@@ -276,12 +284,15 @@ fn cert_show(
         public_key_to_text(&fields.public_key),
         public_key_to_text(&fingerprint),
     );
-    // Every address is inside `::/0`: prefixes are the verifying party's, not the CA's.
+    // Every address is inside `0.0.0.0/0` or `::/0`: prefixes are the verifying party's.
     let pki = Pki {
         ca_keys,
         certificate: Vec::new(),
         revoked: Vec::new(),
-        prefixes: vec![Prefix::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0).expect("::/0")],
+        prefixes: vec![
+            Prefix::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).expect("0.0.0.0/0"),
+            Prefix::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0).expect("::/0"),
+        ],
         max_peers: 1,
     };
     let verdict = pki
@@ -580,6 +591,28 @@ mod tests {
             "certificate bad_length"
         );
         assert!(cert_show(&["--ca", "AAAA"], &text, NOW).is_err());
+        // Beyond year 9999: `cert sign` refuses it, `cert show` prints the raw seconds.
+        let err = cert_sign(&sign_args(&node_text, &["--days", "3000000"]), &seed, NOW);
+        assert_eq!(
+            err.unwrap_err(),
+            "--days: not_after beyond 9999-12-31T23:59:59Z"
+        );
+        assert_eq!(rfc3339(RFC3339_MAX), "9999-12-31T23:59:59Z");
+        assert_eq!(
+            rfc3339(RFC3339_MAX + 1),
+            "253402300800 (Unix seconds, out of RFC 3339 range)"
+        );
+        let mut fields = cert::parse_body(&certificate[..certificate.len() - 64]).unwrap();
+        fields.not_after = u64::MAX;
+        let huge = cert::to_text(&cert::sign(&ca_key(&seed).unwrap(), &fields).unwrap());
+        let (shown, verdict) = cert_show(&["--ca", &ca_public], &huge, NOW).unwrap();
+        assert!(
+            shown.contains(
+                "not_after: 18446744073709551615 (Unix seconds, out of RFC 3339 range)\n"
+            ),
+            "{shown}"
+        );
+        assert_eq!(verdict, Ok(()));
     }
 
     fn ca_of(seed: [u8; 32]) -> (String, String) {
