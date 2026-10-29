@@ -1,5 +1,5 @@
 {
-  "description": "Certificates (protocol.md \u00a74.2, \u00a74.3). `sign`: certificate = body || Ed25519(CA seed, context || body); body is the certificate TLV list of the fields, in registry order; fingerprint = BLAKE2s-256(certificate); text is base64. `verify`: the identity function with a PKI, in the context given (trusted CA keys, overlay prefixes as 16-byte address and prefix length, static keys, deny list); `now` is wall-clock Unix seconds; `result` is `ok` or the reject reason of \u00a718.7; `peer` is the record returned on `ok`. `ca_keys`: the CA public keys a configuration accepts. Seeds are BLAKE2s-256('kekkai certificate vectors ' || label); node keys are those of keygen.json.",
+  "description": "Certificates (protocol.md \u00a74.2, \u00a74.3). `sign`: certificate = body || Ed25519(CA seed, context || body); body is the certificate TLV list of the fields, in registry order; fingerprint = BLAKE2s-256(certificate); text is base64. `verify`: the identity function with a PKI, in the context given (trusted CA keys, overlay prefixes as 16-byte address and prefix length, static keys, deny list); `now` is wall-clock Unix seconds; `result` is `ok` or the reject reason of \u00a718.7; `peer` is the record returned on `ok`. `ca_keys`: the CA public keys a configuration accepts. `revoked_entries`: the deny-list entries a configuration accepts. Seeds are BLAKE2s-256('kekkai certificate vectors ' || label); node keys are those of keygen.json.",
   "context": "6b656b6b6169206365727469666963617465207631",
   "max_certificate": 960,
   "cas": [
@@ -240,8 +240,10 @@
       "1d97a47e3d79a208c97184a44f576e6e3041ed3c24fb73fafe7f9f1c5975e07a"
     ],
     "revoked": [
-      "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
-      "3cda0a226b95fcd4cf26e7f664f116d73f3ce44cb559190aed1757a8127b3ea0"
+      "key:hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "cert:PNoKImuV/NTPJuf2ZPEW1z885Ey1WRkK7RdXqBJ7PqA=",
+      "cert:ta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxo=",
+      "key:Oqt8kmowQZjTzfnCY8wuOEwBYfy125IkGN0ZyYDa1dM="
     ],
     "cases": [
       {
@@ -441,6 +443,17 @@
         }
       },
       {
+        "name": "statically listed key, 961-byte certificate is not length-checked",
+        "note": "the length bound is step 4, after step 2; message parsing does not apply it (\u00a718.3)",
+        "static_public": "1d97a47e3d79a208c97184a44f576e6e3041ed3c24fb73fafe7f9f1c5975e07a",
+        "now": "1782864000",
+        "certificate": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "result": "ok",
+        "peer": {
+          "source": "static"
+        }
+      },
+      {
         "name": "revoked key",
         "note": "",
         "static_public": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
@@ -451,12 +464,49 @@
       },
       {
         "name": "revoked fingerprint",
-        "note": "the deny list holds BLAKE2s-256 of this certificate",
+        "note": "the deny list holds `cert:` and the BLAKE2s-256 of this certificate",
         "static_public": "b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a",
         "now": "1782864000",
         "certificate": "0100066e6f64652d63020020b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a03002000000000000000000000ffff0a4d0003fd770000000000000000000000000003050008000000006955b900060008000000006b36ec80070003c0ffee7e7c53d497017291c89b88ab2875e8dc8b045fbf2b6490599ab0eff35c6a049e20cfd1d9a1d8b160adead9f4f6e8f72316bc357e9fd472a993d5eaaeb96e300d",
         "result": "revoked",
         "peer": null
+      },
+      {
+        "name": "key listed only as a cert: entry is not revoked",
+        "note": "a `cert:` entry is matched against fingerprints only",
+        "static_public": "b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a",
+        "now": "1782864000",
+        "certificate": "0100066e6f64652d63020020b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a030010fd770000000000000000000000000003050008000000006955b900060008000000006b36ec80570a00fef771d7af796dccf30154d0f94a6f194a499727b027a8cb0f748580f0d2e597b0d331f160ed908d587b3a394bafe8116e9ff57a304fd260d19b3b560c",
+        "result": "ok",
+        "peer": {
+          "source": "certificate",
+          "name": "node-c",
+          "addresses": [
+            "fd770000000000000000000000000003"
+          ],
+          "groups": [],
+          "not_after": "1798761600",
+          "fingerprint": "27766c07bc22c7649bf3796c2bb9417cd2dffb845918cea4d9ba402c5f748795"
+        }
+      },
+      {
+        "name": "fingerprint listed only as a key: entry is not revoked",
+        "note": "a `key:` entry is matched against static keys only",
+        "static_public": "b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a",
+        "now": "1782864000",
+        "certificate": "0100066e6f64652d63020020b5ae4337925d70b7e7fffab39f5be4057f8b801105ebdf0fb01d7497d729c71a03002000000000000000000000ffff0a4d0003fd770000000000000000000000000003050008000000006955b900060008000000006b36ec804f97e7cc7714ad61670a913fa307298952bcb9ebd96e054725ee9036730717aeffdd4535acaf9cae369c30760e154d68467fa413ba6399153634514c94dc1f0e",
+        "result": "ok",
+        "peer": {
+          "source": "certificate",
+          "name": "node-c",
+          "addresses": [
+            "00000000000000000000ffff0a4d0003",
+            "fd770000000000000000000000000003"
+          ],
+          "groups": [],
+          "not_after": "1798761600",
+          "fingerprint": "3aab7c926a304198d3cdf9c263cc2e384c0161fcb5db922418dd19c980dad5d3"
+        }
       },
       {
         "name": "revoked fingerprint beats a static key",
@@ -975,6 +1025,53 @@
       "note": "",
       "public": "0200000000000000000000000000000000000000000000000000000000000000",
       "result": "bad_ca_key"
+    }
+  ],
+  "revoked_entries": [
+    {
+      "name": "static key",
+      "entry": "key:hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "result": "ok"
+    },
+    {
+      "name": "certificate fingerprint",
+      "entry": "cert:PNoKImuV/NTPJuf2ZPEW1z885Ey1WRkK7RdXqBJ7PqA=",
+      "result": "ok"
+    },
+    {
+      "name": "no prefix",
+      "entry": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "unknown prefix",
+      "entry": "fingerprint:hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "prefix in upper case",
+      "entry": "KEY:hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "space after the prefix",
+      "entry": "key: hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "31 bytes",
+      "entry": "key:hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTg==",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "33 bytes",
+      "entry": "cert:PNoKImuV/NTPJuf2ZPEW1z885Ey1WRkK7RdXqBJ7PqAA",
+      "result": "bad_revoked_entry"
+    },
+    {
+      "name": "hex instead of base64",
+      "entry": "key:8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "result": "bad_revoked_entry"
     }
   ]
 }

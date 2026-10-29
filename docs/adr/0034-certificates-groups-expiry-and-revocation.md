@@ -283,8 +283,9 @@ v1.0 certificates in the handshake → v1.1 discovery by certificate → v1.2 gr
   behaviour (existing tests unchanged); simulation: expiry cuts a live session within
   `REJECT_AFTER_TIME`.
 - **v1.1 — Discovery by certificate.** Lighthouse and relay admission by certificate,
-  certificate storage, query by address, certificate in reply and punch; overlay prefixes
-  routed to the tunnel. *Acceptance*: `nixosTest` `cert-discovery`: D joins with only its
+  certificate storage, query by address, certificate in reply and punch (routing the
+  overlay prefixes to the tunnel moved to v1.0, 2026-10-29: v1.0's test needs A to reply to
+  C). *Acceptance*: `nixosTest` `cert-discovery`: D joins with only its
   own configuration (no change on A, B, lighthouse or relay), A pings D's address and D
   pings A, behind the NATs of `nat-direct`; through the relay as in `nat-relayed`;
   simulation: a lighthouse returning a certificate of another CA, of another address or a

@@ -241,7 +241,7 @@ Not exercised on the real network, covered only by `nixosTest reload` or not at 
 
 **Objective**: a node listed in no configuration reaches a node that trusts its CA, and an expired, foreign or revoked certificate is refused (0034).
 
-**Deliverables**: spec first (certificate format, §4 identity function, §7.6 and §7.7 with the initiator verifying message 2, constants, registries) and the threat model; `certificate.json` vectors including Ed25519 edge cases; in the core, the certificate codec, strict verification (`ed25519-dalek`, 0028) and a bounded peer table; `[pki]` configuration with reload (0016, 0026); `kekkai ca keygen`, `cert sign`, `cert show` in the CLI (0017: CA key age-encrypted, offline); status and log additions (expiry warning and metric); a fuzz target for the codec. The amendments 0034 lists (0004, 0007, 0011, 0012, 0016, 0017, 0021, 0028) are noted in those ADRs as each lands.
+**Deliverables**: spec first (certificate format, §4 identity function, §7.6 and §7.7 with the initiator verifying message 2, constants, registries) and the threat model; `certificate.json` vectors including Ed25519 edge cases; in the core, the certificate codec, strict verification (`ed25519-dalek`, 0028) and a bounded peer table (`max_peers`, 256 by default); `[pki]` configuration with reload (0016, 0026; enabling `[pki]` and `max_peers` need a restart), the deny list `[pki] revoked` of `key:` and `cert:` entries, and the `[pki] prefixes` routed to the tunnel; `kekkai ca keygen`, `cert sign`, `cert show` in the CLI (0017: CA key age-encrypted, offline); status and log additions (expiry warning and metric); a fuzz target for the codec. The amendments 0034 lists (0004, 0007, 0011, 0012, 0016, 0017, 0021, 0028) are noted in those ADRs as each lands.
 
 **Acceptance criteria**
 
@@ -257,7 +257,7 @@ Not exercised on the real network, covered only by `nixosTest reload` or not at 
 
 **Objective**: a new node joins with only its own configuration.
 
-**Deliverables**: lighthouse and relay admission by certificate, certificate storage, lighthouse query by overlay address, certificate in the reply and the punch; the overlay prefixes routed to the tunnel.
+**Deliverables**: lighthouse and relay admission by certificate, certificate storage, lighthouse query by overlay address, certificate in the reply and the punch.
 
 **Acceptance criteria**
 

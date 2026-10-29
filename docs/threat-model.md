@@ -275,8 +275,9 @@ node's `verify` then rejects it and its sessions are discarded at reload or rest
 (§4). Until the redeploy it remains a legitimate peer: the window between detection and
 redeploy is accepted in v0.
 
-With certificates (v1.0): adding the node's key or certificate fingerprint to `[pki]
-revoked` and reloading cuts its sessions on that party at once (§4.1); a party the deny
+With certificates (v1.0): adding the node's key (`key:`) or certificate fingerprint
+(`cert:`) to `[pki] revoked` and reloading cuts its sessions on that party at once, a static
+peer's sessions made under that certificate included (§4.1, §8.1); a party the deny
 list has not reached yet still admits it until the certificate's `not_after` (one year by
 default), plus at most `REJECT_AFTER_TIME` for a session made just before (§4.4). The deny
 list beats a static entry. A compromised node holds one certificate for one key: it
@@ -340,9 +341,10 @@ change.
   configured peers. An attacker who can shift a host's clock (unauthenticated NTP on the
   path) can therefore extend an expired certificate's life on that host: revocation, not
   expiry, is the answer to a known compromise.
-- **Oversized or malformed certificates**: bounded at 960 bytes before any other check;
-  parsed only after the signature; a parse error is silent (§4.3). The codec is fuzzed and
-  examined at gate 3 (ADR 0034).
+- **Oversized or malformed certificates**: bounded at 960 bytes before the signature (§4.3
+  step 4; before it, only the fingerprint over a value the datagram size already bounds and
+  the static lookup); parsed only after the signature; a parse error is silent (§4.3).
+  The codec is fuzzed and examined at gate 3 (ADR 0034).
 - **Peer-table exhaustion**: an entry is created only for a key whose message 1 passed the
   Noise read, the full verification of a CA-signed certificate binding that key, and the
   timestamp rule (§7.6). The table is bounded (`MAX_CERTIFICATE_PEERS`); a full table

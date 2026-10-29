@@ -250,18 +250,24 @@ Everything else in the file needs a **restart**; a reload that changes it logs
 | node (v1.0) | the presence of `[pki]`, and `[pki] max_peers` | the identity function and the size of the certificate peer table (§4.4) are fixed at start |
 
 **`[pki]` (v1.0).** The CA keys, the party's own certificate, the deny list and the overlay
-prefixes reload. The new own certificate is sent from the next handshake message on. Then,
-against the new values and the wall clock at the reload:
+prefixes reload; turning `[pki]` on or off and changing `max_peers` need a restart (table
+above). A `[pki]` that the start would refuse (`bad_ca_key`, `bad_revoked_entry`, an own
+certificate that fails §4.2) is an invalid file: `reload-failed{err}`, and the party runs
+on with its previous configuration (above). The new own certificate is sent from the next
+handshake message on. Then, against the new values and the wall clock at the reload:
 
-- a peer whose key is in the deny list, static or certificate peer, is a **removed key**
-  (above): its sessions are discarded at once;
+- a peer whose key is a `key:` entry of the deny list (§4.3 step 1), static or certificate
+  peer, is a **removed key** (above): its sessions are discarded at once;
+- every session, of a static or a certificate peer, whose recorded `fingerprint` (§8.1) is
+  a `cert:` entry of the deny list is discarded at once; the peer stays listed, and its
+  next handshake presenting that certificate is refused at §4.3 step 1;
 - every certificate peer (§4.4) is verified again with its stored certificate (§4.3 steps 1
   and 4 to 9); one that fails is a removed key;
 - a key that became statically listed leaves the certificate peer table, as a role change;
   a static key that left the lists may later be admitted by its certificate, as a new key.
 
 The Nix modules derive their triggers from this table (ADR 0026): a change of the lists
-alone reloads, any other change restarts. A successful reload logs
+and of the `[pki]` values above alone reloads, any other change restarts. A successful reload logs
 `reloaded{peers,added,removed,changed}` at `info` (counts only, also on a lighthouse and a
 relay, ADR 0012); under systemd it is framed by `RELOADING=1` and `READY=1`. The bounds of
 §17 do not change: every per-key table follows the list.
@@ -334,13 +340,19 @@ With `[pki]`, `verify(key, tlvs)` returns a **peer record** or a **reject reason
 A record has a `source`: `static` (the configured entry) or `certificate`, then also the
 certificate's `name`, `addresses`, `groups`, `not_after` and fingerprint. `tlvs` is the
 handshake TLV list already parsed against §18.3; `certificate` below is the value of its
-type 2 TLV, if any. The steps run in this order and the first that fails names the reason:
+type 2 TLV, if any, of whatever length (parsing checks only its framing and its place in
+the list; its length is step 4). The steps run in this order and the first that fails
+names the reason:
 
-1. **Deny list.** If `key` is in `[pki] revoked`, or a `certificate` is present and its
-   fingerprint, computed over the value as received before any other check, is in `[pki]
-   revoked`: `revoked`. Revocation beats a static entry and applies to any key presenting
-   a revoked certificate. Deny-list entries are 32-byte values in the key text form (§4);
-   one list holds both keys and fingerprints.
+1. **Deny list.** If `key` is a `key:` entry of `[pki] revoked`, or a `certificate` is
+   present and its fingerprint, computed over the value as received before any other check,
+   is a `cert:` entry: `revoked`. Revocation beats a static entry and applies to any key
+   presenting a revoked certificate. One list holds both kinds; every entry is `key:` or
+   `cert:` followed, with no space, by 32 bytes in the key text form (§4): a node static
+   key or a certificate fingerprint. A `key:` entry is matched against static keys only,
+   a `cert:` entry against fingerprints only. An entry with no prefix, another prefix
+   (prefixes are lower case) or a value that is not 32 bytes of base64 is a configuration
+   error at start and at reload: `bad_revoked_entry` (§18.7).
 2. **Static.** If `key` is in the party's configured lists: return its entry, source
    `static`. The certificate is not looked at further.
 3. **Presence.** No `certificate`: `no_certificate`.
@@ -565,7 +577,9 @@ the enclosing field. Parsing rules:
   assigns a type with the critical bit set, so every TLV of type 128 to 255 is an unknown
   critical TLV and rejects its message: a `timestamp` sent as `0x81` rejects message 1, with
   or without a `0x01` timestamp beside it.
-- A known TLV whose value has the wrong length for its type is a parse error.
+- A known TLV whose value has the wrong length for its type is a parse error. The length
+  rule is the one the registry row states as such; a row may leave the length to the
+  consumer of the value (the handshake `certificate`, §18.3), and then any length parses.
 - A TLV type that is defined for a message but is not expected in it (for example a
   timestamp in `handshake_resp`) is treated as unknown.
 
@@ -730,7 +744,8 @@ After §5.6, for a message that arrived on path `P` (§12.1):
 5. `Split()`; create a session (§8.3) in the **next** slot of that peer with: receiving key
    `k_i2r`, sending key `k_r2i`, local index = our `sender_index`, remote index = the
    initiator's `sender_index`, `created = now`, `confirmed = false`, `role = responder`,
-   `path = P`. Any previous unconfirmed `next` session is replaced.
+   `path = P`, and with `[pki]` the `fingerprint` of the certificate message 1 carried
+   (§8.1). Any previous unconfirmed `next` session is replaced.
 6. Send message 2 on `P` (directly to the datagram's source, or wrapped for the relay it
    came through, §14).
 7. If `P` is direct, set the peer's endpoint to the datagram's source address (§12.4).
@@ -766,7 +781,8 @@ After §5.6:
    **previous**, the former previous is discarded) with: sending key `k_i2r`, receiving key
    `k_r2i`, local index = our `sender_index`, remote index = the responder's
    `sender_index`, `created = now`, `confirmed = true`, `role = initiator`, `path` = the
-   path the response arrived on.
+   path the response arrived on, and with `[pki]` the `fingerprint` of the certificate
+   message 2 carried (§8.1).
 5. The in-flight handshake is cleared; its retransmission timer is cancelled.
 6. If the path is direct, set the peer's endpoint to the datagram's source address.
 7. Send the staged packets (§8.7) on the new session; if there is none, send a
@@ -827,7 +843,11 @@ so the peer is retried as often as in WireGuard.
 A session is one completed handshake. It holds: the two transport keys, the local receiving
 index, the remote receiving index, a 64-bit **sending counter** (starts at 0), a **replay
 window** (§8.4), `created` (monotonic), `confirmed`, `role` (initiator or responder),
-`path` (§12.1), and `last_sent` / `last_received` instants.
+`path` (§12.1), and `last_sent` / `last_received` instants. **(v1.0)** With `[pki]`, it also
+records `fingerprint`: the fingerprint (§4.2) of the `certificate` TLV the peer sent in the
+handshake that made it, as computed by §4.3 step 1, or none if it sent none. It is recorded
+for static and certificate peers alike, so that revoking a certificate reaches every session
+made under it (§4.1).
 
 Per peer, a party holds at most three slots:
 
@@ -1668,7 +1688,7 @@ No protocol-level fragmentation; TCP MSS is clamped on the interface by the IO l
 | Type | Name | Value | In |
 | --- | --- | --- | --- |
 | 1 | `timestamp` | TAI64N (12) | message 1, required in v0, non-critical |
-| 2 | `certificate` | a certificate (§4.2), 65 to `MAX_CERTIFICATE` bytes | both messages, non-critical; sent and read only with `[pki]` (v1.0, §4.5) |
+| 2 | `certificate` | a certificate (§4.2); any length parses (§6), the bound of 65 to `MAX_CERTIFICATE` bytes is §4.3 step 4 (`bad_length`), so a statically listed key is recognised whatever it carries | both messages, non-critical; sent and read only with `[pki]` (v1.0, §4.5) |
 | 3–127 | — | unassigned | |
 | 128–255 | — | unassigned critical types; none assigned in v0, so all are unknown critical (§6). `t \| 0x80` is not a variant of `t` | |
 
@@ -1710,12 +1730,12 @@ versions ignore each other silently (ADR 0024).
 ### 18.7 Certificate reject reasons (v1.0)
 
 The reasons `verify` (§4.3) and the admission of §4.4 return, in the order the steps check
-them, and the configuration error of §4.2. They are counter labels and vector `result`
+them, and the configuration errors of §4.2 and §4.3 step 1. They are counter labels and vector `result`
 values; none is ever sent.
 
 | Reason | Step | Meaning |
 | --- | --- | --- |
-| `revoked` | §4.3 step 1 | the key, or the fingerprint of the presented certificate, is in the deny list |
+| `revoked` | §4.3 step 1 | the key is a `key:` entry, or the fingerprint of the presented certificate a `cert:` entry, of the deny list |
 | `no_certificate` | step 3 | a key listed nowhere presented no certificate |
 | `bad_length` | step 4 | certificate shorter than 65 or longer than `MAX_CERTIFICATE` bytes |
 | `bad_signature` | step 5 | no trusted CA key verifies it strictly: another CA, a forged or altered certificate, a non-canonical or malleated signature, a small-order or non-canonical `R` |
@@ -1726,6 +1746,7 @@ values; none is ever sent.
 | `address_outside_prefixes` | step 9 | an address outside every `[pki] prefixes` entry |
 | `peer_table_full` | §4.4 admission | the certificate peer table is full and no entry is evictable |
 | `bad_ca_key` | §4.2, configuration | a configured CA key of the wrong length, non-canonical, or of small order; the configuration is refused |
+| `bad_revoked_entry` | §4.3 step 1, configuration | a deny-list entry without the `key:` or `cert:` prefix, with another prefix, or whose value is not 32 bytes of base64; the configuration is refused |
 
 ## 19. Test vectors
 
@@ -1746,7 +1767,7 @@ tests (`keygen.json`), both run by `nix flake check` (ADR 0020).
 | `handshake.json` | a complete kekkai handshake with fixed keys, indices and timestamp: both datagrams byte for byte, `mac1` keys and values, transport keys, the first data packets of both directions, and datagrams that must be rejected with the reason | §5, §7, §8.2 |
 | `wire.json` | outer header accept and drop cases, endpoint encoding, every inner message encoding, the registries | §5.6, §10, §18 |
 | `replay.json` | a counter sequence with the accept or reject outcome of each | §8.4 |
-| `certificate.json` | certificate encoding, text form and fingerprint from fixed CA seeds (`sign`); the identity function with a PKI in a fixed context, with the record or the reject reason of §18.7 (`verify`), including Ed25519 edge cases; the CA keys a configuration accepts (`ca_keys`) | §4.2, §4.3 |
+| `certificate.json` | certificate encoding, text form and fingerprint from fixed CA seeds (`sign`); the identity function with a PKI in a fixed context, with the record or the reject reason of §18.7 (`verify`), including Ed25519 edge cases; the CA keys a configuration accepts (`ca_keys`); the deny-list entries a configuration accepts (`revoked_entries`) | §4.2, §4.3 |
 
 v0.5 adds no codec: `relay_forward` and `relay_forwarded` were frozen with the registries in
 v0.1 and their encodings are in `wire.json` (`inner_messages`). The token bucket of §13.2
@@ -1775,7 +1796,8 @@ implementation of §4.2 and §4.3 (Python 3 standard library only, Ed25519 from 
 repository, ADR 0002), from seeds `BLAKE2s("kekkai certificate vectors " || label)` and the
 `keygen.json` node keys, twice with identical output. Each Ed25519 edge case was checked to
 be accepted by a permissive verifier (one of: `S` below `2^253` only, ZIP-215 decoding, the
-cofactored equation) and rejected by §4.3 step 5. The `verify` and `ca_keys` inputs,
+cofactored equation) and rejected by §4.3 step 5. The `verify`, `ca_keys` and
+`revoked_entries` inputs,
 certificates included, are inputs: an implementation recomputes `result` and `peer` from
 them; `sign` outputs are recomputed from the seed and fields. Once the core loads the file,
 it is the generator of record as for the other files.
