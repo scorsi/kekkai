@@ -3,7 +3,7 @@ on: [push, pull_request]
 
 jobs:
   linux:
-    runs-on: linux
+    runs-on: x86_64-linux
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
       - run: nix fmt -- --ci
@@ -11,16 +11,24 @@ jobs:
       # One nix process per check: evaluating every nixosTest in one process
       # (nix flake check) peaks around 6-9 GB; one check at a time stays near 2 GB.
       - run: |
-          checks=$(nix eval --raw .#checks.aarch64-linux --apply 'c: builtins.concatStringsSep " " (builtins.attrNames c)') || exit 1
+          checks=$(nix eval --raw .#checks.x86_64-linux --apply 'c: builtins.concatStringsSep " " (builtins.attrNames c)') || exit 1
           [ -n "$checks" ] || { echo "no checks to build"; exit 1; }
           failed=
           for c in $checks; do
-            nix build -L --no-link ".#checks.aarch64-linux.$c" || failed="$failed $c"
+            nix build -L --no-link ".#checks.x86_64-linux.$c" || failed="$failed $c"
           done
           if [ -n "$failed" ]; then echo "failed checks:$failed"; exit 1; fi
 
+  # The kernel side (TUN, routes) and the build on ARM: packages and the two tests that drive them.
+  aarch64-linux:
+    runs-on: aarch64-linux
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix build -L --no-link .#kekkai-node .#kekkai-lighthouse .#kekkai-relay .#kekkai
+      - run: nix build -L --no-link .#checks.aarch64-linux.certificates .#checks.aarch64-linux.reload
+
   macos:
-    runs-on: macos
+    runs-on: aarch64-darwin
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
       - run: nix build -L .#kekkai-node .#kekkai-lighthouse .#kekkai-relay .#kekkai
