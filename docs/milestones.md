@@ -251,6 +251,8 @@ Not exercised on the real network, covered only by `nixosTest reload` or not at 
 
 **Dependencies**: v0.7, ADR 0034.
 
+**Status 2026-10-29: passed**. `nixosTest` `certificates` on 7f21ac7 and the eight existing `nixosTest`s on 16027be (`nixos-node-version`, `two-nodes`, `firewall`, `nat-direct`, `roaming`, `nat-relayed`, `reload`, `relay-upgrade`) green on x86_64-linux; aarch64-linux not run yet. Expiry within `REJECT_AFTER_TIME` is proven by simulation. Observability of certificate peers (per-peer events and metrics) is to be revisited.
+
 ---
 
 ## v1.1 — Discovery by certificate
