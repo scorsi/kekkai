@@ -13,12 +13,13 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kekkai_core::cert::Revoked;
 use kekkai_core::inner::Endpoint;
 use kekkai_core::keys::PublicKey;
 use kekkai_core::node::{LighthouseConfig, Node, PeerConfig, PeerStatus};
 use kekkai_core::{KEEPALIVE_FAILURES_BEFORE_REREGISTER, PERSISTENT_KEEPALIVE};
 use kekkai_io::config::{DEFAULT_PATH, NodeConfig};
-use kekkai_io::{Locals, PeerInfo, State, clock, systemd, udp};
+use kekkai_io::{Locals, PeerInfo, Route, State, clock, systemd, udp};
 use tracing::{error, info, warn};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
@@ -105,6 +106,8 @@ async fn serve(
     hangup: tokio::signal::unix::Signal,
 ) -> Result<(), String> {
     let key = kekkai_io::load_key(&config.node.private_key_file).map_err(|e| e.to_string())?;
+    // Spec §4.2: an own certificate the node would send refused is fatal at start.
+    let pki = (config.own_pki(&key.public())).map_err(|e| format!("{}: {e}", path.display()))?;
     let lists = Lists::new(&config).await?;
     let mut node = Node::new(key, Vec::new());
     node.set_udp_flows_max(config.firewall.udp_flows_max);
@@ -118,6 +121,10 @@ async fn serve(
         .map_err(|e| format!("{CONTROL_SOCKET}: {e}"))?;
     let mut state = State::new(node, HashMap::new());
     lists.install(&mut state, &config);
+    // Before any traffic: the loop starts below.
+    if let Some(pki) = pki {
+        state.node.set_pki(clock::wall(), pki);
+    }
     let state = Arc::new(Mutex::new(state));
     if let Some(m) = &config.metrics {
         let listener = std::net::TcpListener::bind(m.listen)
@@ -156,20 +163,35 @@ struct Lists {
     named: Vec<Named>,
     lighthouses: Vec<(PublicKey, String)>,
     relays: Vec<(PublicKey, String)>,
+    /// `[pki] prefixes`, routed to the tunnel (spec §4.4).
+    prefixes: Vec<Route>,
 }
 
 impl Lists {
     async fn new(config: &NodeConfig) -> Result<Self, String> {
         let start = clock::monotonic();
+        // Spec §4.1: a key in the deny list is a removed key, its host routes included.
+        let revoked = match &config.pki {
+            Some(pki) => pki.pki()?.revoked,
+            None => Vec::new(),
+        };
+        let listed = |key: &PublicKey| !revoked.contains(&Revoked::Key(*key));
         let mut lists = Lists {
             peers: HashMap::new(),
             configs: Default::default(),
             named: Vec::new(),
             lighthouses: Vec::new(),
             relays: Vec::new(),
+            prefixes: match &config.pki {
+                Some(pki) => pki.routes()?,
+                None => Vec::new(),
+            },
         };
         for peer in &config.peers {
             let public_key = peer.key()?;
+            if !listed(&public_key) {
+                continue;
+            }
             (lists.named).extend(Named::new(public_key, &peer.name, &peer.endpoints, start));
             let mut endpoints = Vec::new();
             for endpoint in &peer.endpoints {
@@ -192,6 +214,9 @@ impl Lists {
             .chain(config.relays.iter().map(|r| ("relay", r)));
         for (owner, s) in services {
             let public_key = s.key()?;
+            if !listed(&public_key) {
+                continue;
+            }
             let written = std::slice::from_ref(&s.endpoint);
             lists
                 .named
@@ -212,11 +237,15 @@ impl Lists {
         Ok(lists)
     }
 
-    /// The overlay addresses routed to peers (spec §11).
-    fn routes(&self) -> Vec<IpAddr> {
-        (self.configs.0.iter())
-            .flat_map(|p| p.addresses.iter().copied())
-            .collect()
+    /// The host routes of the configured peers (spec §11) and the `[pki]` prefixes (§4.4),
+    /// once each (a prefix may equal a host route).
+    fn routes(&self) -> Vec<Route> {
+        let hosts =
+            (self.configs.0.iter()).flat_map(|p| p.addresses.iter().map(|a| Route::host(*a)));
+        let mut routes: Vec<Route> = hosts.chain(self.prefixes.iter().copied()).collect();
+        routes.sort();
+        routes.dedup();
+        routes
     }
 
     /// Replaces the lists in the core and the IO state; `running` gives the `[node]` section,
@@ -257,7 +286,7 @@ struct Reload<'a> {
     path: &'a Path,
     interface: &'a str,
     /// What the kernel holds, which a failed rollback can leave apart from `lists`.
-    routes: Vec<IpAddr>,
+    routes: Vec<Route>,
     running: NodeConfig,
     lists: Lists,
 }
@@ -280,26 +309,28 @@ async fn maintain(
     }
 }
 
-/// Spec §4.1: reads the file again, applies its lists as a diff and keeps every other
-/// section until a restart. An invalid file, or a host route the kernel refuses, changes
-/// nothing.
+/// Spec §4.1: reads the file again, applies its lists and `[pki]` values and keeps every
+/// other section until a restart. An invalid file, an own certificate §4.2 refuses, or a
+/// route the kernel refuses, changes nothing.
 async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
     let _ = systemd::notify("RELOADING=1");
     let result = async {
         let new = load(r.path)?;
         let restart = r.running.restart_sections(&new);
         let effective = r.running.with_lists(new)?;
+        let own = *state.lock().expect("no poison").node.public_key();
+        let pki = effective.own_pki(&own)?;
         let next = Lists::new(&effective).await?;
         let interface = r.interface;
         set_routes(&mut r.routes, &next.routes(), |route, add| {
             set_route(interface, route, add)
         })
         .map_err(|e| format!("{interface}: {e}"))?;
-        Ok::<_, String>((restart, effective, next))
+        Ok::<_, String>((restart, effective, next, pki))
     };
     match result.await {
         Err(e) => error!(event = "reload-failed", err = %e),
-        Ok((restart, effective, next)) => {
+        Ok((restart, effective, next, pki)) => {
             if !restart.is_empty() {
                 let sections = restart.join(",");
                 warn!(
@@ -313,7 +344,12 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
             let changed = (now.iter())
                 .filter(|(k, d)| old.get(*k).is_some_and(|o| o != *d))
                 .count();
-            next.install(&mut state.lock().expect("no poison"), &effective);
+            let mut guard = state.lock().expect("no poison");
+            next.install(&mut guard, &effective);
+            if let Some(pki) = pki {
+                guard.node.set_pki(clock::wall(), pki);
+            }
+            drop(guard);
             r.lists = next;
             r.running = effective;
             info!(
@@ -328,7 +364,7 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
     let _ = systemd::notify("READY=1");
 }
 
-/// Spec §4.1, §11: takes the kernel's host routes from `installed` to `new`, additions
+/// Spec §4.1, §11, §4.4: takes the kernel's routes from `installed` to `new`, additions
 /// first, as one transaction. A refused operation undoes the completed ones, in reverse,
 /// and fails the reload; an undo the kernel refuses too is logged and named in the error.
 /// `installed` follows every operation that succeeded, so the next reload reconciles a
@@ -336,9 +372,9 @@ async fn reload(state: &Mutex<State>, r: &mut Reload<'_>) {
 // shortcut: a route deleted behind the daemon's back fails every reload that removes it
 // (the kernel refuses the deletion); a restart reconciles. Treat "not found" as done if seen.
 fn set_routes(
-    installed: &mut Vec<IpAddr>,
-    new: &[IpAddr],
-    mut op: impl FnMut(IpAddr, bool) -> io::Result<()>,
+    installed: &mut Vec<Route>,
+    new: &[Route],
+    mut op: impl FnMut(Route, bool) -> io::Result<()>,
 ) -> Result<(), String> {
     let adds = new
         .iter()
@@ -348,8 +384,8 @@ fn set_routes(
         .iter()
         .filter(|r| !new.contains(r))
         .map(|r| (*r, false));
-    let plan: Vec<(IpAddr, bool)> = adds.chain(deletes).collect();
-    let apply = |installed: &mut Vec<IpAddr>, route: IpAddr, add: bool| {
+    let plan: Vec<(Route, bool)> = adds.chain(deletes).collect();
+    let apply = |installed: &mut Vec<Route>, route: Route, add: bool| {
         installed.retain(|r| *r != route);
         if add {
             installed.push(route);
@@ -503,19 +539,19 @@ async fn terminate() {
 fn open_tunnel(
     mtu: u16,
     addresses: &[IpAddr],
-    routes: &[IpAddr],
+    routes: &[Route],
 ) -> io::Result<(kekkai_io::tun::Tun, String)> {
     let tun = kekkai_io::tun::Tun::create(INTERFACE, mtu, addresses, routes)?;
     Ok((tun, INTERFACE.into()))
 }
 
 #[cfg(target_os = "linux")]
-fn set_route(interface: &str, route: IpAddr, add: bool) -> io::Result<()> {
+fn set_route(interface: &str, route: Route, add: bool) -> io::Result<()> {
     kekkai_io::tun::set_route(interface, route, add)
 }
 
 #[cfg(target_os = "macos")]
-fn set_route(interface: &str, route: IpAddr, add: bool) -> io::Result<()> {
+fn set_route(interface: &str, route: Route, add: bool) -> io::Result<()> {
     kekkai_io::utun::set_route(interface, route, add)
 }
 
@@ -523,7 +559,7 @@ fn set_route(interface: &str, route: IpAddr, add: bool) -> io::Result<()> {
 fn open_tunnel(
     mtu: u16,
     addresses: &[IpAddr],
-    routes: &[IpAddr],
+    routes: &[Route],
 ) -> io::Result<(kekkai_io::utun::Utun, String)> {
     let utun = kekkai_io::utun::Utun::create(mtu, addresses, routes)?;
     let name = utun.name().to_owned();
@@ -597,7 +633,85 @@ mod tests {
         std::fs::write(&path, transfer).unwrap();
         runtime.block_on(reload(&state, &mut r));
         assert_eq!(names(&state), ["b"], "effective configuration refused");
-        assert_eq!(r.routes, ["10.0.0.2".parse::<IpAddr>().unwrap()]);
+        assert_eq!(r.routes, [Route::host("10.0.0.2".parse().unwrap())]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Spec §4.1, §4.2: `[pki]` reloads with the lists; an own certificate the start would
+    /// refuse fails the reload; a `key:` entry removes a static peer; `max_peers` is kept.
+    #[test]
+    fn reload_applies_pki() {
+        use kekkai_core::cert;
+        use kekkai_core::keys::{public_key_from_text, public_key_to_text};
+        let key = StaticKey::from_bytes([1; 32]).clamped();
+        let certificate = |ca: u8| {
+            let fields = cert::Fields {
+                name: "n".into(),
+                public_key: key.public(),
+                addresses: vec!["10.0.0.1".parse().unwrap()],
+                groups: Vec::new(),
+                not_before: 1,
+                not_after: u64::MAX,
+            };
+            cert::to_text(&cert::sign(&[ca; 32], &fields).unwrap())
+        };
+        const PEER: &str = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=";
+        let file = |name: &str, ca: u8, extra: &str| {
+            format!(
+                "[node]\nprivate_key_file = \"/k\"\naddresses = [\"10.0.0.1/32\"]\n\
+                 [[peers]]\nname = \"{name}\"\npublic_key = \"{PEER}\"\naddresses = []\n\
+                 [pki]\nca_keys = [\"{}\"]\ncertificate = \"{}\"\n\
+                 prefixes = [\"10.0.0.0/16\"]\n{extra}",
+                public_key_to_text(&cert::ca_public(&[7; 32])),
+                certificate(ca)
+            )
+        };
+        let dir = std::env::temp_dir().join(format!("kekkai-reload-pki-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let running = NodeConfig::parse(&file("a", 7, "")).unwrap();
+        let lists = runtime.block_on(Lists::new(&running)).unwrap();
+        let mut state = State::new(Node::new(key.clone(), Vec::new()), HashMap::new());
+        lists.install(&mut state, &running);
+        let pki = running.own_pki(&key.public()).unwrap().unwrap();
+        state.node.set_pki(clock::wall(), pki);
+        let state = Mutex::new(state);
+        let prefix = Route {
+            address: "10.0.0.0".parse().unwrap(),
+            length: 16,
+        };
+        assert_eq!(lists.routes(), [prefix]);
+        let mut r = Reload {
+            path: &path,
+            interface: "none",
+            routes: lists.routes(),
+            running,
+            lists,
+        };
+        let peer = public_key_from_text(PEER).unwrap();
+        let listed = |state: &Mutex<State>| {
+            let state = state.lock().unwrap();
+            let names: Vec<String> = state.peers.values().map(|p| p.name.clone()).collect();
+            (names, state.node.status(&peer).is_some())
+        };
+        assert_eq!(listed(&state), (vec!["a".to_string()], true));
+
+        // Signed by a CA the file does not trust: refused as at start, nothing applied.
+        std::fs::write(&path, file("b", 8, "")).unwrap();
+        runtime.block_on(reload(&state, &mut r));
+        assert_eq!(listed(&state), (vec!["a".to_string()], true));
+
+        // Revoked by key, with a new max_peers: the peer goes, max_peers waits for a restart.
+        let revoke = format!("revoked = [\"key:{PEER}\"]\nmax_peers = 8\n");
+        std::fs::write(&path, file("b", 7, &revoke)).unwrap();
+        runtime.block_on(reload(&state, &mut r));
+        assert_eq!(listed(&state), (Vec::new(), false));
+        let section = r.running.pki.as_ref().unwrap();
+        assert_eq!((section.max_peers, section.revoked.len()), (256, 1));
+        assert_eq!(r.routes, [prefix], "no route command ran");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -608,14 +722,14 @@ mod tests {
     #[test]
     fn routes_change_as_one_transaction() {
         use std::collections::BTreeSet;
-        let ip = |n: u8| -> IpAddr { format!("10.0.0.{n}").parse().unwrap() };
+        let ip = |n: u8| Route::host(format!("10.0.0.{n}").parse().unwrap());
         // The kernel's routes, and the operations to refuse: (route, add), at most once each.
         struct Kernel {
-            routes: BTreeSet<IpAddr>,
-            refuse: Vec<(IpAddr, bool)>,
+            routes: BTreeSet<Route>,
+            refuse: Vec<(Route, bool)>,
         }
         impl Kernel {
-            fn op(&mut self, route: IpAddr, add: bool) -> io::Result<()> {
+            fn op(&mut self, route: Route, add: bool) -> io::Result<()> {
                 if let Some(i) = self.refuse.iter().position(|r| *r == (route, add)) {
                     self.refuse.remove(i);
                     return Err(io::Error::other("refused"));
@@ -636,7 +750,7 @@ mod tests {
             routes: BTreeSet::from([ip(1), ip(2)]),
             refuse: Vec::new(),
         };
-        let sorted = |v: &[IpAddr]| v.iter().copied().collect::<BTreeSet<_>>();
+        let sorted = |v: &[Route]| v.iter().copied().collect::<BTreeSet<_>>();
         let (old, new) = (vec![ip(1), ip(2)], vec![ip(3), ip(4)]);
 
         for refused in [(ip(4), true), (ip(2), false)] {

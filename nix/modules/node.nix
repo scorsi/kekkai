@@ -51,8 +51,9 @@ in
         "kekkai-node.socket"
       ];
       requires = [ "kekkai-node.socket" ];
-      # 0026, spec §4.1: a change of the peer, lighthouse or relay list reloads (SIGHUP, the
-      # daemon re-reads the stable path); the binary or any other section restarts.
+      # 0026, spec §4.1: a change of the peer, lighthouse or relay list or of the `[pki]` values
+      # reloads (SIGHUP, the daemon re-reads the stable path); the binary or any other section,
+      # the presence of `[pki]` and its `max_peers` included, restarts.
       reloadTriggers = [ configFile ];
       restartTriggers = [
         cfg.package

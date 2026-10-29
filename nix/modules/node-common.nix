@@ -44,14 +44,69 @@ let
     firewall.udp_flows_max = cfg.firewall.udpFlowsMax;
   }
   // lib.optionalAttrs (cfg.logLevel != "info") { log.level = cfg.logLevel; }
-  // lib.optionalAttrs (cfg.metrics.listen != null) { metrics.listen = cfg.metrics.listen; };
+  // lib.optionalAttrs (cfg.metrics.listen != null) { metrics.listen = cfg.metrics.listen; }
+  // lib.optionalAttrs (cfg.pki != null) {
+    pki = {
+      ca_keys = cfg.pki.caKeys;
+      inherit (cfg.pki) certificate prefixes;
+    }
+    // lib.optionalAttrs (cfg.pki.revoked != [ ]) { inherit (cfg.pki) revoked; }
+    // lib.optionalAttrs (cfg.pki.maxPeers != 256) { max_peers = cfg.pki.maxPeers; };
+  };
 
-  # Spec §4.1: a reload applies the lists; any other change needs a restart.
-  restartSettings = removeAttrs settings [
-    "peers"
-    "lighthouses"
-    "relays"
-  ];
+  # Spec §4.1: a reload applies the lists and the `[pki]` values; any other change, the
+  # presence of `[pki]` and its `max_peers` included, needs a restart.
+  restartSettings =
+    removeAttrs settings [
+      "peers"
+      "lighthouses"
+      "relays"
+      "pki"
+    ]
+    // lib.optionalAttrs (cfg.pki != null) { pki.max_peers = cfg.pki.maxPeers; };
+
+  pkiType = types.submodule {
+    options = {
+      caKeys = mkOption {
+        type = types.addCheck (types.listOf types.str) (l: l != [ ] && builtins.length l <= 2) // {
+          description = "list of one or two CA keys";
+        };
+        description = "Trusted CA public keys (Ed25519, standard base64), one or two for a rotation.";
+      };
+      certificate = mkOption {
+        type = types.str;
+        description = ''
+          This node's certificate, standard base64 on one line (`kekkai cert sign`). Public,
+          so it is written inline and a renewal reloads; its addresses must be exactly
+          `addresses`.
+        '';
+      };
+      revoked = mkOption {
+        type = types.listOf (types.strMatching "(key|cert):[A-Za-z0-9+/]{43}=");
+        default = [ ];
+        description = ''
+          Deny list (spec §4.3): `key:` a node's public key, `cert:` a certificate
+          fingerprint, each in base64. A change reloads and cuts the matching sessions.
+        '';
+      };
+      prefixes = mkOption {
+        type = types.listOf types.str;
+        example = [
+          "10.0.0.0/16"
+          "fd00::/64"
+        ];
+        description = ''
+          Overlay prefixes, no host bit set: certificate addresses must lie inside one, and
+          each is routed to the tunnel (spec §4.4).
+        '';
+      };
+      maxPeers = mkOption {
+        type = types.ints.positive;
+        default = 256;
+        description = "Bound of the certificate peer table (spec §4.4); a change restarts.";
+      };
+    };
+  };
 
   peerType = types.submodule {
     options = {
@@ -180,6 +235,15 @@ in
       description = ''
         Loopback address of the `GET /metrics` listener (0019), `127.0.0.1:PORT` or
         `[::1]:PORT`; `null` runs no listener.
+      '';
+    };
+    pki = mkOption {
+      type = types.nullOr pkiType;
+      default = null;
+      description = ''
+        `[pki]` (ADR 0034, spec §4.2 to §4.4): admits peers listed nowhere by a certificate of
+        a trusted CA. `null` keeps the v0 identity function. Turning it on or off restarts the
+        daemon; its values reload.
       '';
     };
     operators = mkOption {

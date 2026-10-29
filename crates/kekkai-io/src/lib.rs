@@ -42,6 +42,28 @@ pub struct PeerInfo {
     pub allow_inbound: Vec<String>,
 }
 
+/// A route towards the tunnel: a configured peer's host route (spec §11) or a `[pki]`
+/// prefix (§4.4), with no host bits set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Route {
+    pub address: IpAddr,
+    pub length: u8,
+}
+
+impl Route {
+    /// The `/32` or `/128` of `address`.
+    pub fn host(address: IpAddr) -> Self {
+        let length = if address.is_ipv4() { 32 } else { 128 };
+        Self { address, length }
+    }
+}
+
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.address, self.length)
+    }
+}
+
 /// What the node collects for `lighthouse_register` (spec §13.1) and its keepalives on a
 /// change of local addresses (§12.4).
 #[derive(Clone, Debug)]

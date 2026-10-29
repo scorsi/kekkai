@@ -168,6 +168,17 @@
           ];
         }).config;
       darwinEval = darwinWith { };
+      # `[pki]` (spec §4.2): CA 1 and a certificate of certificate.json (config check reads
+      # neither the key nor the certificate's content, only their forms).
+      pkiSettings = {
+        caKeys = [ "HfIFGORPFjL1336cR3brPNDF2+QAhG4EtXQsTmN8jTE=" ];
+        certificate = "AQAGbm9kZS1jAgAgta5DN5JdcLfn//qzn1vkBX+LgBEF698PsB10l9cpxxoDABD9dwAAAAAAAAAAAAAAAAADBQAIAAAAAGlVuQAGAAgAAAAAazbsgFcKAP73cdeveW3M8wFU0PlKbxlKSZcnsCeoyw90hYDw0uWXsNMx8WDtkI1Yezo5S6/oEW6f9XowT9Jg0Zs7Vgw=";
+        prefixes = [
+          "10.0.0.0/16"
+          "fd77::/64"
+        ];
+      };
+      pkiEval = darwinWith { services.kekkai-node.pki = pkiSettings; };
       # The NixOS node module, evaluated in a full NixOS system (for aarch64-linux when this
       # system is Darwin): the drvPath forces every option and unit without building anything.
       nodeEval = inputs.nixpkgs.lib.nixosSystem {
@@ -312,10 +323,18 @@
                 };
               };
               portChange = darwinWith { services.kekkai-node.listenPort = 4803; };
+              # Spec §4.1: `[pki]` values reload, its presence and `max_peers` restart.
+              pkiWith = extra: darwinWith { services.kekkai-node.pki = pkiSettings // extra; };
+              revokedChange = pkiWith { revoked = [ "key:3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=" ]; };
+              maxPeersChange = pkiWith { maxPeers = 8; };
             in
             fingerprint peerChange == fingerprint darwinEval
             && file peerChange != file darwinEval
-            && fingerprint portChange != fingerprint darwinEval;
+            && fingerprint portChange != fingerprint darwinEval
+            && fingerprint pkiEval != fingerprint darwinEval
+            && fingerprint revokedChange == fingerprint pkiEval
+            && file revokedChange != file pkiEval
+            && fingerprint maxPeersChange != fingerprint pkiEval;
           assert lib.hasInfix "/bin/launchctl kill SIGHUP system/org.nixos.kekkai-node"
             darwinEval.system.activationScripts.postActivation.text;
           # R5: no failure is swallowed.
@@ -409,6 +428,10 @@
               darwinEval.environment.etc."kekkai/node.toml".source
             }
             grep -q 'allow_inbound = \["tcp/22", "udp/53"\]' ${darwinEval.services.kekkai-node.configFile}
+            ! grep -q '^\[pki\]' ${darwinEval.services.kekkai-node.configFile}
+            ${lib.getExe pkgs.kekkai-node} config check --config ${pkiEval.services.kekkai-node.configFile}
+            grep -q '^prefixes = \["10.0.0.0/16", "fd77::/64"\]' ${pkiEval.services.kekkai-node.configFile}
+            ! grep -q 'max_peers' ${pkiEval.services.kekkai-node.configFile}
             grep -q 'udp_flows_max = 1024' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'listen = "127.0.0.1:9480"' ${darwinEval.services.kekkai-node.configFile}
             grep -q 'endpoint = "lighthouse.example.org:4800"' ${darwinEval.services.kekkai-node.configFile}

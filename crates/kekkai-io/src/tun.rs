@@ -1,5 +1,5 @@
 //! The Linux TUN device (`tun` feature, ADR 0005, 0018, 0023): created with `TUNSETIFF`, its
-//! MTU, addresses and host routes set with the classic `SIOC*` ioctls on both families
+//! MTU, addresses and routes set with the classic `SIOC*` ioctls on both families
 //! (ADR 0029). Needs `CAP_NET_ADMIN` and `/dev/net/tun`, nothing else.
 
 use std::ffi::CString;
@@ -9,6 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use tokio::io::Interest;
+
+use crate::Route;
 use tokio::io::unix::AsyncFd;
 
 /// One TUN interface in `IFF_TUN | IFF_NO_PI` mode: every read and write is one IP packet.
@@ -102,18 +104,26 @@ fn in6(ip: Ipv6Addr) -> libc::in6_addr {
     }
 }
 
-/// Adds (`add`) or deletes the host route of `route` towards `name` (spec §11): at start and
-/// when a reload changes the peers' addresses (§4.1).
-pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
-    match route {
+/// Adds (`add`) or deletes `route` towards `name` (spec §11, §4.4): at start and when a
+/// reload changes the peers' addresses or the `[pki]` prefixes (§4.1).
+pub fn set_route(name: &str, route: Route, add: bool) -> io::Result<()> {
+    match route.address {
         IpAddr::V4(ip) => {
+            let mask = u32::MAX
+                .checked_shl(32 - u32::from(route.length))
+                .unwrap_or(0);
             // SIOCADDRT copies IFNAMSIZ − 1 bytes from rt_dev: give it a full-size buffer.
             let mut devname = ifreq(name)?.ifr_name;
             // SAFETY: plain old data; all zeros is a valid value.
             let mut rt: RtEntry = unsafe { zeroed() };
             rt.rt_dst = sockaddr_v4(ip);
-            rt.rt_genmask = sockaddr_v4(Ipv4Addr::BROADCAST);
-            rt.rt_flags = libc::RTF_UP | libc::RTF_HOST;
+            rt.rt_genmask = sockaddr_v4(Ipv4Addr::from(mask));
+            rt.rt_flags = libc::RTF_UP
+                | if route.length == 32 {
+                    libc::RTF_HOST
+                } else {
+                    0
+                };
             rt.rt_dev = devname.as_mut_ptr();
             let request = if add {
                 libc::SIOCADDRT
@@ -132,7 +142,7 @@ pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
             // SAFETY: plain old data; all zeros is a valid value.
             let mut rt: In6RtMsg = unsafe { zeroed() };
             rt.rtmsg_dst = in6(ip);
-            rt.rtmsg_dst_len = 128;
+            rt.rtmsg_dst_len = u16::from(route.length);
             rt.rtmsg_flags = u32::from(libc::RTF_UP);
             rt.rtmsg_ifindex = index as libc::c_int;
             let request = if add {
@@ -147,12 +157,12 @@ pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
 
 impl Tun {
     /// Creates `name`, sets its MTU, brings it up, assigns `addresses` (each a `/32` or
-    /// `/128`) and adds one host route per entry of `routes` towards it (spec §11).
+    /// `/128`) and adds every entry of `routes` towards it (spec §11, §4.4).
     pub fn create(
         name: &str,
         mtu: u16,
         addresses: &[IpAddr],
-        routes: &[IpAddr],
+        routes: &[Route],
     ) -> io::Result<Self> {
         let path = CString::new("/dev/net/tun").expect("no NUL");
         // SAFETY: plain syscall; the returned descriptor is owned from here on.

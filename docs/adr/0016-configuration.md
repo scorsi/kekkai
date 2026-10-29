@@ -53,3 +53,25 @@ Every host is deployed through Nix; secrets come from sops as files. The author'
 
 - A unit test deserializes the complete example; a `nixosTest` proves the module's output is accepted by `config check`.
 - The configuration file lives at a stable path (`/etc/kekkai/<role>.toml`) so that a reload trigger can target it (0026).
+
+## Amendment — 2026-10-29: `[pki]` (ADR 0034, v1.0)
+
+A node file may carry an optional `[pki]` section; without it the node is exactly v0
+(spec §4.5). Everything in it is public, so it is written inline (no file path): a renewed
+certificate or a new deny-list entry changes the file and reloads (spec §4.1, 0026).
+
+```toml
+[pki]
+ca_keys = ["base64…"]                     # one or two Ed25519 CA public keys
+certificate = "base64…"                   # this node's certificate, one line
+revoked = ["key:base64…", "cert:base64…"] # deny list, optional
+prefixes = ["10.x.0.0/16", "fdxx:…::/64"] # routed to the tunnel, no host bit set
+max_peers = 256                           # certificate peer table, default 256
+```
+
+The node refuses at start, and a reload refuses (`reload-failed`), a CA key, a deny-list
+entry or a prefix that does not parse (`bad_ca_key`, `bad_revoked_entry`, spec §18.7), and
+an own certificate that fails spec §4.2 or does not certify exactly `[node] addresses`.
+Turning `[pki]` on or off and changing `max_peers` need a restart; the module's restart
+fingerprint covers exactly those two. The NixOS and nix-darwin modules expose it as
+`services.kekkai-node.pki` (`caKeys`, `certificate`, `revoked`, `prefixes`, `maxPeers`).

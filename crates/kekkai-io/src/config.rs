@@ -3,7 +3,8 @@
 //!
 //! v0.5 schema: `[node]`, `[[peers]]` with `allow_inbound`, `[[lighthouses]]` and
 //! `[[relays]]` (at most one each in v0, ADR 0012, 0014), `[firewall]`, `[log]`, and the
-//! optional `[metrics]` (ADR 0019, amended 2026-10-20).
+//! optional `[metrics]` (ADR 0019, amended 2026-10-20). v1.0 adds the optional `[pki]` (spec
+//! §4.2 to §4.4, ADR 0034): absent, the node is exactly v0 (§4.5).
 //!
 //! The lighthouse file ([`LighthouseConfig`]) is `[service]`, `[[peers]]` with `name` and
 //! `public_key` only, `[log]` and `[metrics]` (ADR 0016). The relay file ([`RelayConfig`]) is
@@ -13,9 +14,13 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use kekkai_core::cert::{self, CaKey, Pki, Prefix, Reject, Revoked};
 use kekkai_core::firewall::{Rule, UDP_FLOWS_MAX};
 use kekkai_core::keys::{PublicKey, public_key_from_text};
+use kekkai_core::{MAX_CA_KEYS, MAX_CERTIFICATE_PEERS};
 use serde::Deserialize;
+
+use crate::Route;
 
 /// Default path of the node file (ADR 0016, 0026).
 pub const DEFAULT_PATH: &str = "/etc/kekkai/node.toml";
@@ -48,6 +53,69 @@ pub struct NodeConfig {
     pub log: LogSection,
     /// Absent: no metrics listener.
     pub metrics: Option<MetricsSection>,
+    /// Absent: the v0 identity function (spec §4.5).
+    pub pki: Option<PkiSection>,
+}
+
+/// `[pki]` (spec §4.2 to §4.4, ADR 0034). Everything in it is public: the certificate is
+/// inline, so a renewal changes the file and reloads (§4.1).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PkiSection {
+    /// Trusted CA keys, Ed25519 public keys in the key text form, 1 to `MAX_CA_KEYS`.
+    pub ca_keys: Vec<String>,
+    /// This node's certificate, standard base64 on one line (`kekkai cert sign`).
+    pub certificate: String,
+    /// The deny list: `key:<base64>` and `cert:<base64 fingerprint>` entries (§4.3 step 1).
+    #[serde(default)]
+    pub revoked: Vec<String>,
+    /// Overlay prefixes (`10.1.0.0/16`, `fd00:1::/48`): certificate addresses must lie inside
+    /// one, and each is routed to the tunnel (§4.4).
+    pub prefixes: Vec<String>,
+    /// Bound of the certificate peer table (§4.4); a change needs a restart (§4.1).
+    #[serde(default = "default_max_peers")]
+    pub max_peers: usize,
+}
+
+fn default_max_peers() -> usize {
+    MAX_CERTIFICATE_PEERS
+}
+
+impl PkiSection {
+    /// The core's `[pki]`; errors carry the §18.7 configuration reasons (`bad_ca_key`,
+    /// `bad_revoked_entry`). The own certificate is checked by [`NodeConfig::own_pki`].
+    pub fn pki(&self) -> Result<Pki, String> {
+        if !(1..=MAX_CA_KEYS).contains(&self.ca_keys.len()) {
+            return Err(format!("pki.ca_keys: 1 to {MAX_CA_KEYS} keys"));
+        }
+        let named =
+            |field: &str, entry: &str, e: Reject| format!("pki.{field}: {entry}: {}", e.as_str());
+        let ca_keys = (self.ca_keys.iter())
+            .map(|k| CaKey::from_text(k).map_err(|e| named("ca_keys", k, e)))
+            .collect::<Result<_, _>>()?;
+        let revoked = (self.revoked.iter())
+            .map(|r| r.parse::<Revoked>().map_err(|e| named("revoked", r, e)))
+            .collect::<Result<_, _>>()?;
+        let certificate =
+            cert::from_text(&self.certificate).ok_or("pki.certificate: not standard base64")?;
+        if self.max_peers == 0 {
+            return Err("pki.max_peers must be at least 1".into());
+        }
+        Ok(Pki {
+            ca_keys,
+            certificate,
+            revoked,
+            prefixes: (self.routes()?.iter())
+                .map(|r| Prefix::new(r.address, r.length).expect("length checked"))
+                .collect(),
+            max_peers: self.max_peers,
+        })
+    }
+
+    /// `prefixes` as routes to the tunnel.
+    pub fn routes(&self) -> Result<Vec<Route>, String> {
+        self.prefixes.iter().map(|p| prefix(p)).collect()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -320,13 +388,22 @@ impl NodeConfig {
             ("firewall", self.firewall == new.firewall),
             ("log", self.log == new.log),
             ("metrics", self.metrics == new.metrics),
+            ("pki", max_peers(&self.pki) == max_peers(&new.pki)),
         ])
     }
 
-    /// Spec §4.1: what a reload runs with, `new`'s lists and this file's restart-only
-    /// sections, validated as at start (an address moved from the node to a peer, or an
-    /// IPv6 peer under a running MTU below 1280, is refused although `new` alone is valid).
+    /// Spec §4.1: what a reload runs with, `new`'s lists and `[pki]` values with this file's
+    /// restart-only sections, the presence of `[pki]` and its `max_peers` included, validated
+    /// as at start (an address moved from the node to a peer, or an IPv6 peer under a
+    /// running MTU below 1280, is refused although `new` alone is valid).
     pub fn with_lists(&self, new: Self) -> Result<Self, String> {
+        let pki = match (&self.pki, new.pki) {
+            (Some(running), Some(new)) => Some(PkiSection {
+                max_peers: running.max_peers,
+                ..new
+            }),
+            (running, _) => running.clone(),
+        };
         let effective = Self {
             node: self.node.clone(),
             firewall: self.firewall.clone(),
@@ -335,6 +412,7 @@ impl NodeConfig {
             peers: new.peers,
             lighthouses: new.lighthouses,
             relays: new.relays,
+            pki,
         };
         effective
             .validate()
@@ -420,8 +498,35 @@ impl NodeConfig {
         if node.mtu < 1280 && addresses.iter().any(IpAddr::is_ipv6) {
             return Err("node.mtu below 1280 leaves no IPv6 on the interface".into());
         }
+        if let Some(pki) = &self.pki {
+            pki.pki()?;
+        }
         // log.level is checked by the daemon, which owns the tracing subscriber.
         Ok(())
+    }
+
+    /// Spec §4.2: the `[pki]` to install, its own certificate checked against `own` (§4.3
+    /// steps 4 to 7 and 9, not its validity) and certifying exactly `[node] addresses`.
+    /// `None` without `[pki]`. At start and at every reload, before anything is applied.
+    pub fn own_pki(&self, own: &PublicKey) -> Result<Option<Pki>, String> {
+        let Some(section) = &self.pki else {
+            return Ok(None);
+        };
+        let pki = section.pki()?;
+        let record = (pki.check_own(own)).map_err(|e| {
+            format!(
+                "pki.certificate: {} (own certificate, spec §4.2)",
+                e.as_str()
+            )
+        })?;
+        let mut certified = record.fields.addresses;
+        let mut addresses = self.addresses();
+        certified.sort();
+        addresses.sort();
+        if certified != addresses {
+            return Err("pki.certificate: its addresses are not exactly node.addresses".into());
+        }
+        Ok(Some(pki))
     }
 
     /// The node's own overlay addresses, validated by [`NodeConfig::parse`].
@@ -463,6 +568,32 @@ pub fn host_address(text: &str) -> Result<IpAddr, String> {
         return Err(format!("address {text}: only /{full} is accepted in v0"));
     }
     Ok(ip)
+}
+
+/// `[pki] prefixes` entry: `10.1.0.0/16` or `fd00:1::/48`, no host bit set (a kernel route).
+pub fn prefix(text: &str) -> Result<Route, String> {
+    let bad = || format!("pki.prefixes: {text}: expected an address/length with no host bit set");
+    let (ip, length) = text.split_once('/').ok_or_else(bad)?;
+    let address: IpAddr = ip.parse().map_err(|_| bad())?;
+    let length: u8 = length.parse().map_err(|_| bad())?;
+    let (bits, width) = match address {
+        IpAddr::V4(a) => (u128::from(u32::from(a)), 32),
+        IpAddr::V6(a) => (u128::from(a), 128),
+    };
+    if length > width {
+        return Err(bad());
+    }
+    let host = u128::MAX
+        .checked_shr(u32::from(128 - width + length))
+        .unwrap_or(0);
+    if bits & host != 0 {
+        return Err(bad());
+    }
+    Ok(Route { address, length })
+}
+
+fn max_peers(pki: &Option<PkiSection>) -> Option<usize> {
+    pki.as_ref().map(|p| p.max_peers)
 }
 
 /// `host:port` or `[v6]:port`; the host is resolved by the IO layer.
@@ -779,6 +910,191 @@ listen = "127.0.0.1:9481"
             "restart-only kept"
         );
         assert_eq!(effective.peers[0].addresses, ["10.0.0.3/32"]);
+    }
+
+    /// Node key `[1; 32]`; its certificate for `addresses`, signed by the CA seed `[ca; 32]`.
+    fn certificate(ca: u8, addresses: &[&str], not_after: u64) -> String {
+        let fields = cert::Fields {
+            name: "a".into(),
+            public_key: own(),
+            addresses: addresses.iter().map(|a| a.parse().unwrap()).collect(),
+            groups: Vec::new(),
+            not_before: 1,
+            not_after,
+        };
+        cert::to_text(&cert::sign(&[ca; 32], &fields).unwrap())
+    }
+
+    fn own() -> PublicKey {
+        kekkai_core::keys::StaticKey::from_bytes([1; 32])
+            .clamped()
+            .public()
+    }
+
+    fn ca(seed: u8) -> String {
+        kekkai_core::keys::public_key_to_text(&cert::ca_public(&[seed; 32]))
+    }
+
+    /// A node at 10.0.0.1 and fd00::1 with a `[pki]` trusting CA 7, `extra` lines appended.
+    fn pki_file(certificate: &str, extra: &str) -> String {
+        format!(
+            "[node]\nprivate_key_file = \"/k\"\naddresses = [\"10.0.0.1/32\", \"fd00::1/128\"]\n\
+             [pki]\nca_keys = [\"{}\"]\ncertificate = \"{certificate}\"\n\
+             prefixes = [\"10.0.0.0/16\", \"fd00::/64\"]\n{extra}",
+            ca(7)
+        )
+    }
+
+    /// Spec §4.2 to §4.4, ADR 0034: the section, its defaults and its prefixes as routes.
+    #[test]
+    fn pki_section() {
+        let good = certificate(7, &["10.0.0.1", "fd00::1"], u64::MAX);
+        let c = NodeConfig::parse(&pki_file(&good, "")).unwrap();
+        let section = c.pki.as_ref().unwrap();
+        assert_eq!(section.max_peers, 256);
+        let pki = c.own_pki(&own()).unwrap().unwrap();
+        assert!(pki.revoked.is_empty());
+        assert_eq!(pki.max_peers, 256);
+        let routes: Vec<String> = section
+            .routes()
+            .unwrap()
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
+        assert_eq!(routes, ["10.0.0.0/16", "fd00::/64"]);
+        assert!(
+            NodeConfig::parse(EXAMPLE)
+                .unwrap()
+                .own_pki(&own())
+                .unwrap()
+                .is_none()
+        );
+        let revoked = format!("revoked = [\"key:{PUB_A}\", \"cert:{PUB_B}\"]\nmax_peers = 8\n");
+        let c = NodeConfig::parse(&pki_file(&good, &revoked)).unwrap();
+        let pki = c.own_pki(&own()).unwrap().unwrap();
+        assert_eq!((pki.revoked.len(), pki.max_peers), (2, 8));
+        // Validity is not checked on the own certificate (§4.2).
+        let expired = certificate(7, &["10.0.0.1", "fd00::1"], 2);
+        let c = NodeConfig::parse(&pki_file(&expired, "")).unwrap();
+        assert!(c.own_pki(&own()).is_ok());
+    }
+
+    /// Spec §4.2, §4.3, §18.7: what start and reload refuse, with the reason named.
+    #[test]
+    fn pki_refusals() {
+        let good = certificate(7, &["10.0.0.1", "fd00::1"], u64::MAX);
+        let base = pki_file(&good, "");
+        // 32 bytes of the identity point (small order), and a non-canonical y = p.
+        let small = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let non_canonical = "7f///////////////////////////////////////38=";
+        for (from, to, want) in [
+            (ca(7), small.to_string(), "pki.ca_keys: AQAA"),
+            (ca(7), non_canonical.to_string(), "bad_ca_key"),
+            (ca(7), "AAAA".into(), "bad_ca_key"),
+            (
+                ca(7),
+                format!("{}\", \"{}\", \"{}", ca(7), ca(8), ca(9)),
+                "1 to 2 keys",
+            ),
+            (format!("[\"{}\"]", ca(7)), "[]".into(), "1 to 2 keys"),
+            (
+                "10.0.0.0/16".into(),
+                "10.0.0.1/16".into(),
+                "pki.prefixes: 10.0.0.1/16",
+            ),
+            ("10.0.0.0/16".into(), "10.0.0.0/33".into(), "no host bit"),
+            ("fd00::/64".into(), "fd00::".into(), "pki.prefixes"),
+            (
+                good.clone(),
+                "not base64!".into(),
+                "pki.certificate: not standard base64",
+            ),
+            ("prefixes".into(), "prefixe".into(), "unknown field"),
+        ] {
+            let err = NodeConfig::parse(&base.replacen(&from, &to, 1)).unwrap_err();
+            assert!(err.contains(want), "{to}: {err}");
+        }
+        for (entry, want) in [
+            (format!("key:{PUB_A}"), None),
+            (format!("cert:{PUB_A}"), None),
+            (format!("KEY:{PUB_A}"), Some("bad_revoked_entry")),
+            (format!("key: {PUB_A}"), Some("bad_revoked_entry")),
+            (PUB_A.to_string(), Some("bad_revoked_entry")),
+            (
+                "key:AAAA".into(),
+                Some("pki.revoked: key:AAAA: bad_revoked_entry"),
+            ),
+        ] {
+            let text = pki_file(&good, &format!("revoked = [\"{entry}\"]\n"));
+            match want {
+                None => assert!(NodeConfig::parse(&text).is_ok(), "{entry}"),
+                Some(want) => {
+                    let err = NodeConfig::parse(&text).unwrap_err();
+                    assert!(err.contains(want), "{entry}: {err}");
+                }
+            }
+        }
+        let zero = pki_file(&good, "max_peers = 0\n");
+        assert!(NodeConfig::parse(&zero).unwrap_err().contains("max_peers"));
+        // The own certificate (§4.2): checked against the node's key, CA keys, prefixes and
+        // exact addresses.
+        let own_err = |certificate: String| {
+            let c = NodeConfig::parse(&pki_file(&certificate, "")).unwrap();
+            c.own_pki(&own()).unwrap_err()
+        };
+        let other_ca = certificate(8, &["10.0.0.1", "fd00::1"], u64::MAX);
+        assert!(own_err(other_ca).contains("pki.certificate: bad_signature"));
+        let outside = certificate(7, &["10.1.0.1", "fd00::1"], u64::MAX);
+        assert!(own_err(outside).contains("address_outside_prefixes"));
+        let fewer = certificate(7, &["10.0.0.1"], u64::MAX);
+        assert!(own_err(fewer).contains("not exactly node.addresses"));
+        assert!(own_err("AAAA".into()).contains("bad_length"));
+        let c = NodeConfig::parse(&base).unwrap();
+        let other = kekkai_core::keys::StaticKey::from_bytes([2; 32]).public();
+        assert!(c.own_pki(&other).unwrap_err().contains("wrong_key"));
+    }
+
+    /// Spec §4.1: `[pki]` values reload; its presence and `max_peers` need a restart, and the
+    /// running ones are kept while the rest applies.
+    #[test]
+    fn pki_reload_decisions() {
+        let good = certificate(7, &["10.0.0.1", "fd00::1"], u64::MAX);
+        let parse = |text: &str| NodeConfig::parse(text).unwrap();
+        let plain = parse(&plain_text());
+        let on = parse(&pki_file(&good, ""));
+        let revoked = parse(&pki_file(&good, &format!("revoked = [\"key:{PUB_A}\"]\n")));
+        let resized = parse(&pki_file(
+            &good,
+            &format!("revoked = [\"key:{PUB_A}\"]\nmax_peers = 8\n"),
+        ));
+        assert!(on.restart_sections(&revoked).is_empty());
+        assert_eq!(on.restart_sections(&resized), ["pki"]);
+        assert_eq!(plain.restart_sections(&on), ["pki"]);
+        assert_eq!(on.restart_sections(&plain), ["pki"]);
+        let effective = on.with_lists(resized).unwrap();
+        let section = effective.pki.unwrap();
+        assert_eq!(
+            (section.max_peers, section.revoked.len()),
+            (256, 1),
+            "max_peers kept, rest applied"
+        );
+        assert!(
+            plain
+                .with_lists(on.with_lists(revoked).unwrap())
+                .unwrap()
+                .pki
+                .is_none(),
+            "stays off"
+        );
+        assert_eq!(
+            on.with_lists(parse(&plain_text())).unwrap().pki,
+            on.pki,
+            "stays on"
+        );
+    }
+
+    fn plain_text() -> String {
+        "[node]\nprivate_key_file = \"/k\"\naddresses = [\"10.0.0.1/32\", \"fd00::1/128\"]\n".into()
     }
 
     #[test]

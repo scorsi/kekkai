@@ -3,7 +3,7 @@
 //! `utunN` name; the daemon logs it. Every packet carries a 4-byte address family header in
 //! network order, added and removed here. Needs root (the LaunchDaemon runs as root, 0018).
 //!
-//! MTU, addresses and host routes are set with `/sbin/ifconfig` and `/sbin/route`, as
+//! MTU, addresses and routes are set with `/sbin/ifconfig` and `/sbin/route`, as
 //! `wg-quick` does on macOS: the routing-socket message format is undocumented and the
 //! commands are part of the base system. The interface and its routes disappear with the
 //! descriptor when the daemon exits.
@@ -16,6 +16,8 @@ use std::process::Command;
 
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
+
+use crate::Route;
 
 const CONTROL_NAME: &[u8] = b"com.apple.net.utun_control";
 
@@ -47,8 +49,8 @@ fn family_header(packet: &[u8]) -> io::Result<[u8; 4]> {
     Ok((family as u32).to_be_bytes())
 }
 
-/// The commands that configure `name` (spec §11: host routes only, ADR 0010).
-fn commands(name: &str, mtu: u16, addresses: &[IpAddr], routes: &[IpAddr]) -> Vec<Vec<String>> {
+/// The commands that configure `name` (spec §11, §4.4).
+fn commands(name: &str, mtu: u16, addresses: &[IpAddr], routes: &[Route]) -> Vec<Vec<String>> {
     let mut all = vec![vec![
         "/sbin/ifconfig".into(),
         name.into(),
@@ -85,12 +87,12 @@ fn commands(name: &str, mtu: u16, addresses: &[IpAddr], routes: &[IpAddr]) -> Ve
     all
 }
 
-/// `/sbin/route add` (`add`) or `delete` of the host route of `route` towards `name`.
-fn route_command(name: &str, route: IpAddr, add: bool) -> Vec<String> {
-    let (family, len) = if route.is_ipv4() {
-        ("-inet", 32)
+/// `/sbin/route add` (`add`) or `delete` of `route` towards `name`.
+fn route_command(name: &str, route: Route, add: bool) -> Vec<String> {
+    let family = if route.address.is_ipv4() {
+        "-inet"
     } else {
-        ("-inet6", 128)
+        "-inet6"
     };
     vec![
         "/sbin/route".into(),
@@ -98,15 +100,15 @@ fn route_command(name: &str, route: IpAddr, add: bool) -> Vec<String> {
         "-n".into(),
         if add { "add" } else { "delete" }.into(),
         family.into(),
-        format!("{route}/{len}"),
+        route.to_string(),
         "-interface".into(),
         name.into(),
     ]
 }
 
-/// Adds (`add`) or deletes the host route of `route` towards `name` (spec §11): at start and
-/// when a reload changes the peers' addresses (§4.1).
-pub fn set_route(name: &str, route: IpAddr, add: bool) -> io::Result<()> {
+/// Adds (`add`) or deletes `route` towards `name` (spec §11, §4.4): at start and when a
+/// reload changes the peers' addresses or the `[pki]` prefixes (§4.1).
+pub fn set_route(name: &str, route: Route, add: bool) -> io::Result<()> {
     run(&route_command(name, route, add))
 }
 
@@ -124,8 +126,8 @@ fn run(command: &[String]) -> io::Result<()> {
 
 impl Utun {
     /// Creates a `utunN` interface, sets its MTU, brings it up, assigns `addresses` (each a
-    /// `/32` or `/128`) and adds one host route per entry of `routes` towards it.
-    pub fn create(mtu: u16, addresses: &[IpAddr], routes: &[IpAddr]) -> io::Result<Self> {
+    /// `/32` or `/128`) and adds every entry of `routes` towards it.
+    pub fn create(mtu: u16, addresses: &[IpAddr], routes: &[Route]) -> io::Result<Self> {
         // SAFETY: plain syscall; the returned descriptor is owned from here on.
         let raw = check(unsafe {
             libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL)
@@ -253,7 +255,14 @@ mod tests {
     #[test]
     fn configuration_commands() {
         let addresses = ["10.0.0.1".parse().unwrap(), "fd00::1".parse().unwrap()];
-        let routes = ["10.0.0.2".parse().unwrap(), "fd00::2".parse().unwrap()];
+        let routes = [
+            Route::host("10.0.0.2".parse().unwrap()),
+            Route::host("fd00::2".parse().unwrap()),
+            Route {
+                address: "10.1.0.0".parse().unwrap(),
+                length: 16,
+            },
+        ];
         let lines: Vec<String> = commands("utun7", 1280, &addresses, &routes)
             .iter()
             .map(|c| c.join(" "))
@@ -266,9 +275,11 @@ mod tests {
                 "/sbin/ifconfig utun7 inet6 fd00::1 prefixlen 128 alias",
                 "/sbin/route -q -n add -inet 10.0.0.2/32 -interface utun7",
                 "/sbin/route -q -n add -inet6 fd00::2/128 -interface utun7",
+                "/sbin/route -q -n add -inet 10.1.0.0/16 -interface utun7",
             ]
         );
-        let delete = route_command("utun7", "fd00::2".parse().unwrap(), false).join(" ");
+        let fd00 = Route::host("fd00::2".parse().unwrap());
+        let delete = route_command("utun7", fd00, false).join(" ");
         assert_eq!(
             delete,
             "/sbin/route -q -n delete -inet6 fd00::2/128 -interface utun7"
