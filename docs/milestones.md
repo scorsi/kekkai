@@ -257,6 +257,8 @@ Not exercised on the real network, covered only by `nixosTest reload` or not at 
 
 ## v1.1 — Discovery by certificate
 
+**Parked 2026-10-29 (v1.1 to v1.3)**: every node of the deployment is declared and reloads its lists hot (0026), so certificates bring no gain there while they widen what an outside node can reach. They resume when a node outside the deployment (a phone, a laptop, a short-lived VM) needs to join. v1.0 stays shipped and dormant: no `[pki]`, v0 behaviour.
+
 **Objective**: a new node joins with only its own configuration.
 
 **Deliverables**: lighthouse and relay admission by certificate, certificate storage, lighthouse query by overlay address, certificate in the reply and the punch.
