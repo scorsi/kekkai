@@ -2402,3 +2402,41 @@ fn a_party_without_pki_skips_the_certificate() {
     let extra = 3 + certificate(&CA_SEED, a, 0, YEAR).len();
     assert!(lengths.contains(&(151 + extra)), "{lengths:?}");
 }
+
+/// Review finding (v1.0): A stages a packet for C's address, then C's message 2 carries a
+/// renewed certificate that no longer holds it. The packet is dropped, not sent to C (§4.1,
+/// §4.4): the record applies before the staged packets leave (§7.7 step 7).
+#[test]
+fn a_renewal_in_message_2_drops_packets_staged_for_a_withdrawn_address() {
+    let mut sim = pki_sim(78, 3);
+    let c = sim.hosts[2].key;
+    sim.pings(2, 0, secs(3));
+    assert!(sim.hosts[0].node.certificate_peer(&c).is_some());
+    // C's keepalives would rekey forever: cut the link until A's sessions are gone.
+    sim.partitions.extend([(0, 2), (2, 0)]);
+    sim.run_until(secs(600));
+    let fields = cert::Fields {
+        name: "host-2".into(),
+        public_key: c,
+        addresses: vec![address(5)],
+        groups: Vec::new(),
+        not_before: EPOCH as u64,
+        not_after: YEAR,
+    };
+    sim.set_pki(2, cert::sign(&CA_SEED, &fields).unwrap(), Vec::new());
+    let t = sim.now;
+    sim.partitions.clear();
+    sim.send_ip(0, 2).unwrap();
+    assert_eq!(sim.status(0, 2).staged_packets, 1);
+    sim.run_until(secs(605));
+    let record = sim.hosts[0]
+        .node
+        .certificate_peer(&c)
+        .expect("still a peer");
+    assert_eq!(record.fields.addresses, [address(5)]);
+    assert!(sim.status(0, 2).sessions > 0, "the handshake completed");
+    assert!(
+        sim.received(2, 0, t).is_empty(),
+        "nothing for 10.0.0.3 reached C"
+    );
+}

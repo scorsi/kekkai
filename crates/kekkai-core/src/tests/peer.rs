@@ -99,7 +99,8 @@ impl Party {
                     Some(&self.peer.remote_static)
                 );
                 let identity = vec![self.peer.remote_static];
-                Ok((None, self.peer.handle_resp(&mut ctx, &resp, &identity)?.0))
+                self.peer.handle_resp(&mut ctx, &resp, &identity)?;
+                Ok((None, self.peer.send_after_resp(&mut ctx)))
             }
             Outer::Data(data) => {
                 assert_eq!(

@@ -244,15 +244,15 @@ impl Peer {
         Ok(datagram)
     }
 
-    /// §7.7. The caller did §5.6 and routed by `receiver_index`; `identity` verifies the
-    /// responder with a PKI (step 3). Returns the staged packets or a keepalive on the new
-    /// session, and the certificate record of a certificate peer.
+    /// §7.7 steps 1 to 5. The caller did §5.6 and routed by `receiver_index`; `identity`
+    /// verifies the responder with a PKI (step 3). Returns the certificate record of a
+    /// certificate peer; the caller applies it (§4.4), then calls [`Peer::send_after_resp`].
     pub fn handle_resp(
         &mut self,
         ctx: &mut Ctx<'_>,
         resp: &HandshakeResp<'_>,
         identity: &dyn Identity,
-    ) -> Result<(Vec<Vec<u8>>, Option<Record>), DropReason> {
+    ) -> Result<Option<Record>, DropReason> {
         self.expire(ctx);
         let flight = self
             .in_flight
@@ -277,12 +277,17 @@ impl Peer {
         self.last_handshake = Some(ctx.now);
         self.counters.handshakes_initiated += 1;
         self.after_authenticated_receive();
-        let out = if self.staged.is_empty() {
+        Ok(verified.record)
+    }
+
+    /// §7.7 step 7, once the responder's record is applied: a certificate that withdrew an
+    /// address has dropped the staged packets (§4.1), which must not leave first.
+    pub fn send_after_resp(&mut self, ctx: &mut Ctx<'_>) -> Vec<Vec<u8>> {
+        if self.staged.is_empty() {
             self.send_keepalive(ctx)
         } else {
             self.send_staged(ctx)
-        };
-        Ok((out, verified.record))
+        }
     }
 
     /// §8.2 steps 1 to 5 and the responder rekey rule (§8.6). Returns the inner plaintext

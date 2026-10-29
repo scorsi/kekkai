@@ -818,11 +818,12 @@ impl Node {
                 let identity = identity!(self, wall);
                 let peer = self.peers.get_mut(&key).expect("indices point at peers");
                 let before = peer.last_handshake;
-                let (out, record) =
-                    peer.handle_resp(&mut ctx!(self, now, wall), &resp, &identity)?;
+                let record = peer.handle_resp(&mut ctx!(self, now, wall), &resp, &identity)?;
                 if let Some(record) = record {
                     self.store_record(now, key, record);
                 }
+                let peer = self.peers.get_mut(&key).expect("still listed");
+                let out = peer.send_after_resp(&mut ctx!(self, now, wall));
                 sends.extend(out.into_iter().map(|d| (key, None, d)));
                 (key, resp.receiver_index, None, before, true)
             }
