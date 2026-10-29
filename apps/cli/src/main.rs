@@ -1,9 +1,12 @@
 //! kekkai — the CLI (ADR 0015, 0033): `keygen` and `pubkey` run locally with kekkai-core's key
 //! code, `status` is a thin gRPC client of a daemon's control socket. Same commands, messages
 //! and exit codes as the Go CLI it replaced, except that `--json` is optional (the only format).
+//! `ca keygen`, `cert sign` and `cert show` (ADR 0034) run offline with kekkai-core's
+//! certificate code; the CA private key only ever passes through pipes, to and from `age`.
 
 use std::error::Error;
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv6Addr};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -11,7 +14,8 @@ use std::time::Duration;
 use hyper_util::rt::TokioIo;
 use kekkai_control::v1::control_service_client::ControlServiceClient;
 use kekkai_control::v1::{GetStatusRequest, GetStatusResponse};
-use kekkai_core::keys::{StaticKey, public_key_to_text};
+use kekkai_core::cert::{self, CaKey, Fields, Pki, Prefix, Reject};
+use kekkai_core::keys::{StaticKey, public_key_from_text, public_key_to_text};
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, SerializeOptions};
 use serde_json::ser::{PrettyFormatter, Serializer};
@@ -24,6 +28,15 @@ const USAGE: &str = "usage:
   kekkai status [--json] [--socket PATH]
                          print the node's status (protojson); --socket reads another
                          daemon's control socket, e.g. /run/kekkai-lighthouse/control.sock
+  kekkai ca keygen       write a new CA private key to stdout (pipe it to age -e), its
+                         public key to stderr
+  kekkai cert sign --key PUBKEY --name NAME --address ADDR... [--group GROUP]...
+                   [--days DAYS]
+                         read the CA private key on stdin (from age -d), print a
+                         certificate valid DAYS days (default 365), back-dated an hour
+  kekkai cert show --ca CAKEY...
+                         read a certificate on stdin, print its fields, fingerprint and
+                         deny-list entries, and verify it against CAKEY now
   kekkai --version";
 
 /// The node's control socket (ADR 0015).
@@ -51,6 +64,16 @@ fn run(args: &[&str]) -> Result<(), String> {
         ["keygen"] => keygen(None),
         ["keygen", file] => keygen(Some(file)),
         ["pubkey"] => pubkey(),
+        ["ca", "keygen"] => ca_keygen(),
+        ["cert", "sign", options @ ..] => {
+            let seed = read_stdin()?;
+            out(&cert_sign(options, &seed, unix_now())?)
+        }
+        ["cert", "show", options @ ..] => {
+            let (text, verdict) = cert_show(options, &read_stdin()?, unix_now())?;
+            out(&text)?;
+            verdict.map_err(|r| format!("certificate {}", r.as_str()))
+        }
         ["status"] | ["status", "--json"] => status(CONTROL_SOCKET),
         ["status", "--socket", socket] | ["status", "--json", "--socket", socket] => status(socket),
         [command, ..] => Err(format!("unknown command {command:?}\n{USAGE}")),
@@ -103,6 +126,150 @@ fn pubkey() -> Result<(), String> {
         })?;
     let key = StaticKey::from_file_text(text).ok_or("not a base64 32-byte key")?;
     out(&(public_key_to_text(&key.public()) + "\n"))
+}
+
+/// At most 4096 bytes of stdin, as `pubkey` reads.
+fn read_stdin() -> Result<String, String> {
+    let mut text = String::new();
+    std::io::stdin()
+        .take(4096)
+        .read_to_string(&mut text)
+        .map_err(|e| lower(&e))?;
+    Ok(text)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs()
+}
+
+/// A new CA key: the 32-byte RFC 8032 seed (spec §4.2) in the key text form on stdout, never in
+/// a file, so that it reaches the disk only encrypted (`kekkai ca keygen | age -e ...`). The
+/// public key, for `[pki] ca_keys`, goes to stderr.
+fn ca_keygen() -> Result<(), String> {
+    let seed = ca_seed()?;
+    out(&(public_key_to_text(&seed) + "\n"))?;
+    eprintln!(
+        "CA public key: {}",
+        public_key_to_text(&cert::ca_public(&seed))
+    );
+    Ok(())
+}
+
+fn ca_seed() -> Result<[u8; 32], String> {
+    let mut seed = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut seed))
+        .map_err(|e| format!("/dev/urandom: {}", lower(&e)))?;
+    Ok(seed)
+}
+
+/// `cert sign`: the certificate's text form and a newline. The signer's rules are the core's
+/// (spec §4.2); `not_before` is `now` minus an hour, `not_after` `now` plus the lifetime.
+fn cert_sign(options: &[&str], seed: &str, now: u64) -> Result<String, String> {
+    let (mut key, mut name, mut addresses, mut groups, mut days) =
+        (None, None, Vec::new(), Vec::new(), 365u64);
+    for pair in options.chunks(2) {
+        let [option, value] = pair else {
+            return Err(format!("missing value after {}\n{USAGE}", pair[0]));
+        };
+        match *option {
+            "--key" => {
+                key = Some(public_key_from_text(value).ok_or("--key: not a base64 32-byte key")?)
+            }
+            "--name" => name = Some(value.to_string()),
+            "--address" => addresses.push(
+                value
+                    .parse::<IpAddr>()
+                    .map_err(|_| format!("--address: not an IP address: {value}"))?,
+            ),
+            "--group" => groups.push(value.to_string()),
+            "--days" => {
+                days = value
+                    .parse()
+                    .ok()
+                    .filter(|d| *d > 0)
+                    .ok_or("--days: a whole number of days, at least 1")?
+            }
+            _ => return Err(format!("unknown option {option:?}\n{USAGE}")),
+        }
+    }
+    let seed = public_key_from_text(seed).ok_or("stdin: not a base64 32-byte CA key")?;
+    let fields = Fields {
+        public_key: key.ok_or("--key is required")?,
+        name: name.ok_or("--name is required")?,
+        addresses,
+        groups,
+        not_before: now.saturating_sub(3600),
+        not_after: days
+            .checked_mul(86_400)
+            .and_then(|l| now.checked_add(l))
+            .ok_or("--days: too large")?,
+    };
+    Ok(cert::to_text(&cert::sign(&seed, &fields)?) + "\n")
+}
+
+/// `cert show`: the fields, the fingerprint, the two deny-list entries (spec §4.3 step 1) and
+/// the verdict of §4.3 steps 4 to 8 against the given CA keys at `now`. A certificate that
+/// fails verification is still printed, so that an expired one shows its `not_after`.
+fn cert_show(
+    options: &[&str],
+    text: &str,
+    now: u64,
+) -> Result<(String, Result<(), Reject>), String> {
+    let mut ca_keys = Vec::new();
+    for pair in options.chunks(2) {
+        match pair {
+            ["--ca", value] => ca_keys.push(
+                CaKey::from_text(value)
+                    .map_err(|_| format!("--ca: not a valid CA key: {value}"))?,
+            ),
+            _ => return Err(format!("usage: kekkai cert show --ca CAKEY...\n{USAGE}")),
+        }
+    }
+    if !(1..=kekkai_core::MAX_CA_KEYS).contains(&ca_keys.len()) {
+        return Err("cert show: one or two --ca keys".into());
+    }
+    let certificate = cert::from_text(text).ok_or("stdin: not a base64 certificate")?;
+    let body = (certificate.len() > 64 && certificate.len() <= kekkai_core::MAX_CERTIFICATE)
+        .then(|| &certificate[..certificate.len() - 64])
+        .ok_or("certificate bad_length")?;
+    let fields = cert::parse_body(body).ok_or("certificate malformed")?;
+    let fingerprint = cert::fingerprint(&certificate);
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            "-".into()
+        } else {
+            items.join(" ")
+        }
+    };
+    let printed = format!(
+        "name: {}\npublic_key: {}\naddresses: {}\ngroups: {}\nnot_before: {}\nnot_after: {}\n\
+         fingerprint: {}\ndeny_key: key:{}\ndeny_cert: cert:{}\n",
+        fields.name,
+        public_key_to_text(&fields.public_key),
+        list(fields.addresses.iter().map(IpAddr::to_string).collect()),
+        list(fields.groups.clone()),
+        fields.not_before,
+        fields.not_after,
+        public_key_to_text(&fingerprint),
+        public_key_to_text(&fields.public_key),
+        public_key_to_text(&fingerprint),
+    );
+    // Every address is inside `::/0`: prefixes are the verifying party's, not the CA's.
+    let pki = Pki {
+        ca_keys,
+        certificate: Vec::new(),
+        revoked: Vec::new(),
+        prefixes: vec![Prefix::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0).expect("::/0")],
+        max_peers: 1,
+    };
+    let verdict = pki
+        .check(&certificate, &fields.public_key, Some(now))
+        .map(drop);
+    Ok((printed, verdict))
 }
 
 fn status(socket: &str) -> Result<(), String> {
@@ -298,6 +465,163 @@ mod tests {
         assert!(text.ends_with('\n') && key.to_text() == key.clamped().to_text());
         assert!(keygen(Some(path)).unwrap_err().contains("file exists"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn ca() -> (String, String) {
+        let seed = [7u8; 32];
+        (
+            public_key_to_text(&seed) + "\n",
+            public_key_to_text(&cert::ca_public(&seed)),
+        )
+    }
+
+    fn sign_args<'a>(key: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec!["--key", key, "--name", "host-1", "--address", "10.0.0.1"];
+        args.extend(extra);
+        args
+    }
+
+    /// keygen -> sign -> show -> the core's identity function (ADR 0034).
+    #[test]
+    fn a_signed_certificate_shows_and_verifies() {
+        assert!(run(&["ca", "keygen", "x"]).is_err());
+        let seeds = [ca_seed().unwrap(), ca_seed().unwrap()];
+        assert_ne!(seeds[0], seeds[1]);
+        let (seed, ca_public) = ca_of(seeds[0]);
+        let seed = seed + "\n";
+        let node = StaticKey::generate().public();
+        let node_text = public_key_to_text(&node);
+        let extra = ["--address", "fd00::1", "--group", "b", "--group", "a"];
+        let text = cert_sign(&sign_args(&node_text, &extra), &seed, NOW).unwrap();
+        assert!(text.ends_with('\n') && !text.trim_end().contains('\n'));
+        let certificate = cert::from_text(&text).unwrap();
+        let fingerprint = public_key_to_text(&cert::fingerprint(&certificate));
+        let (shown, verdict) = cert_show(&["--ca", &ca_public], &text, NOW).unwrap();
+        assert_eq!(verdict, Ok(()));
+        let year = NOW + 365 * 86_400;
+        assert_eq!(
+            shown,
+            format!(
+                "name: host-1\npublic_key: {node_text}\naddresses: 10.0.0.1 fd00::1\n\
+                 groups: a b\nnot_before: {}\nnot_after: {year}\nfingerprint: {fingerprint}\n\
+                 deny_key: key:{node_text}\ndeny_cert: cert:{fingerprint}\n",
+                NOW - 3600
+            )
+        );
+        let pki = Pki {
+            ca_keys: vec![CaKey::from_text(&ca_public).unwrap()],
+            certificate: Vec::new(),
+            revoked: Vec::new(),
+            prefixes: vec![
+                Prefix::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
+                Prefix::new("fd00::".parse().unwrap(), 8).unwrap(),
+            ],
+            max_peers: 1,
+        };
+        let verified = pki.verify(&node, Some(&certificate), false, NOW).unwrap();
+        assert_eq!(verified.record.unwrap().fields.not_after, year);
+        // The deny-list forms are what `[pki] revoked` accepts and they revoke it.
+        for entry in [format!("key:{node_text}"), format!("cert:{fingerprint}")] {
+            let revoked = Pki {
+                revoked: vec![entry.parse().unwrap()],
+                ..pki.clone()
+            };
+            assert_eq!(
+                revoked
+                    .verify(&node, Some(&certificate), false, NOW)
+                    .unwrap_err(),
+                Reject::Revoked
+            );
+        }
+        // Lifetime, then the show verdicts: expired, another CA, not a certificate.
+        let short = cert_sign(&sign_args(&node_text, &["--days", "2"]), &seed, NOW).unwrap();
+        let (shown, verdict) = cert_show(&["--ca", &ca_public], &short, NOW + 2 * 86_400).unwrap();
+        assert!(shown.contains(&format!("not_after: {}\n", NOW + 2 * 86_400)));
+        assert_eq!(verdict, Err(Reject::Expired));
+        let (_, other) = ca_of([9; 32]);
+        assert_eq!(
+            cert_show(&["--ca", &other], &text, NOW).unwrap().1,
+            Err(Reject::BadSignature)
+        );
+        assert!(cert_show(&["--ca", &ca_public], "not base64!", NOW).is_err());
+        assert!(cert_show(&[], &text, NOW).is_err());
+        let oversize = cert::to_text(&[0; kekkai_core::MAX_CERTIFICATE + 1]);
+        assert_eq!(
+            cert_show(&["--ca", &ca_public], &oversize, NOW).unwrap_err(),
+            "certificate bad_length"
+        );
+        assert!(cert_show(&["--ca", "AAAA"], &text, NOW).is_err());
+    }
+
+    fn ca_of(seed: [u8; 32]) -> (String, String) {
+        (
+            public_key_to_text(&seed),
+            public_key_to_text(&cert::ca_public(&seed)),
+        )
+    }
+
+    /// A failed `age -d` (wrong passphrase or identity) leaves stdin empty or partial; the
+    /// signer refuses it, and every field the signer's rules refuse (spec §4.2).
+    #[test]
+    fn cert_sign_refuses_a_bad_ca_key_and_bad_fields() {
+        let (seed, _) = ca();
+        let key = public_key_to_text(&StaticKey::generate().public());
+        for bad_seed in ["", "age: error: no identity matched\n", &seed[..20]] {
+            assert_eq!(
+                cert_sign(&sign_args(&key, &[]), bad_seed, NOW).unwrap_err(),
+                "stdin: not a base64 32-byte CA key"
+            );
+        }
+        let five: Vec<String> = (1..=5).map(|i| format!("10.0.0.{}", i + 1)).collect();
+        let mut too_many = vec![];
+        for a in &five {
+            too_many.extend(["--address", a.as_str()]);
+        }
+        let groups: Vec<String> = (0..17).map(|i| format!("g{i}")).collect();
+        let mut too_many_groups = vec![];
+        for g in &groups {
+            too_many_groups.extend(["--group", g.as_str()]);
+        }
+        let refused = [
+            vec!["--days", "0"],
+            vec!["--days", "-1"],
+            vec!["--days", "999999999999999"],
+            vec!["--name", "-bad"],
+            too_many,
+            too_many_groups,
+            vec!["--group", "UPPER"],
+            vec!["--address", "10.0.0.1"],
+            vec!["--key"],
+            vec!["--color", "red"],
+        ];
+        for extra in refused {
+            assert!(
+                cert_sign(&sign_args(&key, &extra), &seed, NOW).is_err(),
+                "{extra:?}"
+            );
+        }
+        assert!(cert_sign(&["--name", "x", "--address", "10.0.0.1"], &seed, NOW).is_err());
+        // The largest certificate the signer's rules allow stays within MAX_CERTIFICATE, and
+        // an inverted window is refused by the same core signer `cert sign` calls.
+        let mut largest = Fields {
+            name: "n".repeat(63),
+            public_key: [1; 32],
+            addresses: (1..=4u16)
+                .map(|i| IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, i)))
+                .collect(),
+            groups: (0..16).map(|i| format!("{i:0>32}")).collect(),
+            not_before: NOW,
+            not_after: NOW + 1,
+        };
+        let seed = public_key_from_text(&seed).unwrap();
+        assert!(cert::sign(&seed, &largest).unwrap().len() <= kekkai_core::MAX_CERTIFICATE);
+        largest.not_after = NOW;
+        assert_eq!(
+            cert::sign(&seed, &largest).unwrap_err(),
+            "not_before must be before not_after"
+        );
     }
 
     /// The shared vectors (ADR 0015), through the core functions `pubkey` calls.
